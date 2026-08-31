@@ -18,6 +18,10 @@ fn main() -> eframe::Result {
     let cfg = config::load();
     let handle = state::AppHandle::new();
 
+    // 把 LocalConfig 注入 AppHandle
+    *handle.last_port.lock().unwrap() = cfg.last_port.clone();
+    *handle.auto_connect.lock().unwrap() = cfg.auto_connect;
+
     let mut options = eframe::NativeOptions::default();
     if let Some([w, h]) = cfg.window_size {
         options.viewport.inner_size = Some(Vec2::new(w, h));

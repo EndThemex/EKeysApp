@@ -225,6 +225,55 @@ impl DeviceSettings {
         d
     }
 
+    /// 合并一个快照与一份草稿：对每个字段，如果草稿"未改动"（== 旧快照），用新值；
+    /// 否则保留草稿值（草稿优先）。
+    ///
+    /// 这要求传入"推送前旧快照 old_snapshot"、"推送新快照 new_snapshot"、"草稿 draft"。
+    pub fn merge_push(
+        new_snapshot: &DeviceSettings,
+        old_snapshot: &DeviceSettings,
+        draft: &mut DeviceSettings,
+    ) {
+        macro_rules! merge_field {
+            ($f:ident) => {
+                // 草稿与旧快照相同 → 草稿"未改"，用推送值
+                // 草稿与旧快照不同 → 用户改过，保留草稿
+                // 比较用 PartialEq；DeviceSettings 实现 PartialEq
+                if draft.$f == old_snapshot.$f {
+                    draft.$f = new_snapshot.$f.clone();
+                }
+            };
+        }
+        // i32 字段直接比较
+        merge_field!(wifi_switch);
+        merge_field!(connect_host);
+        // String 字段（合并判断同上）
+        merge_field!(wifi_ssid);
+        merge_field!(wifi_password);
+        merge_field!(work_mode);
+        merge_field!(rgb_mode);
+        merge_field!(rgb_single_colar);
+        merge_field!(rgb_click_mode);
+        merge_field!(rgb_brightness);
+        merge_field!(tft_theme);
+        merge_field!(tft_brightness);
+        merge_field!(device_volume);
+        merge_field!(audio_enable);
+        merge_field!(power_mode);
+        merge_field!(voice_enable);
+        merge_field!(voice_trigger_key);
+        merge_field!(voice_max_record_ms);
+        merge_field!(voice_auto_enter);
+        merge_field!(voice_dev_pid);
+        merge_field!(voice_cuid);
+        merge_field!(voice_baidu_api_key);
+        merge_field!(voice_baidu_secret_key);
+        merge_field!(pc_status_mask);
+        merge_field!(active_keymap_profile);
+        merge_field!(active_profile_name);
+        merge_field!(active_profile_has_custom_icon);
+    }
+
     /// 应用一个 diff 增量到自身
     pub fn apply(&mut self, diff: &DeviceSettings) {
         // 仅覆盖非默认值字段。`diff` 由 `diff()` 产生，未变化的字段保持 Default。

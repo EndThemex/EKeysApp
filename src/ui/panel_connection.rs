@@ -10,6 +10,8 @@ pub struct ConnectPanelState {
     pub ports: Vec<PortInfo>,
     pub selected: Option<String>,
     pub scanning: bool,
+    /// 自动连接是否已尝试过（避免每次刷新都触发）
+    pub auto_connect_done: bool,
 }
 
 impl ConnectPanelState {
@@ -98,8 +100,26 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
             .clicked()
         {
             if let Some(name) = st.selected.clone() {
-                match LinkManager::open(&name) {
+                // reader 退出回调：调度重连任务
+                let rec = handle.reconnector();
+                match LinkManager::open(
+                    &name,
+                    std::sync::Arc::new(move || {
+                        let port = rec.last_port.lock().unwrap().clone();
+                        if let Some(p) = port {
+                            let mut slot = rec.pending_reconnect.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some(crate::state::ReconnectJob {
+                                    port_name: p,
+                                    attempt: 0,
+                                    next_at_ms: now_ms() + 1000,
+                                });
+                            }
+                        }
+                    }),
+                ) {
                     Ok(lm) => {
+                        *handle.last_port.lock().unwrap() = Some(name.clone());
                         handle.attach_link(lm);
                         handle.log_kind(crate::state::LogKind::App, format!("已连接到 {name}"));
                         let _ = handle.ui_tx.send(UiEvent::Navigate(Page::Settings));
@@ -132,4 +152,52 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
     ui.separator();
     ui.add_space(8.0);
     ui.label(format!("状态: {state:?}"));
+
+    // AutoConnect toggle
+    ui.add_space(8.0);
+    let mut ac = *handle.auto_connect.lock().unwrap();
+    if ui.checkbox(&mut ac, "启动时自动连接上次端口").changed() {
+        *handle.auto_connect.lock().unwrap() = ac;
+    }
+
+    // 自动连接（仅当 Disconnected + 有 last_port + auto_connect=true + 还未尝试过）
+    if !is_online && !st.auto_connect_done && *handle.auto_connect.lock().unwrap() {
+        if let Some(p) = handle.last_port.lock().unwrap().clone() {
+            st.auto_connect_done = true;
+            st.selected = Some(p.clone());
+            // 触发连接（同上逻辑简化版）
+            attempt_connect(handle, &p);
+        }
+    }
+}
+
+fn attempt_connect(handle: &AppHandle, name: &str) {
+    let rec = handle.reconnector();
+    let _ = LinkManager::open(
+        name,
+        std::sync::Arc::new(move || {
+            let port = rec.last_port.lock().unwrap().clone();
+            if let Some(p) = port {
+                let mut slot = rec.pending_reconnect.lock().unwrap();
+                if slot.is_none() {
+                    *slot = Some(crate::state::ReconnectJob {
+                        port_name: p,
+                        attempt: 0,
+                        next_at_ms: now_ms() + 1000,
+                    });
+                }
+            }
+        }),
+    )
+    .map(|lm| {
+        *handle.last_port.lock().unwrap() = Some(name.to_string());
+        handle.attach_link(lm);
+    });
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

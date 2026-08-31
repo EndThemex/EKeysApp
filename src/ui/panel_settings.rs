@@ -38,6 +38,22 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
     ui.heading("设备设置");
     ui.add_space(4.0);
 
+    // 快捷键：Ctrl+Enter 应用 / Esc 放弃
+    let ctrl_enter = ui
+        .ctx()
+        .input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl);
+    let esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+    let snapshot = handle.settings.lock().unwrap().clone();
+    let draft_now = handle.draft.lock().unwrap().clone();
+    let diff_preview = draft_now.diff(&snapshot);
+    let has_diff = diff_field_count(&diff_preview) > 0;
+    if ctrl_enter && has_diff {
+        apply_diff(handle, &diff_preview);
+    }
+    if esc && has_diff {
+        *handle.draft.lock().unwrap() = snapshot.clone();
+    }
+
     // Tabs
     ui.horizontal(|ui| {
         for t in [

@@ -55,6 +55,9 @@ pub enum LinkEvent {
 /// seq → 等待该响应的 oneshot Sender
 type PendingMap = Arc<Mutex<HashMap<u32, Sender<Frame>>>>;
 
+/// reader 退出回调类型
+type OnReaderExit = Arc<dyn Fn() + Send + Sync>;
+
 /// LinkManager：持有串口（共享）+ 三个后台线程
 pub struct LinkManager {
     port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
@@ -65,6 +68,8 @@ pub struct LinkManager {
     state: Arc<Mutex<ConnectionState>>,
     hb: HeartbeatHandle,
     stop: Arc<AtomicBool>,
+    port_name: String,
+    on_reader_exit: OnReaderExit,
     _reader: Option<JoinHandle<()>>,
     _writer: Option<JoinHandle<()>>,
     _heartbeat: Option<JoinHandle<()>>,
@@ -77,12 +82,16 @@ impl LinkManager {
     }
 
     /// 打开端口并启动后台线程
-    pub fn open(name: &str) -> Result<Self, String> {
+    pub fn open(name: &str, on_reader_exit: OnReaderExit) -> Result<Self, String> {
         let port = serial::open(name).map_err(|e| format!("打开串口失败: {e}"))?;
-        Self::from_port(port)
+        Self::from_port(name.to_string(), port, on_reader_exit)
     }
 
-    fn from_port(port: Box<dyn serialport::SerialPort>) -> Result<Self, String> {
+    fn from_port(
+        name: String,
+        port: Box<dyn serialport::SerialPort>,
+        on_reader_exit: OnReaderExit,
+    ) -> Result<Self, String> {
         let (event_tx, event_rx) = channel::<LinkEvent>();
         let (write_tx, write_rx) = channel::<WriterMsg>();
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -94,9 +103,12 @@ impl LinkManager {
         // reader：共享 port
         let port_for_reader = Arc::clone(&port);
         let tx_for_reader = event_tx.clone();
+        let on_reader_exit_th = on_reader_exit.clone();
         let reader = thread::spawn(move || {
             reader::run_shared(port_for_reader, tx_for_reader.clone());
             let _ = tx_for_reader.send(LinkEvent::State(ConnectionState::Disconnected));
+            // reader 异常退出 → 调用 on_reader_exit 回调（由 AppHandle 注入）
+            on_reader_exit_th();
         });
 
         // writer：共享 port
@@ -131,6 +143,8 @@ impl LinkManager {
             state: Arc::new(Mutex::new(ConnectionState::Online)),
             hb,
             stop,
+            port_name: name,
+            on_reader_exit,
             _reader: Some(reader),
             _writer: Some(writer),
             _heartbeat: None,
@@ -177,6 +191,11 @@ impl LinkManager {
     /// 取走内部的 events_rx（一次性；attach 时使用）
     pub fn take_events(&mut self) -> Receiver<LinkEvent> {
         std::mem::replace(&mut self.events_rx_slot, None).expect("events_rx already consumed")
+    }
+
+    /// 当前连接的端口名
+    pub fn port_name(&self) -> &str {
+        &self.port_name
     }
 
     /// 直接发一帧（不等响应）

@@ -71,8 +71,15 @@ impl WxiApp {
             LinkEvent::Frame(f) => {
                 if f.is_push() {
                     if let Some(data) = f.data.as_ref() {
-                        if let Ok(snap) = serde_json::from_value::<DeviceSettings>(data.clone()) {
-                            *self.handle.settings.lock().unwrap() = snap;
+                        if let Ok(new_snap) = serde_json::from_value::<DeviceSettings>(data.clone())
+                        {
+                            // 1. 记录旧快照
+                            let old_snap = self.handle.settings.lock().unwrap().clone();
+                            // 2. 用推送值刷新 settings
+                            *self.handle.settings.lock().unwrap() = new_snap.clone();
+                            // 3. 合并 draft（草稿优先）：仅刷新未修改字段
+                            let mut draft = self.handle.draft.lock().unwrap();
+                            DeviceSettings::merge_push(&new_snap, &old_snap, &mut draft);
                         }
                     }
                     self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
@@ -160,6 +167,16 @@ impl WxiApp {
 }
 
 impl eframe::App for WxiApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 退出时保存 LocalConfig
+        let cfg = crate::config::LocalConfig {
+            last_port: self.handle.last_port.lock().unwrap().clone(),
+            auto_connect: *self.handle.auto_connect.lock().unwrap(),
+            window_size: None, // 阶段 04 不存窗口大小
+        };
+        crate::config::save(&cfg);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_link_events();
         self.drain_ui_events();
