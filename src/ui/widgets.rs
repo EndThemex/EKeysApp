@@ -27,16 +27,30 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 for t in toasts.iter() {
-                    let color = match t.kind {
-                        ToastKind::Info => egui::Color32::from_rgb(80, 130, 180),
-                        ToastKind::Success => egui::Color32::from_rgb(80, 160, 90),
-                        ToastKind::Warning => egui::Color32::from_rgb(200, 160, 60),
-                        ToastKind::Error => egui::Color32::from_rgb(200, 80, 80),
+                    let (color, icon) = match t.kind {
+                        ToastKind::Info => (egui::Color32::from_rgb(80, 130, 180), "ℹ"),
+                        ToastKind::Success => (egui::Color32::from_rgb(80, 160, 90), "✔"),
+                        ToastKind::Warning => (egui::Color32::from_rgb(200, 160, 60), "⚠"),
+                        ToastKind::Error => (egui::Color32::from_rgb(200, 80, 80), "✖"),
                     };
-                    egui::Frame::group(ui.style()).fill(color).show(ui, |ui| {
-                        ui.set_max_width(360.0);
-                        ui.colored_label(egui::Color32::WHITE, &t.text);
-                    });
+                    egui::Frame::new()
+                        .fill(color)
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin {
+                            left: 14,
+                            right: 14,
+                            top: 8,
+                            bottom: 8,
+                        })
+                        .show(ui, |ui| {
+                            ui.set_max_width(360.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(
+                                    egui::Color32::WHITE,
+                                    format!("{icon} {}", t.text),
+                                );
+                            });
+                        });
                 }
             });
         });
@@ -72,13 +86,16 @@ pub fn show_confirm(
         .resizable(false)
         .show(ctx, |ui| {
             ui.label(body);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let primary = egui::Button::new("继续")
+                    .fill(crate::ui::ACCENT)
+                    .corner_radius(egui::CornerRadius::same(6));
+                if ui.add(primary).clicked() {
+                    outcome = ConfirmOutcome::Yes;
+                }
                 if ui.button("取消").clicked() {
                     outcome = ConfirmOutcome::No;
-                }
-                if ui.button("继续").clicked() {
-                    outcome = ConfirmOutcome::Yes;
                 }
             });
         });
@@ -105,7 +122,7 @@ pub fn show_local_settings(
         .show(ctx, |ui| {
             // 1) 自动连接
             ui.group(|ui| {
-                ui.label("连接");
+                ui.strong("连接");
                 let mut ac = *handle.auto_connect.lock().unwrap();
                 if ui.checkbox(&mut ac, "启动时自动连接上次端口").changed() {
                     *handle.auto_connect.lock().unwrap() = ac;
@@ -115,7 +132,7 @@ pub fn show_local_settings(
             // 2) 语言
             ui.add_space(4.0);
             ui.group(|ui| {
-                ui.label("语言");
+                ui.strong("语言");
                 let mut lang = handle.language();
                 egui::ComboBox::from_id_source("lang-combo")
                     .selected_text(lang.label())
@@ -132,7 +149,7 @@ pub fn show_local_settings(
             // 3) 主题
             ui.add_space(4.0);
             ui.group(|ui| {
-                ui.label("主题");
+                ui.strong("主题");
                 let mut theme = handle.theme();
                 egui::ComboBox::from_id_source("theme-combo")
                     .selected_text(theme.label())
@@ -152,7 +169,7 @@ pub fn show_local_settings(
             // 4) 窗口大小（只读展示）
             ui.add_space(4.0);
             ui.group(|ui| {
-                ui.label("窗口");
+                ui.strong("窗口");
                 ui.label("当前大小会在退出时自动保存，下次启动恢复。");
             });
 
@@ -213,13 +230,24 @@ pub fn show_diff_bar(
 ) -> DiffAction {
     let mut action = DiffAction::None;
     let count = diff_field_count(diff);
-    egui::Frame::group(ui.style())
-        .fill(egui::Color32::from_rgb(50, 60, 70))
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::new(
+            1.0,
+            crate::ui::ACCENT.gamma_multiply(0.6),
+        ))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 10,
+            top: 8,
+            bottom: 8,
+        })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(
-                    egui::Color32::from_rgb(230, 200, 100),
-                    format!("待下发 {count} 项"),
+                ui.strong(
+                    egui::RichText::new(format!("待下发 {count} 项"))
+                        .color(ui.visuals().warn_fg_color),
                 );
                 ui.separator();
                 egui::ScrollArea::horizontal()
@@ -256,10 +284,10 @@ pub fn show_diff_bar(
                     if ui.button("放弃 (Esc)").clicked() {
                         action = DiffAction::Discard;
                     }
-                    if ui
-                        .add_enabled(can_apply, egui::Button::new("应用 (Ctrl+Enter)"))
-                        .clicked()
-                    {
+                    let apply_btn = egui::Button::new("应用 (Ctrl+Enter)")
+                        .fill(crate::ui::ACCENT)
+                        .corner_radius(egui::CornerRadius::same(6));
+                    if ui.add_enabled(can_apply, apply_btn).clicked() {
                         action = DiffAction::Apply;
                     }
                 });

@@ -7,19 +7,22 @@ use crate::state::AppHandle;
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     let s = handle.state.lock().unwrap().clone();
     egui::menu::bar(ui, |ui| {
+        ui.style_mut().spacing.item_spacing.x = 12.0;
         let online = matches!(s, crate::link::ConnectionState::Online);
-        ui.label(if online {
-            "● Online"
+        let (icon, text, color) = if online {
+            ("●", "Online", crate::ui::colors::STATUS_GREEN)
         } else {
-            "○ Offline"
-        });
+            ("○", "Offline", crate::ui::colors::STATUS_GREY)
+        };
+        ui.label(egui::RichText::new(icon).color(color));
+        ui.label(egui::RichText::new(text).color(ui.visuals().text_color().gamma_multiply(0.8)));
         ui.separator();
-        ui.label("⏱ Uptime: -"); // 阶段 04 未解析心跳 timestamp
+        ui.label(egui::RichText::new("⏱ Uptime: -").weak()); // 阶段 04 未解析心跳 timestamp
         ui.separator();
-        ui.label("📤 0 sent");
-        ui.label("📥 0 recv");
+        ui.label(egui::RichText::new("📤 0 sent").weak());
+        ui.label(egui::RichText::new("📥 0 recv").weak());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label("❤️ heartbeat 1s");
+            ui.label(egui::RichText::new("❤️ heartbeat 1s").weak());
         });
     });
 }

@@ -37,3 +37,67 @@ pub fn status_dot(ui: &mut egui::Ui, color: eframe::egui::Color32) {
     let (r, painter) = ui.allocate_painter(egui::Vec2::new(12.0, 12.0), egui::Sense::hover());
     painter.circle_filled(r.rect.center(), 5.0, color);
 }
+
+/// 品牌主色（按钮高亮、选中态、Toast 等）
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4F, 0x8C, 0xFF);
+
+/// 按本地配置应用全局主题（在 fonts::install 之后、首个窗口创建前调用）
+pub fn apply_theme(ctx: &egui::Context, theme: crate::config::Theme) {
+    let mut vis = match theme {
+        crate::config::Theme::Dark => egui::Visuals::dark(),
+        crate::config::Theme::Light => egui::Visuals::light(),
+    };
+
+    // 选中态 / 链接使用品牌色
+    vis.selection.bg_fill = ACCENT.gamma_multiply(0.45);
+    vis.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+    vis.hyperlink_color = ACCENT;
+    vis.widgets.hovered.expansion = 2.0;
+
+    match theme {
+        crate::config::Theme::Dark => {
+            vis.panel_fill = egui::Color32::from_rgb(0x1B, 0x1F, 0x26);
+            vis.window_fill = egui::Color32::from_rgb(0x20, 0x25, 0x2D);
+            vis.extreme_bg_color = egui::Color32::from_rgb(0x12, 0x15, 0x1A);
+            vis.faint_bg_color = egui::Color32::from_rgb(0x24, 0x2A, 0x33);
+        }
+        crate::config::Theme::Light => {
+            vis.panel_fill = egui::Color32::from_rgb(0xF2, 0xF4, 0xF8);
+            vis.window_fill = egui::Color32::from_rgb(0xFF, 0xFF, 0xFF);
+            vis.extreme_bg_color = egui::Color32::from_rgb(0xE4, 0xE7, 0xEC);
+        }
+    }
+
+    // 圆角：窗口 10，控件 6
+    vis.window_corner_radius = egui::CornerRadius::same(10);
+    vis.menu_corner_radius = egui::CornerRadius::same(8);
+    for w in [
+        &mut vis.widgets.noninteractive,
+        &mut vis.widgets.inactive,
+        &mut vis.widgets.hovered,
+        &mut vis.widgets.active,
+        &mut vis.widgets.open,
+    ] {
+        w.corner_radius = egui::CornerRadius::same(6);
+    }
+    ctx.set_visuals(vis);
+
+    // 间距与字号
+    ctx.style_mut(|style| {
+        let sp = &mut style.spacing;
+        sp.item_spacing = egui::vec2(8.0, 8.0);
+        sp.button_padding = egui::vec2(12.0, 5.0);
+        sp.menu_margin = egui::Margin {
+            left: 10,
+            right: 10,
+            top: 6,
+            bottom: 6,
+        };
+        if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Heading) {
+            f.size = 22.0;
+        }
+        if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Body) {
+            f.size = 15.0;
+        }
+    });
+}

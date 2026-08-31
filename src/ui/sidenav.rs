@@ -67,20 +67,27 @@ const ITEMS: &[NavItem] = &[
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     let current = *handle.page.lock().unwrap();
-    for item in ITEMS {
-        let selected = current == item.page;
-        let btn = egui::Button::new(format!("{} {}", item.icon, item.label))
+    ui.add_space(4.0);
+    ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+        for item in ITEMS {
+            let selected = current == item.page;
+            let btn = egui::Button::new(
+                egui::RichText::new(format!("{}  {}", item.icon, item.label)).size(15.0),
+            )
             .fill(if selected {
-                egui::Color32::from_rgb(60, 90, 140)
+                crate::ui::ACCENT
             } else {
                 egui::Color32::TRANSPARENT
             })
-            .stroke(egui::Stroke::NONE);
-        let resp = ui.add_enabled(item.enabled, btn);
-        if resp.clicked() {
-            let _ = handle.ui_tx.send(UiEvent::Navigate(item.page));
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(egui::CornerRadius::same(8))
+            .min_size(egui::vec2(0.0, 34.0));
+            let resp = ui.add_enabled(item.enabled, btn);
+            if resp.clicked() {
+                let _ = handle.ui_tx.send(UiEvent::Navigate(item.page));
+            }
         }
-    }
+    });
 }
 
 use crate::state::AppHandle;

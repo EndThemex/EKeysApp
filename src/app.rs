@@ -32,10 +32,8 @@ pub struct WxiApp {
 impl WxiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, handle: AppHandle) -> Self {
         crate::ui::fonts::install(&cc.egui_ctx);
-        // 启动时应用主题设置
-        if handle.theme() == crate::config::Theme::Light {
-            cc.egui_ctx.set_visuals(egui::Visuals::light());
-        }
+        // 启动时应用主题（语言/主题由本地配置驱动）
+        crate::ui::apply_theme(&cc.egui_ctx, handle.theme());
         let mut connect_st = panel_connection::ConnectPanelState::default();
         connect_st.refresh();
         let log_st = panel_log::LogPanelState {
