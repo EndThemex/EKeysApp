@@ -1,7 +1,39 @@
-//! 本地 App 配置（最近端口、UI 选项）。
+//! 本地 App 配置（最近端口、UI 选项、语言、主题）。
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum Language {
+    #[default]
+    Chinese,
+    English,
+}
+
+impl Language {
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::Chinese => "中文",
+            Language::English => "English",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Dark => "深色",
+            Theme::Light => "浅色",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalConfig {
@@ -11,6 +43,10 @@ pub struct LocalConfig {
     pub auto_connect: bool,
     #[serde(default)]
     pub window_size: Option<[f32; 2]>,
+    #[serde(default)]
+    pub language: Language,
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 fn config_path() -> Option<PathBuf> {

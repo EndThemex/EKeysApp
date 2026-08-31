@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkEvent, LinkManager};
 use crate::protocol::DeviceSettings;
 
@@ -57,6 +58,7 @@ impl LogBuffer {
 pub enum UiEvent {
     Toast(ToastKind, String),
     Navigate(Page),
+    OpenLocalSettings,
     ConfirmYes(UiConfirmKind),
     ConfirmNo(UiConfirmKind),
 }
@@ -78,6 +80,9 @@ pub enum UiConfirmKind {
 pub enum Page {
     Connect,
     Settings,
+    Lighting,
+    Wifi,
+    Voice,
     Log,
     About,
 }
@@ -101,6 +106,8 @@ pub struct AppHandle {
     pub auto_connect: Arc<Mutex<bool>>,
     /// 重连任务（断线后调度）
     pub pending_reconnect: Arc<Mutex<Option<ReconnectJob>>>,
+    /// 本地 App 配置（语言/主题等；启动时加载，退出时由 on_exit 写回）
+    pub local_config: Arc<Mutex<LocalConfig>>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +158,7 @@ impl AppHandle {
             last_port: Arc::new(Mutex::new(None)),
             auto_connect: Arc::new(Mutex::new(false)),
             pending_reconnect: Arc::new(Mutex::new(None)),
+            local_config: Arc::new(Mutex::new(LocalConfig::default())),
         }
     }
 
@@ -273,6 +281,16 @@ impl AppHandle {
             kind: LogKind::App,
             text: text.into(),
         });
+    }
+
+    /// 便捷访问当前语言设置（避免每次 clone Arc）
+    pub fn language(&self) -> Language {
+        self.local_config.lock().unwrap().language
+    }
+
+    /// 便捷访问当前主题设置（避免每次 clone Arc）
+    pub fn theme(&self) -> Theme {
+        self.local_config.lock().unwrap().theme
     }
 
     /// 推一条 Tx/Rx/Firmware 日志

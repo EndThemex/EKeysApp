@@ -3,8 +3,11 @@
 pub mod fonts;
 pub mod panel_about;
 pub mod panel_connection;
+pub mod panel_lighting;
 pub mod panel_log;
 pub mod panel_settings;
+pub mod panel_voice;
+pub mod panel_wifi;
 pub mod sidenav;
 pub mod statusbar;
 pub mod topbar;

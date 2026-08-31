@@ -6,14 +6,18 @@ use crate::link::LinkEvent;
 use crate::protocol::DeviceSettings;
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
-    panel_about, panel_connection, panel_log, panel_settings, sidenav, statusbar, topbar,
-    widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_toasts},
+    panel_about, panel_connection, panel_lighting, panel_log, panel_settings, panel_voice,
+    panel_wifi, sidenav, statusbar, topbar,
+    widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_local_settings, show_toasts},
 };
 
 pub struct WxiApp {
     pub handle: AppHandle,
     pub connect_st: panel_connection::ConnectPanelState,
     pub settings_st: panel_settings::SettingsPanelState,
+    pub lighting_st: panel_lighting::LightingPanelState,
+    pub wifi_st: panel_wifi::WifiPanelState,
+    pub voice_st: panel_voice::VoicePanelState,
     pub log_st: panel_log::LogPanelState,
     pub toasts: Vec<Toast>,
     pub confirm_open: bool,
@@ -21,11 +25,17 @@ pub struct WxiApp {
     pub confirm_body: String,
     pub confirm_kind: Option<UiConfirmKind>,
     pub current_port: Option<String>,
+    pub local_settings_open: bool,
+    pub last_inner_size: [f32; 2],
 }
 
 impl WxiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, handle: AppHandle) -> Self {
         crate::ui::fonts::install(&cc.egui_ctx);
+        // 启动时应用主题设置
+        if handle.theme() == crate::config::Theme::Light {
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
+        }
         let mut connect_st = panel_connection::ConnectPanelState::default();
         connect_st.refresh();
         let log_st = panel_log::LogPanelState {
@@ -40,6 +50,9 @@ impl WxiApp {
             handle,
             connect_st,
             settings_st: panel_settings::SettingsPanelState::default(),
+            lighting_st: panel_lighting::LightingPanelState::default(),
+            wifi_st: panel_wifi::WifiPanelState::default(),
+            voice_st: panel_voice::VoicePanelState::default(),
             log_st,
             toasts: vec![],
             confirm_open: false,
@@ -47,6 +60,8 @@ impl WxiApp {
             confirm_body: String::new(),
             confirm_kind: None,
             current_port: None,
+            local_settings_open: false,
+            last_inner_size: [960.0, 600.0],
         }
     }
 
@@ -136,6 +151,9 @@ impl WxiApp {
                     self.confirm_open = false;
                     self.confirm_kind = None;
                 }
+                UiEvent::OpenLocalSettings => {
+                    self.local_settings_open = true;
+                }
             }
         }
     }
@@ -153,8 +171,14 @@ impl WxiApp {
             } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Settings)
             } else if i.key_pressed(egui::Key::Num3) {
-                Some(Page::Log)
+                Some(Page::Lighting)
             } else if i.key_pressed(egui::Key::Num4) {
+                Some(Page::Wifi)
+            } else if i.key_pressed(egui::Key::Num5) {
+                Some(Page::Voice)
+            } else if i.key_pressed(egui::Key::Num6) {
+                Some(Page::Log)
+            } else if i.key_pressed(egui::Key::Num7) {
                 Some(Page::About)
             } else {
                 None
@@ -168,11 +192,14 @@ impl WxiApp {
 
 impl eframe::App for WxiApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 退出时保存 LocalConfig
+        // 退出时保存 LocalConfig（含窗口大小、语言、主题）
+        let lc = self.handle.local_config.lock().unwrap().clone();
         let cfg = crate::config::LocalConfig {
             last_port: self.handle.last_port.lock().unwrap().clone(),
             auto_connect: *self.handle.auto_connect.lock().unwrap(),
-            window_size: None, // 阶段 04 不存窗口大小
+            window_size: Some(self.last_inner_size),
+            language: lc.language,
+            theme: lc.theme,
         };
         crate::config::save(&cfg);
     }
@@ -202,6 +229,9 @@ impl eframe::App for WxiApp {
             match page {
                 Page::Connect => panel_connection::show(&self.handle, ui, &mut self.connect_st),
                 Page::Settings => panel_settings::show(&self.handle, ui, &mut self.settings_st),
+                Page::Lighting => panel_lighting::show(&self.handle, ui, &mut self.lighting_st),
+                Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
+                Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
                 Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
                 Page::About => panel_about::show(ui),
             }
@@ -233,7 +263,16 @@ impl eframe::App for WxiApp {
             }
         }
 
+        if self.local_settings_open {
+            let close = show_local_settings(ctx, &self.handle, &mut self.local_settings_open);
+            if close == Some(false) {
+                self.local_settings_open = false;
+            }
+        }
+
         show_toasts(ctx, &mut self.toasts);
+        let size = ctx.input(|i| i.screen_rect().size());
+        self.last_inner_size = [size.x, size.y];
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }

@@ -1,11 +1,10 @@
 //! P2 Settings 页面：核心面板。
 
 use eframe::egui;
-use std::time::Duration;
 
-use crate::protocol::{CMD_CONFIG_SET, DeviceSettings};
+use crate::protocol::DeviceSettings;
 use crate::state::{AppHandle, UiConfirmKind, UiEvent};
-use crate::ui::widgets::{DiffAction, show_diff_bar};
+use crate::ui::widgets::{DiffAction, apply_diff, show_diff_bar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SettingsTab {
@@ -263,37 +262,7 @@ fn power_tab(
     });
 }
 
-// -------- Apply --------
-
-fn apply_diff(handle: &AppHandle, diff: &DeviceSettings) {
-    let payload = serde_json::json!({ "config": diff });
-    let _ = handle.with_link(|lm| {
-        match lm.request(CMD_CONFIG_SET, Some(payload), Duration::from_millis(1000)) {
-            Ok(resp) => {
-                if resp.status() == Some(1) {
-                    let msg = resp.error.unwrap_or_else(|| "未知错误".into());
-                    handle.log_kind(crate::state::LogKind::App, format!("SET 失败: {msg}"));
-                    let _ = handle
-                        .ui_tx
-                        .send(UiEvent::Toast(crate::state::ToastKind::Error, msg));
-                } else {
-                    handle.log_kind(crate::state::LogKind::Tx, "SET → 已下发");
-                    let _ = handle.ui_tx.send(UiEvent::Toast(
-                        crate::state::ToastKind::Success,
-                        "已应用".to_string(),
-                    ));
-                }
-            }
-            Err(e) => {
-                handle.log_kind(crate::state::LogKind::App, format!("SET 超时: {e}"));
-                let _ = handle.ui_tx.send(UiEvent::Toast(
-                    crate::state::ToastKind::Warning,
-                    "设备无响应".to_string(),
-                ));
-            }
-        }
-    });
-}
+// -------- Apply (delegated to widgets::apply_diff) --------
 
 fn diff_field_count(d: &DeviceSettings) -> usize {
     let mut n = 0;

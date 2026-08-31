@@ -21,6 +21,7 @@ fn main() -> eframe::Result {
     // 把 LocalConfig 注入 AppHandle
     *handle.last_port.lock().unwrap() = cfg.last_port.clone();
     *handle.auto_connect.lock().unwrap() = cfg.auto_connect;
+    *handle.local_config.lock().unwrap() = cfg.clone();
 
     let mut options = eframe::NativeOptions::default();
     if let Some([w, h]) = cfg.window_size {
@@ -28,14 +29,11 @@ fn main() -> eframe::Result {
     }
     options.viewport.min_inner_size = Some(Vec2::new(960.0, 600.0));
 
-    let cfg_for_save = cfg.clone();
     eframe::run_native(
         "wxi — EKeys Desktop App",
         options,
         Box::new(move |cc| {
             let app = app::WxiApp::new(cc, handle);
-            // 保存窗口大小（在 drop 时序列化不便，这里采用 eframe::App::on_exit）
-            let _ = cfg_for_save;
             Ok(Box::new(app))
         }),
     )

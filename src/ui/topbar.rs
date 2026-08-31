@@ -39,7 +39,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("⚙ 本地设置").clicked() {
-                // 阶段 04 暂未实现弹窗
+                use crate::state::UiEvent;
+                let _ = handle.ui_tx.send(UiEvent::OpenLocalSettings);
             }
             let can_refresh = matches!(state, ConnectionState::Online);
             if ui

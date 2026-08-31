@@ -29,6 +29,27 @@ const ITEMS: &[NavItem] = &[
         hint: None,
     },
     NavItem {
+        page: Page::Lighting,
+        label: "灯效",
+        icon: "💡",
+        enabled: true,
+        hint: None,
+    },
+    NavItem {
+        page: Page::Wifi,
+        label: "WiFi",
+        icon: "📶",
+        enabled: true,
+        hint: None,
+    },
+    NavItem {
+        page: Page::Voice,
+        label: "语音",
+        icon: "🎤",
+        enabled: true,
+        hint: None,
+    },
+    NavItem {
         page: Page::Log,
         label: "日志",
         icon: "📜",
