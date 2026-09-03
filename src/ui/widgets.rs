@@ -84,6 +84,9 @@ pub fn show_confirm(
         .open(open)
         .collapsible(false)
         .resizable(false)
+        .default_size([380.0, 180.0])
+        .min_size([320.0, 140.0])
+        .max_size([520.0, 320.0])
         .show(ctx, |ui| {
             ui.label(body);
             ui.add_space(12.0);

@@ -53,8 +53,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
         *handle.draft.lock().unwrap() = snapshot.clone();
     }
 
-    // Tabs
+    // Tabs（分段控件样式）
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
         for t in [
             SettingsTab::Display,
             SettingsTab::Keyboard,
@@ -62,7 +63,19 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
             SettingsTab::Power,
         ] {
             let selected = st.tab == t;
-            if ui.selectable_label(selected, t.label()).clicked() {
+            let text = if selected {
+                egui::RichText::new(t.label()).size(14.0).color(egui::Color32::WHITE)
+            } else {
+                egui::RichText::new(t.label()).size(14.0)
+            };
+            let btn = egui::Button::new(text)
+                .fill(if selected {
+                    crate::ui::ACCENT
+                } else {
+                    ui.visuals().faint_bg_color
+                })
+                .corner_radius(egui::CornerRadius::same(8));
+            if ui.add(btn).clicked() {
                 st.tab = t;
             }
         }

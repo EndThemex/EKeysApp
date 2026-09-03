@@ -38,6 +38,26 @@ pub fn status_dot(ui: &mut egui::Ui, color: eframe::egui::Color32) {
     painter.circle_filled(r.rect.center(), 5.0, color);
 }
 
+/// 卡片容器：内容页分区统一使用（圆角 + 底色 + 细边框），自动撑满可用宽度。
+pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    egui::Frame::new()
+        .fill(ui.visuals().window_fill)
+        .stroke(stroke)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin {
+            left: 14,
+            right: 14,
+            top: 12,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
 /// 品牌主色（按钮高亮、选中态、Toast 等）
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4F, 0x8C, 0xFF);
 

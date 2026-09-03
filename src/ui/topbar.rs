@@ -23,19 +23,31 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
     };
 
     egui::menu::bar(ui, |ui| {
-        // 状态灯 + 状态文字
-        let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(10.0, 10.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 4.0, color);
-        ui.label(label).on_hover_ui(|ui| {
-            ui.label(format!("状态: {label}"));
-        });
+        // 状态胶囊：圆点 + 状态文字，底色随状态着色
+        egui::Frame::new()
+            .fill(color.gamma_multiply(0.22))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: 3,
+                bottom: 3,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::Vec2::new(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 4.0, color);
+                    ui.label(egui::RichText::new(label).strong().size(13.0).color(color));
+                });
+            });
 
-        ui.separator();
-        if let Some(name) = port_name {
-            ui.label(format!("{name} · 115200"));
-        } else {
-            ui.label("(未选择端口)");
-        }
+        ui.add_space(4.0);
+        let port_text = match port_name {
+            Some(name) => format!("{name} · 115200"),
+            None => "(未选择端口)".to_string(),
+        };
+        ui.label(egui::RichText::new(port_text).weak());
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("⚙ 本地设置").clicked() {

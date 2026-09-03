@@ -26,29 +26,24 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.group(|ui| {
             ui.label("RGB 模式");
-            let mut mode = if draft.rgb_mode != 0 || snapshot.rgb_mode != 0 {
-                draft.rgb_mode
-            } else {
-                snapshot.rgb_mode
-            };
-            egui::ComboBox::from_id_source("rgb-mode")
-                .selected_text(rgb_mode_label(mode))
-                .show_ui(ui, |cb| {
-                    cb.selectable_value(&mut mode, 0, "关闭");
-                    cb.selectable_value(&mut mode, 1, "静态单色");
-                    cb.selectable_value(&mut mode, 2, "流光");
-                    cb.selectable_value(&mut mode, 3, "呼吸");
-                    cb.selectable_value(&mut mode, 4, "按键触发");
-                    cb.selectable_value(&mut mode, 5, "彩虹");
-                });
-            if mode != snapshot.rgb_mode {
+            let mut mode = draft.rgb_mode;
+            let modes: &[(i32, &str, &str)] = &[
+                (0, "关闭", "✕"),
+                (1, "静态单色", "■"),
+                (2, "流光", "→"),
+                (3, "呼吸", "◐"),
+                (4, "按键触发", "◉"),
+                (5, "彩虹", "❉"),
+            ];
+            mode_grid(ui, modes, &mut mode, crate::ui::ACCENT);
+            if mode != draft.rgb_mode {
                 draft.rgb_mode = mode;
                 dirty.set(true);
             }
 
             ui.add_space(6.0);
             ui.label("单色色值（0~255）");
-            let mut colar = draft.rgb_single_colar.max(snapshot.rgb_single_colar);
+            let mut colar = draft.rgb_single_colar;
             if ui
                 .add(egui::Slider::new(&mut colar, 0..=255).show_value(true))
                 .changed()
@@ -59,26 +54,22 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
 
             ui.add_space(6.0);
             ui.label("按键触发模式");
-            let mut cm = draft.rgb_click_mode.max(snapshot.rgb_click_mode);
-            egui::ComboBox::from_id_source("rgb-click")
-                .selected_text(rgb_click_label(cm))
-                .show_ui(ui, |cb| {
-                    cb.selectable_value(&mut cm, 0, "无");
-                    cb.selectable_value(&mut cm, 1, "按下时亮");
-                    cb.selectable_value(&mut cm, 2, "按下闪一下");
-                    cb.selectable_value(&mut cm, 3, "按下渐变");
-                });
-            if cm != snapshot.rgb_click_mode {
+            let mut cm = draft.rgb_click_mode;
+            let clicks: &[(i32, &str, &str)] = &[
+                (0, "无", "✕"),
+                (1, "按下时亮", "●"),
+                (2, "按下闪一下", "✦"),
+                (3, "按下渐变", "❉"),
+            ];
+            mode_grid(ui, clicks, &mut cm, crate::ui::ACCENT);
+            if cm != draft.rgb_click_mode {
                 draft.rgb_click_mode = cm;
                 dirty.set(true);
             }
 
             ui.add_space(6.0);
             ui.label("灯效亮度（0~100）");
-            let mut bri = draft
-                .rgb_brightness
-                .max(snapshot.rgb_brightness)
-                .clamp(0, 100);
+            let mut bri = draft.rgb_brightness.clamp(0, 100);
             if ui
                 .add(egui::Slider::new(&mut bri, 0..=100).show_value(true))
                 .changed()
@@ -128,6 +119,69 @@ fn rgb_click_label(m: i32) -> String {
         3 => "按下渐变".into(),
         _ => format!("未知 ({m})"),
     }
+}
+
+/// 灯效选择网格：把每个选项渲染成一张卡片，点击即选中。
+///
+/// `items` 中每个元素为 `(value, label, icon)`：
+/// - `value`  选中后写入的数值
+/// - `label`  卡片主标题
+/// - `icon`   卡片顶部大号图标（emoji/符号均可）
+///
+/// `selected` 为当前值，函数会把它就地改为用户点击的项。
+/// `accent`  为主题强调色，用于高亮当前选中卡片。
+fn mode_grid(
+    ui: &mut egui::Ui,
+    items: &[(i32, &str, &str)],
+    selected: &mut i32,
+    accent: egui::Color32,
+) {
+    let card_w = 96.0;
+    let card_h = 72.0;
+    let spacing = 8.0;
+
+    // 用 wrap 自动按可用宽度折行，避免手算列数 + end_row 引发 Grid cell 分配异常
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
+        for (val, label, icon) in items.iter() {
+            let is_sel = *selected == *val;
+            let text_color = if is_sel {
+                egui::Color32::WHITE
+            } else {
+                ui.style().visuals.text_color()
+            };
+
+            // 用 Button::selectable 做单选语义：点击立刻 selected=true 并触发 clicked。
+            // 这样不依赖外部 fill/stroke 计算，事件链不会被吞。
+            let resp = ui.add(
+                egui::Button::selectable(
+                    is_sel,
+                    egui::RichText::new(format!("{icon}\n{label}"))
+                        .color(text_color)
+                        .size(12.0),
+                )
+                .corner_radius(egui::CornerRadius::same(6))
+                .min_size(egui::vec2(card_w, card_h)),
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() && !is_sel {
+                *selected = *val;
+            }
+            // 选中时叠一层强调色（避免与 SelectableLabel 默认 fill 冲突）
+            if is_sel {
+                let rect = resp.rect.shrink(1.0);
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(6),
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Middle,
+                );
+                let _ = text_color;
+            }
+        }
+    });
 }
 
 fn lighting_diff_count(d: &DeviceSettings) -> usize {

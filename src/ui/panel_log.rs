@@ -24,35 +24,41 @@ pub struct LogPanelState {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut st.show_tx, "协议 Tx");
-        ui.checkbox(&mut st.show_rx, "协议 Rx");
-        ui.checkbox(&mut st.show_fw, "固件日志");
-        ui.checkbox(&mut st.show_app, "应用日志");
-        ui.separator();
-        egui::ComboBox::from_id_source("log-level")
-            .selected_text(match st.level {
-                LevelFilter::All => "全部".to_string(),
-                LevelFilter::Info => "Info".to_string(),
-                LevelFilter::Warn => "Warn".to_string(),
-                LevelFilter::Error => "Error".to_string(),
-            })
-            .show_ui(ui, |cb| {
-                cb.selectable_value(&mut st.level, LevelFilter::All, "全部");
-                cb.selectable_value(&mut st.level, LevelFilter::Info, "Info");
-                cb.selectable_value(&mut st.level, LevelFilter::Warn, "Warn");
-                cb.selectable_value(&mut st.level, LevelFilter::Error, "Error");
-            });
-        ui.add(
-            egui::TextEdit::singleline(&mut st.search)
-                .hint_text("搜索…")
-                .desired_width(160.0),
-        );
-        if ui.button("清空").clicked() {
-            handle.log_buf.lock().unwrap().clear();
-        }
+    ui.heading("日志");
+    ui.add_space(8.0);
+
+    // 工具栏卡片
+    crate::ui::card(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut st.show_tx, "协议 Tx");
+            ui.checkbox(&mut st.show_rx, "协议 Rx");
+            ui.checkbox(&mut st.show_fw, "固件日志");
+            ui.checkbox(&mut st.show_app, "应用日志");
+            ui.separator();
+            egui::ComboBox::from_id_source("log-level")
+                .selected_text(match st.level {
+                    LevelFilter::All => "全部".to_string(),
+                    LevelFilter::Info => "Info".to_string(),
+                    LevelFilter::Warn => "Warn".to_string(),
+                    LevelFilter::Error => "Error".to_string(),
+                })
+                .show_ui(ui, |cb| {
+                    cb.selectable_value(&mut st.level, LevelFilter::All, "全部");
+                    cb.selectable_value(&mut st.level, LevelFilter::Info, "Info");
+                    cb.selectable_value(&mut st.level, LevelFilter::Warn, "Warn");
+                    cb.selectable_value(&mut st.level, LevelFilter::Error, "Error");
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut st.search)
+                    .hint_text("搜索…")
+                    .desired_width(160.0),
+            );
+            if ui.button("清空").clicked() {
+                handle.log_buf.lock().unwrap().clear();
+            }
+        });
     });
-    ui.separator();
+    ui.add_space(8.0);
 
     let entries = handle.log_buf.lock().unwrap().snapshot();
     egui::ScrollArea::vertical()

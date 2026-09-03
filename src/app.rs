@@ -207,20 +207,43 @@ impl eframe::App for WxiApp {
         self.drain_ui_events();
         self.handle_shortcuts(ctx);
 
-        egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
-            topbar::show(&self.handle, ui, self.current_port.as_deref());
-        });
+        // chrome（顶栏/侧栏/底栏）统一底色，与内容区形成清晰分区
+        let chrome = ctx.style().visuals.extreme_bg_color;
+
+        egui::TopBottomPanel::top("topbar")
+            .frame(egui::Frame::new().fill(chrome).inner_margin(egui::Margin {
+                left: 12,
+                right: 12,
+                top: 6,
+                bottom: 6,
+            }))
+            .show(ctx, |ui| {
+                topbar::show(&self.handle, ui, self.current_port.as_deref());
+            });
 
         egui::SidePanel::left("sidenav")
             .resizable(false)
-            .exact_width(180.0)
+            .exact_width(188.0)
+            .frame(egui::Frame::new().fill(chrome).inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: 10,
+                bottom: 10,
+            }))
             .show(ctx, |ui| {
                 sidenav::show(&self.handle, ui);
             });
 
-        egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
-            statusbar::show(&self.handle, ui);
-        });
+        egui::TopBottomPanel::bottom("statusbar")
+            .frame(egui::Frame::new().fill(chrome).inner_margin(egui::Margin {
+                left: 12,
+                right: 12,
+                top: 4,
+                bottom: 4,
+            }))
+            .show(ctx, |ui| {
+                statusbar::show(&self.handle, ui);
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let page = *self.handle.page.lock().unwrap();
