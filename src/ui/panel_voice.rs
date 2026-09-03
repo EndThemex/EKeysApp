@@ -73,7 +73,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             ui.label("百度 API 配置");
 
             ui.add_space(4.0);
-            ui.label("Dev PID");
+            ui.label("识别模型 ID");
             let mut pid = draft.voice_dev_pid.max(snapshot.voice_dev_pid);
             if ui.add(egui::DragValue::new(&mut pid).speed(1)).changed() {
                 draft.voice_dev_pid = pid;
@@ -116,7 +116,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("Secret Key（≤64 字节）");
+            ui.label("安全密钥（≤64 字节）");
             let mut sk = if draft.voice_baidu_secret_key.is_empty() {
                 snapshot.voice_baidu_secret_key.clone()
             } else {

@@ -28,12 +28,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             ui.label("RGB 模式");
             let mut mode = draft.rgb_mode;
             let modes: &[(i32, &str, &str)] = &[
-                (0, "关闭", "✕"),
-                (1, "静态单色", "■"),
-                (2, "流光", "→"),
-                (3, "呼吸", "◐"),
-                (4, "按键触发", "◉"),
-                (5, "彩虹", "❉"),
+                (0, "关闭", crate::ui::icons::LIGHT_OFF),
+                (1, "静态单色", crate::ui::icons::LIGHT_SOLID),
+                (2, "流光", crate::ui::icons::LIGHT_FLOW),
+                (3, "呼吸", crate::ui::icons::LIGHT_BREATHE),
+                (4, "按键触发", crate::ui::icons::LIGHT_CLICK),
+                (5, "彩虹", crate::ui::icons::LIGHT_RAINBOW),
             ];
             mode_grid(ui, modes, &mut mode, crate::ui::ACCENT);
             if mode != draft.rgb_mode {
@@ -56,10 +56,10 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             ui.label("按键触发模式");
             let mut cm = draft.rgb_click_mode;
             let clicks: &[(i32, &str, &str)] = &[
-                (0, "无", "✕"),
-                (1, "按下时亮", "●"),
-                (2, "按下闪一下", "✦"),
-                (3, "按下渐变", "❉"),
+                (0, "无", crate::ui::icons::LIGHT_NONE),
+                (1, "按下时亮", crate::ui::icons::LIGHT_CLICK),
+                (2, "按下闪一下", crate::ui::icons::LIGHT_FLASH),
+                (3, "按下渐变", crate::ui::icons::LIGHT_FADE),
             ];
             mode_grid(ui, clicks, &mut cm, crate::ui::ACCENT);
             if cm != draft.rgb_click_mode {
@@ -136,32 +136,22 @@ fn mode_grid(
     selected: &mut i32,
     accent: egui::Color32,
 ) {
-    let card_w = 96.0;
-    let card_h = 72.0;
-    let spacing = 8.0;
+    let card_w = 72.0;
+    let card_h = 64.0;
+    let spacing = 6.0;
 
     // 用 wrap 自动按可用宽度折行，避免手算列数 + end_row 引发 Grid cell 分配异常
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
         for (val, label, icon) in items.iter() {
             let is_sel = *selected == *val;
-            let text_color = if is_sel {
-                egui::Color32::WHITE
-            } else {
-                ui.style().visuals.text_color()
-            };
-
-            // 用 Button::selectable 做单选语义：点击立刻 selected=true 并触发 clicked。
-            // 这样不依赖外部 fill/stroke 计算，事件链不会被吞。
+            // 用 IconTextButton 做单选语义：图标走 Phosphor 字体、文本走 Proportional，
+            // 不会被“混排字符串”吃掉图标字形。
             let resp = ui.add(
-                egui::Button::selectable(
-                    is_sel,
-                    egui::RichText::new(format!("{icon}\n{label}"))
-                        .color(text_color)
-                        .size(12.0),
-                )
-                .corner_radius(egui::CornerRadius::same(6))
-                .min_size(egui::vec2(card_w, card_h)),
+                crate::ui::fonts::IconTextButton::new(*icon, *label, 14.0)
+                    .selected(is_sel)
+                    .min_size(egui::vec2(card_w, card_h))
+                    .gap(6.0),
             );
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -169,7 +159,7 @@ fn mode_grid(
             if resp.clicked() && !is_sel {
                 *selected = *val;
             }
-            // 选中时叠一层强调色（避免与 SelectableLabel 默认 fill 冲突）
+            // 选中时叠一层强调色（避免与 selection 默认 fill 冲突）
             if is_sel {
                 let rect = resp.rect.shrink(1.0);
                 ui.painter().rect_stroke(
@@ -178,7 +168,6 @@ fn mode_grid(
                     egui::Stroke::new(1.5, accent),
                     egui::StrokeKind::Middle,
                 );
-                let _ = text_color;
             }
         }
     });

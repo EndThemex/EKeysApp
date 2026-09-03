@@ -11,6 +11,6 @@ pub fn show(ui: &mut egui::Ui) {
         ui.label("固件协议  v0.1（阶段 04）");
         ui.label("对接设备  ESP32-S3 USB CDC (VID 0x303A)");
         ui.add_space(16.0);
-        ui.label("Built with eframe + egui + Rust 2024");
+        ui.label("基于 eframe + egui + Rust 2024 构建");
     });
 }

@@ -58,7 +58,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                                 cb.selectable_value(&mut st.selected, Some(p.name.clone()), label);
                             }
                         });
-                    if ui.button("🔄 扫描").clicked() {
+                    if ui
+                        .add(crate::ui::fonts::IconTextButton::new(
+                            crate::ui::icons::SCAN,
+                            "扫描",
+                            14.0,
+                        ))
+                        .clicked()
+                    {
                         st.refresh();
                     }
                 });
@@ -73,15 +80,15 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                     if let Some(name) = &st.selected {
                         if let Some(info) = st.ports.iter().find(|p| &p.name == name) {
                             ui.label(format!(
-                                "VID: {}  PID: {}",
+                                "厂商 ID: {}  产品 ID: {}",
                                 info.vid.map(|v| format!("0x{v:04X}")).unwrap_or("-".into()),
                                 info.pid.map(|v| format!("0x{v:04X}")).unwrap_or("-".into())
                             ));
                             if let Some(m) = &info.manufacturer {
-                                ui.label(format!("Manufacturer: {m}"));
+                                ui.label(format!("厂商名称: {m}"));
                             }
                             if let Some(s) = &info.serial_number {
-                                ui.label(format!("Serial: {s}"));
+                                ui.label(format!("序列号: {s}"));
                             }
                         } else {
                             ui.label("(端口信息不可用)");

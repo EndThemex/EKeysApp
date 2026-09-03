@@ -89,12 +89,25 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     LogKind::App => crate::ui::colors::APP,
                 };
                 let arrow = match e.kind {
-                    LogKind::Tx => "▶ ",
-                    LogKind::Rx => "◀ ",
-                    LogKind::Firmware => "ℹ ",
-                    LogKind::App => "• ",
+                    LogKind::Tx => crate::ui::icons::LOG_TX,
+                    LogKind::Rx => crate::ui::icons::LOG_RX,
+                    LogKind::Firmware => crate::ui::icons::LOG_FIRMWARE,
+                    LogKind::App => crate::ui::icons::LOG_APP,
                 };
-                ui.colored_label(color, format!("{}{}", arrow, e.text));
+                // 图标用 Phosphor 字体，文本用 Proportional，二者分两个 galley 拼接。
+                let resp = ui.allocate_response(
+                    egui::vec2(ui.available_width(), 16.0),
+                    egui::Sense::hover(),
+                );
+                crate::ui::fonts::paint_icon_text_in(
+                    ui,
+                    resp.rect,
+                    arrow,
+                    &format!(" {}", e.text),
+                    12.0,
+                    color,
+                    4.0,
+                );
             }
         });
 }

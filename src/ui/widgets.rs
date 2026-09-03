@@ -28,10 +28,22 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
             ui.vertical(|ui| {
                 for t in toasts.iter() {
                     let (color, icon) = match t.kind {
-                        ToastKind::Info => (egui::Color32::from_rgb(80, 130, 180), "ℹ"),
-                        ToastKind::Success => (egui::Color32::from_rgb(80, 160, 90), "✔"),
-                        ToastKind::Warning => (egui::Color32::from_rgb(200, 160, 60), "⚠"),
-                        ToastKind::Error => (egui::Color32::from_rgb(200, 80, 80), "✖"),
+                        ToastKind::Info => (
+                            egui::Color32::from_rgb(80, 130, 180),
+                            crate::ui::icons::TOAST_INFO,
+                        ),
+                        ToastKind::Success => (
+                            egui::Color32::from_rgb(80, 160, 90),
+                            crate::ui::icons::TOAST_SUCCESS,
+                        ),
+                        ToastKind::Warning => (
+                            egui::Color32::from_rgb(200, 160, 60),
+                            crate::ui::icons::TOAST_WARNING,
+                        ),
+                        ToastKind::Error => (
+                            egui::Color32::from_rgb(200, 80, 80),
+                            crate::ui::icons::TOAST_ERROR,
+                        ),
                     };
                     egui::Frame::new()
                         .fill(color)
@@ -44,12 +56,21 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
                         })
                         .show(ui, |ui| {
                             ui.set_max_width(360.0);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(
-                                    egui::Color32::WHITE,
-                                    format!("{icon} {}", t.text),
-                                );
-                            });
+                            // 图标用 Phosphor 字体、文本用 Proportional，避免 icon
+                            // 字符被 Proportional 字体“吃掉”。
+                            let resp = ui.allocate_response(
+                                egui::vec2(ui.available_width(), 16.0),
+                                egui::Sense::hover(),
+                            );
+                            crate::ui::fonts::paint_icon_text_in(
+                                ui,
+                                resp.rect,
+                                icon,
+                                &t.text,
+                                13.0,
+                                egui::Color32::WHITE,
+                                6.0,
+                            );
                         });
                 }
             });
@@ -117,7 +138,7 @@ pub fn show_local_settings(
     open: &mut bool,
 ) -> Option<bool> {
     let mut result = None;
-    egui::Window::new("⚙ 本地设置")
+    egui::Window::new(format!("{} 本地设置", crate::ui::icons::GEAR))
         .open(open)
         .collapsible(false)
         .resizable(false)

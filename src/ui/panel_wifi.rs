@@ -49,7 +49,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("SSID（≤32 字节）");
+            ui.label("网络名称（≤32 字节）");
             let mut ssid = if draft.wifi_ssid.is_empty() {
                 snapshot.wifi_ssid.clone()
             } else {

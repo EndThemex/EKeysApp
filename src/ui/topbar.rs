@@ -15,11 +15,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
         ConnectionState::Disconnected => colors::STATUS_GREY,
     };
     let label = match &state {
-        ConnectionState::Online => "Online",
-        ConnectionState::Connecting => "Connecting",
-        ConnectionState::Reconnecting => "Reconnecting",
-        ConnectionState::Error(e) => &*format!("Error: {e}"),
-        ConnectionState::Disconnected => "Disconnected",
+        ConnectionState::Online => "在线",
+        ConnectionState::Connecting => "连接中",
+        ConnectionState::Reconnecting => "重连中",
+        ConnectionState::Error(e) => &*format!("错误：{e}"),
+        ConnectionState::Disconnected => "未连接",
     };
 
     egui::menu::bar(ui, |ui| {
@@ -50,13 +50,23 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
         ui.label(egui::RichText::new(port_text).weak());
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("⚙ 本地设置").clicked() {
+            if ui
+                .add(crate::ui::fonts::IconTextButton::new(
+                    crate::ui::icons::GEAR,
+                    "本地设置",
+                    13.0,
+                ))
+                .clicked()
+            {
                 use crate::state::UiEvent;
                 let _ = handle.ui_tx.send(UiEvent::OpenLocalSettings);
             }
             let can_refresh = matches!(state, ConnectionState::Online);
             if ui
-                .add_enabled(can_refresh, egui::Button::new("⟳ 刷新"))
+                .add_enabled(
+                    can_refresh,
+                    crate::ui::fonts::IconTextButton::new(crate::ui::icons::REFRESH, "刷新", 13.0),
+                )
                 .on_hover_text("重新拉取全量设置 (F5)")
                 .clicked()
             {

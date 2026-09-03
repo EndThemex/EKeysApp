@@ -80,7 +80,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
             "选中",
         );
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("Δ = 右上角琥珀点").weak().size(11.0));
+        ui.label(
+            egui::RichText::new("Δ 表示差异（右上角琥珀点）")
+                .weak()
+                .size(11.0),
+        );
     });
     ui.add_space(4.0);
 
@@ -120,7 +124,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
             // 这里先把 diff 应用到快照草稿即可（本地一致性），并记录日志
             handle.log_kind(
                 crate::state::LogKind::Tx,
-                format!("KEYMAP_SET → {} 项变更（待阶段 05 接入）", diff.len()),
+                format!("下发键映射 → {} 项变更（待阶段 05 接入）", diff.len()),
             );
             let mut snap = handle.keymap.lock().unwrap();
             snap.apply_diff(&diff);
@@ -161,7 +165,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
 
     ui.horizontal(|ui| {
         // Profile
-        ui.label("Profile:");
+        ui.label("配置:");
         let mut p = draft.active_profile as i32;
         // ComboBox 只显示用户命名，默认值"P{i}"在 make_demo_profile 中设置
         let current_name = draft
@@ -183,8 +187,16 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
         }
 
         // 重命名按钮
+        let rename_icon = if st.renaming_profile {
+            crate::ui::icons::KEYMAP_RENAME_CLOSE
+        } else {
+            crate::ui::icons::KEYMAP_RENAME_EDIT
+        };
         if ui
-            .button(if st.renaming_profile { "✕" } else { "✒️" })
+            .add(egui::Button::new(crate::ui::fonts::icon_rich(
+                rename_icon,
+                16.0,
+            )))
             .on_hover_text(if st.renaming_profile {
                 "取消重命名"
             } else {
@@ -205,7 +217,15 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     .desired_width(120.0),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("✔").on_hover_text("保存重命名").clicked() || enter {
+            if ui
+                .add(egui::Button::new(crate::ui::fonts::icon_rich(
+                    crate::ui::icons::KEYMAP_CONFIRM,
+                    14.0,
+                )))
+                .on_hover_text("保存重命名")
+                .clicked()
+                || enter
+            {
                 commit_rename(handle, &mut *draft, p as u8, &st.profile_name_edit);
                 st.renaming_profile = false;
             }
@@ -214,7 +234,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
         ui.separator();
 
         // Layer
-        ui.label("Layer:");
+        ui.label("层:");
         let layers: Vec<(u8, String)> = snap
             .profile(draft.active_profile)
             .map(|prof| {
@@ -231,7 +251,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     .iter()
                     .find(|(i, _)| *i == st.layer)
                     .map(|(_, n)| n.clone())
-                    .unwrap_or_else(|| format!("Layer {}", st.layer)),
+                    .unwrap_or_else(|| format!("层 {}", st.layer)),
             )
             .show_ui(ui, |cb| {
                 for (i, name) in &layers {
@@ -243,14 +263,28 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("↻ Reload").clicked() {
+            if ui
+                .add(crate::ui::fonts::IconTextButton::new(
+                    crate::ui::icons::KEYMAP_RELOAD,
+                    "重新加载",
+                    14.0,
+                ))
+                .clicked()
+            {
                 // 阶段 05：替换为 CMD_KEYMAP_GET
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                     crate::state::ToastKind::Info,
-                    "Reload 待阶段 05 接入".to_string(),
+                    "重新加载功能待阶段 05 接入".to_string(),
                 ));
             }
-            if ui.button("⤓ Export").clicked() {
+            if ui
+                .add(crate::ui::fonts::IconTextButton::new(
+                    crate::ui::icons::KEYMAP_EXPORT,
+                    "导出",
+                    14.0,
+                ))
+                .clicked()
+            {
                 let path = std::env::temp_dir().join("ekey_keymap.json");
                 if let Ok(s) = serde_json::to_string_pretty(&*draft) {
                     let _ = std::fs::write(&path, s);
@@ -276,12 +310,12 @@ fn draw_keyboard(
     let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
 
-    // 背景：占位深色块 + "Keyboard PNG" 文字
+    // 背景：占位深色块 + "键盘背景图" 文字
     painter.rect_filled(rect, 8.0, Color32::from_rgb(0x18, 0x1B, 0x22));
     painter.text(
         rect.left_top() + Vec2::new(10.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "⌨ Keyboard Background (待接入 PNG)",
+        "键盘背景图（待接入 PNG）",
         egui::FontId::proportional(11.0),
         Color32::from_rgb(0x70, 0x70, 0x80),
     );
@@ -469,11 +503,7 @@ fn draw_key(
     let clicked = resp.clicked();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let status = if is_pending {
-            "● 待下发"
-        } else {
-            "✓ 已应用"
-        };
+        let status = if is_pending { "待下发" } else { "已应用" };
         resp.clone().on_hover_text(format!(
             "{} ({},{}) {status} binding: {b}",
             slot.label,
@@ -612,11 +642,7 @@ fn draw_encoder(
     let clicked = resp.clicked();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let status = if is_pending {
-            "● 待下发"
-        } else {
-            "✓ 已应用"
-        };
+        let status = if is_pending { "待下发" } else { "已应用" };
         resp.clone().on_hover_text(format!(
             "{} ({},{}) 旋钮 {status} binding: {b}",
             slot.label,
@@ -705,7 +731,7 @@ fn drawer(
                                     .profile(draft.active_profile)
                                     .and_then(|p| p.layers.iter().find(|l| l.index == kref.layer))
                                     .map(|l| l.name.clone())
-                                    .unwrap_or_else(|| format!("Layer {}", kref.layer))
+                                    .unwrap_or_else(|| format!("层 {}", kref.layer))
                             ));
 
                             ui.add_space(6.0);
@@ -1113,7 +1139,9 @@ fn edit_action_params(
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new("⌨").size(16.0).color(crate::ui::ACCENT),
+                                    egui::RichText::new(crate::ui::icons::KEYMAP_CAPTURE)
+                                        .font(crate::ui::fonts::icon_font_id(16.0))
+                                        .color(crate::ui::ACCENT),
                                 );
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("按任意键捕获").strong());
@@ -1208,10 +1236,10 @@ fn edit_action_params(
                 _ => 0,
             };
             egui::ComboBox::from_id_salt("layer-switch")
-                .selected_text(format!("Layer {l}"))
+                .selected_text(format!("层 {l}"))
                 .show_ui(ui, |cb| {
                     for i in 0..4 {
-                        cb.selectable_value(&mut l, i, format!("Layer {i}"));
+                        cb.selectable_value(&mut l, i, format!("层 {i}"));
                     }
                 });
             *current = KeyAction::LayerSwitch(l);

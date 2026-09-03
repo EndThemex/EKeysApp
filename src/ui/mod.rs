@@ -1,6 +1,7 @@
 //! UI 模块聚合 + 共享主题常量。
 
 pub mod fonts;
+pub mod icons;
 pub mod panel_about;
 pub mod panel_connection;
 pub mod panel_keymap;

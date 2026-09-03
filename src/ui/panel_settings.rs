@@ -18,10 +18,19 @@ pub enum SettingsTab {
 impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
-            SettingsTab::Display => "🖥 显示",
-            SettingsTab::Keyboard => "⌨ 键盘",
-            SettingsTab::Audio => "🔊 音频",
-            SettingsTab::Power => "⚡ 电源",
+            SettingsTab::Display => "显示",
+            SettingsTab::Keyboard => "键盘",
+            SettingsTab::Audio => "音频",
+            SettingsTab::Power => "电源",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            SettingsTab::Display => crate::ui::icons::TAB_DISPLAY,
+            SettingsTab::Keyboard => crate::ui::icons::TAB_KEYBOARD,
+            SettingsTab::Audio => crate::ui::icons::TAB_AUDIO,
+            SettingsTab::Power => crate::ui::icons::TAB_POWER,
         }
     }
 }
@@ -63,20 +72,18 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
             SettingsTab::Power,
         ] {
             let selected = st.tab == t;
-            let text = if selected {
-                egui::RichText::new(t.label())
-                    .size(14.0)
-                    .color(egui::Color32::WHITE)
-            } else {
-                egui::RichText::new(t.label()).size(14.0)
-            };
-            let btn = egui::Button::new(text)
+            // IconTextButton 自动按 Phosphor/Proportional 分字体渲染，
+            // 不会把图标字形落到 Proportional fallback 链里变成 □。
+            let mut btn = crate::ui::fonts::IconTextButton::new(t.icon(), t.label(), 14.0)
                 .fill(if selected {
                     crate::ui::ACCENT
                 } else {
                     ui.visuals().faint_bg_color
                 })
                 .corner_radius(egui::CornerRadius::same(8));
+            if selected {
+                btn = btn.fg(egui::Color32::WHITE);
+            }
             if ui.add(btn).clicked() {
                 st.tab = t;
             }
@@ -148,7 +155,7 @@ fn display_tab(
         }
         ui.add_space(6.0);
 
-        ui.label("TFT 背光（5~100）");
+        ui.label("屏幕背光（5~100）");
         let mut brightness = draft.tft_brightness.max(snap.tft_brightness).clamp(5, 100);
         let r = ui.add(egui::Slider::new(&mut brightness, 5..=100).show_value(true));
         if r.changed() {
@@ -201,7 +208,18 @@ fn keyboard_tab(
             &snap.active_profile_name
         });
         if snap.active_profile_has_custom_icon {
-            ui.label("🖼 已设置自定义图标");
+            // 图标 + 文本分两个 galley 拼接，避免图标字形被 Proportional 字体吞掉。
+            let resp =
+                ui.allocate_response(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+            crate::ui::fonts::paint_icon_text_in(
+                ui,
+                resp.rect,
+                crate::ui::icons::CUSTOM_ICON,
+                "已设置自定义图标",
+                13.0,
+                ui.style().visuals.text_color(),
+                4.0,
+            );
         }
         ui.add_space(6.0);
 
@@ -212,10 +230,10 @@ fn keyboard_tab(
             snap.active_keymap_profile
         };
         egui::ComboBox::from_id_salt("profile")
-            .selected_text(format!("Profile {p}"))
+            .selected_text(format!("配置 {p}"))
             .show_ui(ui, |cb| {
                 for i in 0..=7 {
-                    cb.selectable_value(&mut p, i, format!("Profile {i}"));
+                    cb.selectable_value(&mut p, i, format!("配置 {i}"));
                 }
             });
         if p != snap.active_keymap_profile {
