@@ -29,39 +29,46 @@ const ITEMS: &[NavItem] = &[
         hint: Some("设备参数配置 (Ctrl+2)"),
     },
     NavItem {
+        page: Page::Keymap,
+        label: "键映射",
+        icon: "🎹",
+        enabled: true,
+        hint: Some("按键盘自定义按键功能 (Ctrl+3)"),
+    },
+    NavItem {
         page: Page::Lighting,
         label: "灯效",
         icon: "💡",
         enabled: true,
-        hint: Some("灯光效果 (Ctrl+3)"),
+        hint: Some("灯光效果 (Ctrl+4)"),
     },
     NavItem {
         page: Page::Wifi,
         label: "WiFi",
         icon: "📶",
         enabled: true,
-        hint: Some("无线网络 (Ctrl+4)"),
+        hint: Some("无线网络 (Ctrl+5)"),
     },
     NavItem {
         page: Page::Voice,
         label: "语音",
         icon: "🎤",
         enabled: true,
-        hint: Some("语音设置 (Ctrl+5)"),
+        hint: Some("语音设置 (Ctrl+6)"),
     },
     NavItem {
         page: Page::Log,
         label: "日志",
         icon: "📜",
         enabled: true,
-        hint: Some("协议与应用日志 (Ctrl+6)"),
+        hint: Some("协议与应用日志 (Ctrl+7)"),
     },
     NavItem {
         page: Page::About,
         label: "关于",
         icon: "ℹ",
         enabled: true,
-        hint: Some("版本信息 (Ctrl+7)"),
+        hint: Some("版本信息 (Ctrl+8)"),
     },
 ];
 
@@ -87,23 +94,17 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(10.0);
 
-    // 主导航：设备相关
-    nav_group(ui, handle, current, "设备", &ITEMS[..5]);
+    // 主导航：设备相关（连接 / 设置 / 键映射 / 灯效 / WiFi / 语音 → 共 6 项）
+    nav_group(ui, handle, current, "设备", &ITEMS[..6]);
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
     // 系统组：日志 / 关于
-    nav_group(ui, handle, current, "系统", &ITEMS[5..]);
+    nav_group(ui, handle, current, "系统", &ITEMS[6..]);
 }
 
-fn nav_group(
-    ui: &mut egui::Ui,
-    handle: &AppHandle,
-    current: Page,
-    title: &str,
-    items: &[NavItem],
-) {
+fn nav_group(ui: &mut egui::Ui, handle: &AppHandle, current: Page, title: &str, items: &[NavItem]) {
     ui.label(egui::RichText::new(title).weak().size(11.0));
     ui.add_space(4.0);
     for item in items {
@@ -132,7 +133,8 @@ fn nav_item(ui: &mut egui::Ui, handle: &AppHandle, current: Page, item: &NavItem
     };
 
     if bg != egui::Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(8), bg);
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(8), bg);
     }
     ui.painter().text(
         rect.left_center() + egui::vec2(10.0, 0.0),

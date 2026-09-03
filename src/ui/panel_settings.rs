@@ -64,7 +64,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
         ] {
             let selected = st.tab == t;
             let text = if selected {
-                egui::RichText::new(t.label()).size(14.0).color(egui::Color32::WHITE)
+                egui::RichText::new(t.label())
+                    .size(14.0)
+                    .color(egui::Color32::WHITE)
             } else {
                 egui::RichText::new(t.label()).size(14.0)
             };
@@ -130,7 +132,7 @@ fn display_tab(
     ui.group(|ui| {
         ui.label("TFT 主题");
         let mut theme = draft.tft_theme.max(snap.tft_theme);
-        egui::ComboBox::from_id_source("tft-theme")
+        egui::ComboBox::from_id_salt("tft-theme")
             .selected_text(if theme == 0 {
                 "深色".into()
             } else {
@@ -171,7 +173,7 @@ fn keyboard_tab(
         } else {
             snap.work_mode
         };
-        egui::ComboBox::from_id_source("work-mode")
+        egui::ComboBox::from_id_salt("work-mode")
             .selected_text(work_mode_label(mode))
             .show_ui(ui, |cb| {
                 cb.selectable_value(&mut mode, 0, "USB");
@@ -209,7 +211,7 @@ fn keyboard_tab(
         } else {
             snap.active_keymap_profile
         };
-        egui::ComboBox::from_id_source("profile")
+        egui::ComboBox::from_id_salt("profile")
             .selected_text(format!("Profile {p}"))
             .show_ui(ui, |cb| {
                 for i in 0..=7 {
@@ -262,7 +264,7 @@ fn power_tab(
     ui.group(|ui| {
         ui.label("电源模式");
         let mut pm = draft.power_mode.max(snap.power_mode);
-        egui::ComboBox::from_id_source("power-mode")
+        egui::ComboBox::from_id_salt("power-mode")
             .selected_text(format!("模式 {pm}"))
             .show_ui(ui, |cb| {
                 cb.selectable_value(&mut pm, 0, "模式 0");

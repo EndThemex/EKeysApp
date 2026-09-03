@@ -137,7 +137,7 @@ pub fn show_local_settings(
             ui.group(|ui| {
                 ui.strong("语言");
                 let mut lang = handle.language();
-                egui::ComboBox::from_id_source("lang-combo")
+                egui::ComboBox::from_id_salt("lang-combo")
                     .selected_text(lang.label())
                     .show_ui(ui, |cb| {
                         cb.selectable_value(&mut lang, crate::config::Language::Chinese, "中文");
@@ -154,7 +154,7 @@ pub fn show_local_settings(
             ui.group(|ui| {
                 ui.strong("主题");
                 let mut theme = handle.theme();
-                egui::ComboBox::from_id_source("theme-combo")
+                egui::ComboBox::from_id_salt("theme-combo")
                     .selected_text(theme.label())
                     .show_ui(ui, |cb| {
                         cb.selectable_value(&mut theme, crate::config::Theme::Dark, "深色");

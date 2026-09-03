@@ -46,7 +46,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                 ui.label("端口");
                 ui.horizontal(|ui| {
                     let display = st.selected.clone().unwrap_or_else(|| "(无)".to_string());
-                    egui::ComboBox::from_id_source("port-combo")
+                    egui::ComboBox::from_id_salt("port-combo")
                         .selected_text(display)
                         .show_ui(ui, |cb| {
                             for p in &st.ports {
@@ -159,9 +159,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
     crate::ui::card(ui, |ui| {
         ui.horizontal(|ui| {
             let (color, text) = match &state {
-                crate::link::ConnectionState::Online => {
-                    (crate::ui::colors::STATUS_GREEN, "在线")
-                }
+                crate::link::ConnectionState::Online => (crate::ui::colors::STATUS_GREEN, "在线"),
                 crate::link::ConnectionState::Connecting
                 | crate::link::ConnectionState::Reconnecting => {
                     (crate::ui::colors::STATUS_YELLOW, "连接中…")

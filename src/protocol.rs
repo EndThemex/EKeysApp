@@ -318,6 +318,432 @@ pub struct ConfigSetPayload<'a> {
     pub config: &'a DeviceSettings,
 }
 
+// ---------- Keymap 数据模型（阶段 05 起生效） ----------
+//
+// 这一组类型只描述"键映射"在桌面 App 侧的内存形态；阶段 05 之前固件侧
+// 尚未支持 CMD_KEYMAP_GET/SET，所以这里只做"本地编辑 + 草稿预览"，不接
+// 协议命令。设计上完全独立于 DeviceSettings，便于后面直接拆成单独的
+// 命令而不影响现有 Settings 面板。
+
+/// 按键可执行的动作（与固件 HID encoder 对齐的最小子集）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum KeyAction {
+    /// 未绑定（透传 / 触发默认）
+    None,
+    /// 普通键：value 为 HID Usage ID（如 'A' = 0x04）
+    Keyboard(u16),
+    /// 多媒体
+    Media(MediaKey),
+    /// 鼠标动作
+    Mouse(MouseAction),
+    /// 宏：按键序列（简化版，延时写死在每步后）
+    Macro(Vec<MacroStep>),
+    /// 切到指定 layer（按下时进入，松手回到 Base）
+    LayerSwitch(u8),
+    /// 旋钮动作：旋转或按下
+    Encoder(EncoderAction),
+}
+
+/// 旋钮子动作：顺时针 / 逆时针 / 按下
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EncoderAction {
+    /// 顺时针
+    Cw,
+    /// 逆时针
+    Ccw,
+    /// 按下
+    Press,
+}
+
+impl Default for KeyAction {
+    fn default() -> Self {
+        KeyAction::None
+    }
+}
+
+impl KeyAction {
+    /// 给 UI 展示用的简短标签
+    pub fn label(&self) -> String {
+        match self {
+            KeyAction::None => "未绑定".into(),
+            KeyAction::Keyboard(code) => format!("K 0x{code:02X}"),
+            KeyAction::Media(m) => format!("Media: {m:?}"),
+            KeyAction::Mouse(m) => format!("Mouse: {m:?}"),
+            KeyAction::Macro(steps) => format!("Macro ({} 步)", steps.len()),
+            KeyAction::LayerSwitch(l) => format!("→ Layer {l}"),
+            KeyAction::Encoder(e) => format!("Enc: {e:?}"),
+        }
+    }
+
+    /// 是否"非空"（用于 Diff 计数）
+    pub fn is_set(&self) -> bool {
+        !matches!(self, KeyAction::None)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKey {
+    PlayPause,
+    Next,
+    Prev,
+    VolUp,
+    VolDown,
+    Mute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseAction {
+    LeftClick,
+    RightClick,
+    MiddleClick,
+    ScrollUp,
+    ScrollDown,
+}
+
+/// 宏里的一步：按键 + 延时（毫秒）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroStep {
+    pub action: KeyAction,
+    pub delay_ms: u32,
+}
+
+/// 物理槽位类型：普通按键还是旋钮（编码器）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SlotKind {
+    #[default]
+    Key,
+    /// 旋钮（编码器）：渲染时画圆盘；动作额外有 顺时针/逆时针/按下 三种。
+    Encoder,
+}
+
+/// 物理槽位：键盘上某个 (row, col) 坐标对应的键。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeySlot {
+    pub row: u8,
+    pub col: u8,
+    /// 显示在键帽上的标签（如 "A"、"F1"、"Space"）
+    pub label: String,
+    /// 1u = 1, 1.25u, 1.5u, 1.75u, 2u ... 用于渲染时决定宽度
+    pub width_units: f32,
+    /// 槽位种类（按键 / 旋钮）
+    #[serde(default)]
+    pub kind: SlotKind,
+}
+
+/// 一层（Base / Fn / Media / Custom 等）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyLayer {
+    pub index: u8,
+    pub name: String,
+    pub slots: Vec<KeySlot>,
+}
+
+/// 一个 Profile（一般有 8 个）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeymapProfile {
+    pub index: u8,
+    pub name: String,
+    pub icon_set: bool,
+    pub layers: Vec<KeyLayer>,
+    /// 绑定表：key=(layer_index, slot_row, slot_col) → 动作
+    pub bindings: std::collections::HashMap<KeyRef, KeyAction>,
+}
+
+/// 引用某个具体槽位的三元组
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KeyRef {
+    pub layer: u8,
+    pub row: u8,
+    pub col: u8,
+}
+
+/// 整把键盘的键映射数据
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeymapData {
+    pub active_profile: u8,
+    pub profiles: Vec<KeymapProfile>,
+}
+
+impl Default for KeymapData {
+    fn default() -> Self {
+        Self::demo_60()
+    }
+}
+
+impl KeymapData {
+    /// 计算两个 KeymapData 的差异（仅 bindings 表层级；profile 结构变化暂不考虑）。
+    pub fn diff_bindings(&self, other: &KeymapData) -> Vec<KeymapDiffEntry> {
+        let mut out = Vec::new();
+        let active = self.active_profile;
+        let other_active = other.active_profile;
+
+        // 1. active_profile 切换
+        if active != other_active {
+            out.push(KeymapDiffEntry::ActiveProfile(active));
+        }
+
+        // 2. 当前 profile 的 bindings 差异
+        let Some(profile) = self.profile(active) else {
+            return out;
+        };
+        let Some(other_profile) = other.profile(other_active) else {
+            return out;
+        };
+
+        for (k, v) in &profile.bindings {
+            let prev = other_profile.bindings.get(k);
+            if prev != Some(v) {
+                out.push(KeymapDiffEntry::Binding {
+                    key: *k,
+                    from: prev.cloned().unwrap_or(KeyAction::None),
+                    to: v.clone(),
+                });
+            }
+        }
+        // 删除：在 self 中缺失而 other 中存在 → 当作 None
+        for (k, v) in &other_profile.bindings {
+            if !profile.bindings.contains_key(k) {
+                out.push(KeymapDiffEntry::Binding {
+                    key: *k,
+                    from: v.clone(),
+                    to: KeyAction::None,
+                });
+            }
+        }
+        out
+    }
+
+    /// 取得当前 profile（克隆）
+    pub fn profile(&self, idx: u8) -> Option<&KeymapProfile> {
+        self.profiles.iter().find(|p| p.index == idx)
+    }
+
+    /// 应用一个 diff 列表（合并到自身）；返回是否有变化
+    pub fn apply_diff(&mut self, diff: &[KeymapDiffEntry]) -> bool {
+        let mut changed = false;
+        for e in diff {
+            match e {
+                KeymapDiffEntry::ActiveProfile(idx) => {
+                    if self.active_profile != *idx {
+                        self.active_profile = *idx;
+                        changed = true;
+                    }
+                }
+                KeymapDiffEntry::Binding { key, to, .. } => {
+                    let Some(p) = self.profile_mut(self.active_profile) else {
+                        continue;
+                    };
+                    let new_val = if to.is_set() { Some(to.clone()) } else { None };
+                    let prev = p.bindings.get(key);
+                    if prev != new_val.as_ref() {
+                        if new_val.is_some() {
+                            p.bindings.insert(*key, to.clone());
+                        } else {
+                            p.bindings.remove(key);
+                        }
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    pub fn profile_mut(&mut self, idx: u8) -> Option<&mut KeymapProfile> {
+        self.profiles.iter_mut().find(|p| p.index == idx)
+    }
+
+    /// 与 Settings::merge_push 对齐：草稿优先，未修改字段用新值刷新。
+    pub fn merge_push(
+        new_snapshot: &KeymapData,
+        old_snapshot: &KeymapData,
+        draft: &mut KeymapData,
+    ) {
+        // 1. active_profile：草稿与旧一致才用新值
+        if draft.active_profile == old_snapshot.active_profile {
+            draft.active_profile = new_snapshot.active_profile;
+        }
+        // 2. bindings：仅当 profile 结构存在时合并。
+        //    先把所有需要"未改"→ 用推送值替换的项收集出来，再统一写入，
+        //    避免在 `iter_mut` 中再次借用 `draft`。
+        let mut to_overwrite: Vec<(
+            u8,
+            std::collections::HashMap<crate::protocol::KeyRef, KeyAction>,
+        )> = Vec::new();
+        for profile in draft.profiles.iter() {
+            let Some(old_p) = old_snapshot.profile(profile.index) else {
+                continue;
+            };
+            let Some(new_p) = new_snapshot.profile(profile.index) else {
+                continue;
+            };
+            let mut overlay = std::collections::HashMap::new();
+            for (k, v) in &new_p.bindings {
+                let prev_in_old = old_p.bindings.get(k);
+                let prev_in_draft = profile.bindings.get(k);
+                // 草稿与旧一致（包含"两边都没有"）→ 用推送值
+                let draft_unmodified = match (prev_in_old, prev_in_draft) {
+                    (Some(o), Some(d)) => o == d,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if draft_unmodified {
+                    overlay.insert(*k, v.clone());
+                }
+            }
+            if !overlay.is_empty() {
+                to_overwrite.push((profile.index, overlay));
+            }
+        }
+        for (idx, overlay) in to_overwrite {
+            if let Some(p) = draft.profile_mut(idx) {
+                for (k, v) in overlay {
+                    p.bindings.insert(k, v);
+                }
+            }
+        }
+    }
+}
+
+/// 单条绑定变更描述（用于 DiffPreviewBar 列表展示 / 协议 SET 增量下发）
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeymapDiffEntry {
+    /// 切换活动 Profile
+    ActiveProfile(u8),
+    /// 某个槽位的绑定变更
+    Binding {
+        key: KeyRef,
+        from: KeyAction,
+        to: KeyAction,
+    },
+}
+
+// ---------- Keymap 演示数据（4 行 × 3 列小键盘） ----------
+//
+// 阶段 05 之前 KeymapData 默认填 8 份静态 4×3 布局，保证 UI 有内容可显示。
+// 等 CMD_KEYMAP_GET 落地后会被设备真实数据覆盖。
+impl KeymapData {
+    pub fn demo_60() -> Self {
+        let mut profiles = Vec::with_capacity(8);
+        for i in 0..8u8 {
+            profiles.push(Self::make_demo_profile(i, format!("P{i}")));
+        }
+        Self {
+            active_profile: 0,
+            profiles,
+        }
+    }
+
+    fn make_demo_profile(idx: u8, name: String) -> KeymapProfile {
+        let base = KeyLayer {
+            index: 0,
+            name: "Base".into(),
+            slots: demo_base_4x3(),
+        };
+        let fn_layer = KeyLayer {
+            index: 1,
+            name: "Fn".into(),
+            slots: base.slots.clone(),
+        };
+        let media = KeyLayer {
+            index: 2,
+            name: "Media".into(),
+            slots: vec![KeySlot {
+                row: 0,
+                col: 0,
+                label: "Play".into(),
+                width_units: 1.0,
+                kind: SlotKind::Key,
+            }],
+        };
+        let custom = KeyLayer {
+            index: 3,
+            name: "Custom".into(),
+            slots: vec![],
+        };
+
+        // 给字母/数字键塞默认 Keyboard 绑定，演示用
+        let mut bindings = std::collections::HashMap::new();
+        for s in &base.slots {
+            let c = s.label.chars().next().unwrap_or('?');
+            if c.is_ascii_alphabetic() || c.is_ascii_digit() {
+                let k = hid_kbd_from_char(c);
+                bindings.insert(
+                    KeyRef {
+                        layer: 0,
+                        row: s.row,
+                        col: s.col,
+                    },
+                    KeyAction::Keyboard(k),
+                );
+            }
+        }
+
+        KeymapProfile {
+            index: idx,
+            name,
+            icon_set: false,
+            layers: vec![base, fn_layer, media, custom],
+            bindings,
+        }
+    }
+}
+
+fn hid_kbd_from_char(c: char) -> u16 {
+    // HID Usage IDs (Keyboard/Keypad Page 0x07) 的子集
+    match c {
+        'A'..='Z' => 0x04 + (c as u16) - ('A' as u16),
+        'a'..='z' => 0x04 + (c as u16) - ('a' as u16),
+        '1'..='9' => 0x1E + (c as u16) - ('1' as u16),
+        '0' => 0x27,
+        _ => 0,
+    }
+}
+
+/// 4×3 小键盘基础层的槽位定义（不含绑定）。仅用于 demo。
+///
+/// 4 行 × 3 列；row 0 第 3 个槽位是旋钮，其余 11 个是普通键：
+///   row 0: K1 / K2 / [KNOB]      （col 2, row 0 → 旋钮）
+///   row 1: K3 / K4 / K5
+///   row 2: K6 / K7 / K8
+///   row 3: K9 / K10/ K11
+///
+/// 旋钮用 `width_units = 1.0` + `kind = Encoder` 标识；宽度与按键一致，
+/// 渲染层判断 `kind` 后画一个圆形刻度盘代替方键。
+fn demo_base_4x3() -> Vec<KeySlot> {
+    let mut out = Vec::with_capacity(12);
+    let normal: [(&str, u8, u8); 11] = [
+        ("K1", 0, 0),
+        ("K2", 0, 1),
+        ("K3", 1, 0),
+        ("K4", 1, 1),
+        ("K5", 1, 2),
+        ("K6", 2, 0),
+        ("K7", 2, 1),
+        ("K8", 2, 2),
+        ("K9", 3, 0),
+        ("K10", 3, 1),
+        ("K11", 3, 2),
+    ];
+    for (label, row, col) in normal.iter() {
+        out.push(KeySlot {
+            row: *row,
+            col: *col,
+            label: (*label).to_string(),
+            width_units: 1.0,
+            kind: SlotKind::Key,
+        });
+    }
+    out.push(KeySlot {
+        row: 0,
+        col: 2,
+        label: "KNOB".into(),
+        width_units: 1.0,
+        kind: SlotKind::Encoder,
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

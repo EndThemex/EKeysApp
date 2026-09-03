@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkEvent, LinkManager};
-use crate::protocol::DeviceSettings;
+use crate::protocol::{DeviceSettings, KeyAction, KeyRef, KeymapData};
 
 /// 单条日志条目（应用层日志 + 固件日志共用）
 #[derive(Debug, Clone)]
@@ -80,6 +80,7 @@ pub enum UiConfirmKind {
 pub enum Page {
     Connect,
     Settings,
+    Keymap,
     Lighting,
     Wifi,
     Voice,
@@ -108,6 +109,16 @@ pub struct AppHandle {
     pub pending_reconnect: Arc<Mutex<Option<ReconnectJob>>>,
     /// 本地 App 配置（语言/主题等；启动时加载，退出时由 on_exit 写回）
     pub local_config: Arc<Mutex<LocalConfig>>,
+    /// Keymap 数据：设备最新快照（阶段 05 由 CMD_KEYMAP_GET 刷新）
+    pub keymap: Arc<Mutex<KeymapData>>,
+    /// Keymap 用户编辑未下发的草稿
+    pub keymap_draft: Arc<Mutex<KeymapData>>,
+    /// Keymap 面板中当前选中的键（None = 未选中）
+    pub selected_key: Arc<Mutex<Option<KeyRef>>>,
+    /// Keymap 面板右侧 Drawer 中的临时编辑（None = 当前 binding 无未保存编辑）
+    pub pending_binding: Arc<Mutex<Option<KeyAction>>>,
+    /// Keymap 面板是否进入"按下任意键捕获"模式（期间全局快捷键应让路）
+    pub capture_keyboard: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +170,11 @@ impl AppHandle {
             auto_connect: Arc::new(Mutex::new(false)),
             pending_reconnect: Arc::new(Mutex::new(None)),
             local_config: Arc::new(Mutex::new(LocalConfig::default())),
+            keymap: Arc::new(Mutex::new(KeymapData::default())),
+            keymap_draft: Arc::new(Mutex::new(KeymapData::default())),
+            selected_key: Arc::new(Mutex::new(None)),
+            pending_binding: Arc::new(Mutex::new(None)),
+            capture_keyboard: Arc::new(Mutex::new(false)),
         }
     }
 

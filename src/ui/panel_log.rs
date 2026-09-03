@@ -35,7 +35,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
             ui.checkbox(&mut st.show_fw, "固件日志");
             ui.checkbox(&mut st.show_app, "应用日志");
             ui.separator();
-            egui::ComboBox::from_id_source("log-level")
+            egui::ComboBox::from_id_salt("log-level")
                 .selected_text(match st.level {
                     LevelFilter::All => "全部".to_string(),
                     LevelFilter::Info => "Info".to_string(),

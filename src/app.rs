@@ -6,8 +6,8 @@ use crate::link::LinkEvent;
 use crate::protocol::DeviceSettings;
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
-    panel_about, panel_connection, panel_lighting, panel_log, panel_settings, panel_voice,
-    panel_wifi, sidenav, statusbar, topbar,
+    panel_about, panel_connection, panel_keymap, panel_lighting, panel_log, panel_settings,
+    panel_voice, panel_wifi, sidenav, statusbar, topbar,
     widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_local_settings, show_toasts},
 };
 
@@ -15,6 +15,7 @@ pub struct WxiApp {
     pub handle: AppHandle,
     pub connect_st: panel_connection::ConnectPanelState,
     pub settings_st: panel_settings::SettingsPanelState,
+    pub keymap_st: panel_keymap::KeymapPanelState,
     pub lighting_st: panel_lighting::LightingPanelState,
     pub wifi_st: panel_wifi::WifiPanelState,
     pub voice_st: panel_voice::VoicePanelState,
@@ -48,6 +49,7 @@ impl WxiApp {
             handle,
             connect_st,
             settings_st: panel_settings::SettingsPanelState::default(),
+            keymap_st: panel_keymap::KeymapPanelState::default(),
             lighting_st: panel_lighting::LightingPanelState::default(),
             wifi_st: panel_wifi::WifiPanelState::default(),
             voice_st: panel_voice::VoicePanelState::default(),
@@ -157,6 +159,12 @@ impl WxiApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Keymap 面板处于"按下任意键捕获"模式时，全局快捷键必须让路，
+        // 否则 Ctrl+1~8 / Esc 会被吃掉，捕获不到用户实际按的键。
+        let capturing = *self.handle.capture_keyboard.lock().unwrap();
+        if capturing {
+            return;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
             let _ = self.handle.ui_tx.send(UiEvent::Navigate(Page::Settings));
         }
@@ -169,14 +177,16 @@ impl WxiApp {
             } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Settings)
             } else if i.key_pressed(egui::Key::Num3) {
-                Some(Page::Lighting)
+                Some(Page::Keymap)
             } else if i.key_pressed(egui::Key::Num4) {
-                Some(Page::Wifi)
+                Some(Page::Lighting)
             } else if i.key_pressed(egui::Key::Num5) {
-                Some(Page::Voice)
+                Some(Page::Wifi)
             } else if i.key_pressed(egui::Key::Num6) {
-                Some(Page::Log)
+                Some(Page::Voice)
             } else if i.key_pressed(egui::Key::Num7) {
+                Some(Page::Log)
+            } else if i.key_pressed(egui::Key::Num8) {
                 Some(Page::About)
             } else {
                 None
@@ -250,6 +260,7 @@ impl eframe::App for WxiApp {
             match page {
                 Page::Connect => panel_connection::show(&self.handle, ui, &mut self.connect_st),
                 Page::Settings => panel_settings::show(&self.handle, ui, &mut self.settings_st),
+                Page::Keymap => panel_keymap::show(&self.handle, ui, &mut self.keymap_st),
                 Page::Lighting => panel_lighting::show(&self.handle, ui, &mut self.lighting_st),
                 Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
                 Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
