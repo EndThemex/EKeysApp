@@ -21,17 +21,17 @@ use eframe::egui;
 pub mod colors {
     use eframe::egui::Color32;
 
-    pub const TX: Color32 = Color32::from_rgb(120, 180, 240); // 浅蓝
-    pub const RX: Color32 = Color32::from_rgb(140, 220, 140); // 浅绿
-    pub const FW_INFO: Color32 = Color32::from_rgb(180, 180, 180); // 浅灰
-    pub const FW_WARN: Color32 = Color32::from_rgb(230, 180, 90); // 浅黄
-    pub const FW_ERROR: Color32 = Color32::from_rgb(230, 100, 100); // 浅红
-    pub const APP: Color32 = Color32::from_rgb(220, 220, 220); // 白
+    pub const TX: Color32 = Color32::from_rgb(120, 190, 255); // 亮蓝
+    pub const RX: Color32 = Color32::from_rgb(140, 230, 150); // 亮绿
+    pub const FW_INFO: Color32 = Color32::from_rgb(210, 215, 225); // 偏亮的浅灰
+    pub const FW_WARN: Color32 = Color32::from_rgb(245, 195, 90); // 亮黄
+    pub const FW_ERROR: Color32 = Color32::from_rgb(245, 110, 110); // 亮红
+    pub const APP: Color32 = Color32::from_rgb(0xEC, 0xF0, 0xF6); // 近白
 
-    pub const STATUS_GREY: Color32 = Color32::from_rgb(150, 150, 150);
-    pub const STATUS_YELLOW: Color32 = Color32::from_rgb(230, 200, 90);
-    pub const STATUS_GREEN: Color32 = Color32::from_rgb(90, 200, 90);
-    pub const STATUS_RED: Color32 = Color32::from_rgb(220, 80, 80);
+    pub const STATUS_GREY: Color32 = Color32::from_rgb(160, 165, 175);
+    pub const STATUS_YELLOW: Color32 = Color32::from_rgb(240, 210, 90);
+    pub const STATUS_GREEN: Color32 = Color32::from_rgb(100, 215, 100);
+    pub const STATUS_RED: Color32 = Color32::from_rgb(235, 90, 90);
 }
 
 /// 渲染一个状态灯圆点
@@ -82,11 +82,23 @@ pub fn apply_theme(ctx: &egui::Context, theme: crate::config::Theme) {
             vis.window_fill = egui::Color32::from_rgb(0x20, 0x25, 0x2D);
             vis.extreme_bg_color = egui::Color32::from_rgb(0x12, 0x15, 0x1A);
             vis.faint_bg_color = egui::Color32::from_rgb(0x24, 0x2A, 0x33);
+            // 提亮文本：避免整体偏灰
+            vis.override_text_color = Some(egui::Color32::from_rgb(0xE8, 0xEC, 0xF2));
+            vis.widgets.noninteractive.fg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE8, 0xEC, 0xF2));
+            vis.widgets.inactive.fg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE8, 0xEC, 0xF2));
         }
         crate::config::Theme::Light => {
             vis.panel_fill = egui::Color32::from_rgb(0xF2, 0xF4, 0xF8);
             vis.window_fill = egui::Color32::from_rgb(0xFF, 0xFF, 0xFF);
             vis.extreme_bg_color = egui::Color32::from_rgb(0xE4, 0xE7, 0xEC);
+            // 文本使用接近纯黑，提升可读性
+            vis.override_text_color = Some(egui::Color32::from_rgb(0x1A, 0x1D, 0x24));
+            vis.widgets.noninteractive.fg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1A, 0x1D, 0x24));
+            vis.widgets.inactive.fg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1A, 0x1D, 0x24));
         }
     }
 
