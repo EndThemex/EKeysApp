@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::protocol::DeviceSettings;
 use crate::state::{AppHandle, UiConfirmKind, UiEvent};
-use crate::ui::widgets::{DiffAction, apply_diff, show_diff_bar};
+use crate::ui::widgets::{apply_diff, settings_panel_scaffold};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SettingsTab {
@@ -40,26 +40,30 @@ pub struct SettingsPanelState {
     pub tab: SettingsTab,
     /// 等待 Confirm 的危险操作
     pub pending_confirm: Option<UiConfirmKind>,
+    /// Profile 图标：PNG 路径输入框内容（0x11 上传用）
+    pub icon_path: String,
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
     ui.heading("设备设置");
     ui.add_space(4.0);
 
-    // 快捷键：Ctrl+Enter 应用 / Esc 放弃
+    // 快捷键：Ctrl+Enter 应用 / Esc 放弃（基于当前 draft vs snapshot）
     let ctrl_enter = ui
         .ctx()
         .input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl);
     let esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
-    let snapshot = handle.settings.lock().unwrap().clone();
-    let draft_now = handle.draft.lock().unwrap().clone();
-    let diff_preview = draft_now.diff(&snapshot);
-    let has_diff = diff_field_count(&diff_preview) > 0;
-    if ctrl_enter && has_diff {
-        apply_diff(handle, &diff_preview);
-    }
-    if esc && has_diff {
-        *handle.draft.lock().unwrap() = snapshot.clone();
+    {
+        let snapshot = handle.settings.lock().unwrap().clone();
+        let draft_now = handle.draft.lock().unwrap().clone();
+        let (diff_preview, mask) = draft_now.diff(&snapshot);
+        if !mask.is_empty() {
+            if ctrl_enter {
+                apply_diff(handle, &diff_preview, mask);
+            } else if esc {
+                *handle.draft.lock().unwrap() = snapshot.clone();
+            }
+        }
     }
 
     // Tabs（分段控件样式）
@@ -92,50 +96,19 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
     ui.separator();
     ui.add_space(8.0);
 
-    // 复制快照到本地
-    let snapshot = handle.settings.lock().unwrap().clone();
-    let mut draft = handle.draft.lock().unwrap().clone();
-    let mut dirty = false;
-
-    egui::ScrollArea::vertical().show(ui, |ui| match st.tab {
-        SettingsTab::Display => display_tab(ui, &snapshot, &mut draft, &mut dirty),
-        SettingsTab::Keyboard => keyboard_tab(ui, &snapshot, &mut draft, &mut dirty, st, handle),
-        SettingsTab::Audio => audio_tab(ui, &snapshot, &mut draft, &mut dirty),
-        SettingsTab::Power => power_tab(ui, &snapshot, &mut draft, &mut dirty),
+    // 各 tab 的内容；scaffold 负责 snapshot/draft/diff/diff_bar。
+    let current_tab = st.tab;
+    settings_panel_scaffold(handle, ui, move |ui, snap, draft| match current_tab {
+        SettingsTab::Display => display_tab(ui, snap, draft),
+        SettingsTab::Keyboard => keyboard_tab(ui, snap, draft, st, handle),
+        SettingsTab::Audio => audio_tab(ui, snap, draft),
+        SettingsTab::Power => power_tab(ui, snap, draft),
     });
-
-    // 计算 diff
-    let diff = draft.diff(&snapshot);
-    let can_apply = diff_field_count(&diff) > 0;
-
-    // DiffPreviewBar
-    ui.add_space(8.0);
-    let action = show_diff_bar(handle, ui, &diff, can_apply);
-    match action {
-        DiffAction::Apply => apply_diff(handle, &diff),
-        DiffAction::Discard => {
-            *handle.draft.lock().unwrap() = snapshot.clone();
-        }
-        DiffAction::None => {}
-    }
-
-    // 把变更写回 draft（dirty 由各 tab 回调标记）
-    if dirty {
-        *handle.draft.lock().unwrap() = draft.clone();
-    } else {
-        // 即便 dirty=false，仍同步 draft（用户切换 tab 时需要看到一致视图）
-        *handle.draft.lock().unwrap() = draft;
-    }
 }
 
 // -------- Tab 实现 --------
 
-fn display_tab(
-    ui: &mut egui::Ui,
-    snap: &DeviceSettings,
-    draft: &mut DeviceSettings,
-    dirty: &mut bool,
-) {
+fn display_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
         ui.label("TFT 主题");
         let mut theme = draft.tft_theme.max(snap.tft_theme);
@@ -151,7 +124,6 @@ fn display_tab(
             });
         if theme != snap.tft_theme {
             draft.tft_theme = theme;
-            *dirty = true;
         }
         ui.add_space(6.0);
 
@@ -160,7 +132,6 @@ fn display_tab(
         let r = ui.add(egui::Slider::new(&mut brightness, 5..=100).show_value(true));
         if r.changed() {
             draft.tft_brightness = brightness;
-            *dirty = true;
         }
     });
 }
@@ -169,7 +140,6 @@ fn keyboard_tab(
     ui: &mut egui::Ui,
     snap: &DeviceSettings,
     draft: &mut DeviceSettings,
-    dirty: &mut bool,
     st: &mut SettingsPanelState,
     handle: &AppHandle,
 ) {
@@ -191,7 +161,6 @@ fn keyboard_tab(
             // 危险操作 → 走 confirm
             if st.pending_confirm == Some(UiConfirmKind::SwitchWorkMode) {
                 draft.work_mode = mode;
-                *dirty = true;
                 st.pending_confirm = None;
             } else if mode != draft.work_mode && mode != snap.work_mode {
                 let _ = handle
@@ -238,17 +207,148 @@ fn keyboard_tab(
             });
         if p != snap.active_keymap_profile {
             draft.active_keymap_profile = p;
-            *dirty = true;
         }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // Profile 图标：0x11 CMD_PROFILE_ICON_SET 上传 / 清除
+        ui.label("Profile 图标（PNG，建议 ≤ 48×48，单帧 ≤ 2048 字节）");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut st.icon_path)
+                    .hint_text("PNG 文件路径")
+                    .desired_width(260.0),
+            );
+            let uploading = !st.icon_path.trim().is_empty();
+            if ui
+                .add_enabled(uploading, egui::Button::new("上传"))
+                .clicked()
+            {
+                upload_profile_icon(handle, st, p as u8, st.icon_path.trim().to_string());
+            }
+            if ui.button("清除图标").clicked() {
+                clear_profile_icon(handle, p as u8);
+            }
+        });
     });
 }
 
-fn audio_tab(
-    ui: &mut egui::Ui,
-    snap: &DeviceSettings,
-    draft: &mut DeviceSettings,
-    dirty: &mut bool,
-) {
+/// `0x11` 上传图标：读 PNG → 校验 → Base64 → 下发。
+fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile: u8, path: String) {
+    use crate::protocol::{CMD_PROFILE_ICON_SET, ProfileIconSetPayload, ProfileIconSetReq};
+    use std::time::Duration;
+    let toast = |k: crate::state::ToastKind, t: String| {
+        let _ = handle
+            .ui_tx
+            .send(crate::state::UiEvent::Toast(k, t));
+    };
+
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            toast(crate::state::ToastKind::Error, format!("读取文件失败: {e}"));
+            return;
+        }
+    };
+    // PNG 签名校验
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        toast(crate::state::ToastKind::Error, "文件不是有效 PNG".to_string());
+        return;
+    }
+    // image 解码校验（固件不做尺寸校验，App 自行保证）
+    if let Err(e) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
+        toast(
+            crate::state::ToastKind::Error,
+            format!("PNG 解码失败: {e}"),
+        );
+        return;
+    }
+    // 2048 字节单帧上限：Base64 膨胀 4/3，留出帧头余量
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    if b64.len() > 1400 {
+        toast(
+            crate::state::ToastKind::Error,
+            format!("图片过大（Base64 {} 字节），请压缩到 48×48 以下", b64.len()),
+        );
+        return;
+    }
+    let req = ProfileIconSetPayload {
+        profile_icon: ProfileIconSetReq {
+            profile,
+            clear: false,
+            png_base64: b64,
+        },
+    };
+    let Some(data) = serde_json::to_value(&req).ok() else {
+        toast(crate::state::ToastKind::Error, "请求序列化失败".to_string());
+        return;
+    };
+    let _ = handle.with_link(|lm| match lm.request(CMD_PROFILE_ICON_SET, Some(data), Duration::from_millis(2000))
+    {
+        Ok(frame) => {
+            if frame.status() == Some(0) {
+                // 更新本地快照的图标标记（响应 data 里也有，简化直接置位）
+                let mut snap = handle.settings.lock().unwrap();
+                snap.active_profile_has_custom_icon = true;
+                let mut d = handle.draft.lock().unwrap();
+                d.active_profile_has_custom_icon = true;
+                toast(
+                    crate::state::ToastKind::Success,
+                    format!("Profile {profile} 图标已上传"),
+                );
+                st.icon_path.clear();
+            } else {
+                let msg = frame.error.unwrap_or_else(|| "固件拒绝图标".to_string());
+                toast(crate::state::ToastKind::Error, format!("上传失败: {msg}"));
+            }
+        }
+        Err(e) => toast(crate::state::ToastKind::Error, format!("上传超时: {e}")),
+    });
+}
+
+/// `0x11` 清除图标：`clear = true`，不携带 Base64。
+fn clear_profile_icon(handle: &AppHandle, profile: u8) {
+    use crate::protocol::{CMD_PROFILE_ICON_SET, ProfileIconSetPayload, ProfileIconSetReq};
+    use std::time::Duration;
+    let toast = |k: crate::state::ToastKind, t: String| {
+        let _ = handle
+            .ui_tx
+            .send(crate::state::UiEvent::Toast(k, t));
+    };
+    let req = ProfileIconSetPayload {
+        profile_icon: ProfileIconSetReq {
+            profile,
+            clear: true,
+            png_base64: String::new(),
+        },
+    };
+    let Some(data) = serde_json::to_value(&req).ok() else {
+        toast(crate::state::ToastKind::Error, "请求序列化失败".to_string());
+        return;
+    };
+    let _ = handle.with_link(|lm| match lm.request(CMD_PROFILE_ICON_SET, Some(data), Duration::from_millis(2000))
+    {
+        Ok(frame) => {
+            if frame.status() == Some(0) {
+                let mut snap = handle.settings.lock().unwrap();
+                snap.active_profile_has_custom_icon = false;
+                let mut d = handle.draft.lock().unwrap();
+                d.active_profile_has_custom_icon = false;
+                toast(
+                    crate::state::ToastKind::Success,
+                    format!("Profile {profile} 图标已清除"),
+                );
+            } else {
+                let msg = frame.error.unwrap_or_else(|| "固件拒绝清除".to_string());
+                toast(crate::state::ToastKind::Error, format!("清除失败: {msg}"));
+            }
+        }
+        Err(e) => toast(crate::state::ToastKind::Error, format!("清除超时: {e}")),
+    });
+}
+
+fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
         ui.label("音量 (0~100)");
         let mut v = draft.device_volume.max(snap.device_volume).clamp(0, 100);
@@ -257,7 +357,6 @@ fn audio_tab(
             .changed()
         {
             draft.device_volume = v;
-            *dirty = true;
         }
         ui.add_space(6.0);
         ui.label("启用音频");
@@ -268,17 +367,11 @@ fn audio_tab(
         };
         if ui.checkbox(&mut enable, "启用").changed() {
             draft.audio_enable = if enable { 1 } else { 0 };
-            *dirty = true;
         }
     });
 }
 
-fn power_tab(
-    ui: &mut egui::Ui,
-    snap: &DeviceSettings,
-    draft: &mut DeviceSettings,
-    dirty: &mut bool,
-) {
+fn power_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
         ui.label("电源模式");
         let mut pm = draft.power_mode.max(snap.power_mode);
@@ -290,37 +383,8 @@ fn power_tab(
             });
         if pm != snap.power_mode {
             draft.power_mode = pm;
-            *dirty = true;
         }
     });
-}
-
-// -------- Apply (delegated to widgets::apply_diff) --------
-
-fn diff_field_count(d: &DeviceSettings) -> usize {
-    let mut n = 0;
-    if d.tft_brightness != 0 {
-        n += 1;
-    }
-    if d.tft_theme != 0 {
-        n += 1;
-    }
-    if d.work_mode != 0 {
-        n += 1;
-    }
-    if d.active_keymap_profile != 0 {
-        n += 1;
-    }
-    if d.device_volume != 0 {
-        n += 1;
-    }
-    if d.audio_enable != 0 {
-        n += 1;
-    }
-    if d.power_mode != 0 {
-        n += 1;
-    }
-    n
 }
 
 fn work_mode_label(m: i32) -> String {

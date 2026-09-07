@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkEvent, LinkManager};
-use crate::protocol::{DeviceSettings, KeyAction, KeyRef, KeymapData};
+use crate::protocol::{DeviceInfo, DeviceSettings, KeyAction, KeyRef, KeymapData};
 
 /// 单条日志条目（应用层日志 + 固件日志共用）
 #[derive(Debug, Clone)]
@@ -119,6 +119,9 @@ pub struct AppHandle {
     pub pending_binding: Arc<Mutex<Option<KeyAction>>>,
     /// Keymap 面板是否进入"按下任意键捕获"模式（期间全局快捷键应让路）
     pub capture_keyboard: Arc<Mutex<bool>>,
+    /// 设备信息快照（device_name / device_id / firmware_version）。
+    /// 启动或重连后由 `0x03 CMD_DEVICE_INFO_GET` 刷新。
+    pub device_info: Arc<Mutex<DeviceInfo>>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +178,7 @@ impl AppHandle {
             selected_key: Arc::new(Mutex::new(None)),
             pending_binding: Arc::new(Mutex::new(None)),
             capture_keyboard: Arc::new(Mutex::new(false)),
+            device_info: Arc::new(Mutex::new(DeviceInfo::default())),
         }
     }
 
@@ -186,18 +190,39 @@ impl AppHandle {
         *self.link_events.lock().unwrap() = Some(rx);
         *self.link.lock().unwrap() = Some(lm);
 
-        // 连接成功 → 自动 GET 全量快照
+        // 连接成功 → 自动 GET 设备信息 + 全量快照
         self.auto_get();
     }
 
-    /// 自动 GET：拉取一次全量设置
+    /// 自动 GET：连接成功后拉取设备信息 + 全量设置。
+    /// 失败只写日志，不弹 Toast（避免断线后连刷错误）。
     pub fn auto_get(&self) {
-        use crate::protocol::{CMD_CONFIG_GET, DeviceSettings};
+        use crate::protocol::{CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, DeviceSettings};
+        // 1) 设备信息
+        let _ = self.with_link(|lm| {
+            match lm.request(CMD_DEVICE_INFO_GET, None, Duration::from_millis(1000)) {
+                Ok(frame) => {
+                    if let Some(data) = frame.data.as_ref() {
+                        if let Ok(info) = serde_json::from_value::<DeviceInfo>(data.clone()) {
+                            *self.device_info.lock().unwrap() = info;
+                            self.log_kind(LogKind::Rx, "GET → 设备信息");
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.log_kind(LogKind::App, format!("GET 设备信息超时: {e}"));
+                }
+            }
+        });
+        // 2) 全量设置
         let _ = self.with_link(|lm| {
             match lm.request(CMD_CONFIG_GET, None, Duration::from_millis(1000)) {
                 Ok(frame) => {
                     if let Some(data) = frame.data.as_ref() {
-                        if let Ok(snap) = serde_json::from_value::<DeviceSettings>(data.clone()) {
+                        if let Ok(mut snap) = serde_json::from_value::<DeviceSettings>(data.clone())
+                        {
+                            // 脱敏：不存储设备回传的密钥明文
+                            snap.mask_sensitive();
                             *self.settings.lock().unwrap() = snap;
                             self.log_kind(LogKind::Rx, "GET → 全量快照");
                         }

@@ -117,7 +117,14 @@ impl LinkManager {
             loop {
                 match write_rx.recv() {
                     Ok(WriterMsg::Frame(frame)) => {
-                        let s = frame.encode_line();
+                        // 序列化失败则跳过发送，避免把垃圾帧推给固件
+                        let s = match frame.encode_line() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!("帧序列化失败，跳过发送: {e}");
+                                continue;
+                            }
+                        };
                         if let Ok(mut p) = port_for_writer.lock() {
                             if let Err(e) = p.write_all(s.as_bytes()) {
                                 tracing::warn!("串口写入失败: {e}");
@@ -241,8 +248,21 @@ impl LinkManager {
                     if f.cmd == protocol::response_cmd(protocol::CMD_HEARTBEAT) {
                         self.hb.mark_ack(f.seq as u64);
                     }
-                    // 配对响应：仅响应帧且 seq != 0 且在 pending 表中
-                    if f.is_response() && f.seq != 0 {
+
+                    // 异类命令识别（body 在帧顶层，非 `data`）：
+                    // - 0x10 Profile State：响应帧 cmd 仍是 0x10（不是 0x90）
+                    // - 0x0C Voice Text：固件→App 推送，cmd 保持 0x0c
+                    // - 0x0F Music Control：固件→App 推送，cmd 保持 0x0f
+                    //
+                    // 这些命令的响应/推送**不应**走 `is_response()` 判定（因为
+                    // 0x10 / 0x0c / 0x0f 的最高位都是 0）。下面用 `is_top_level_cmd`
+                    // 单独识别，再走"响应 + seq!=0 配对"或"seq=0 推送"两条路径。
+                    let is_response_like = f.is_response()
+                        || (f.cmd == protocol::CMD_PROFILE_STATE
+                            && protocol::is_top_level_cmd(f.cmd));
+
+                    // 配对响应：响应类命令且 seq != 0 且在 pending 表中
+                    if is_response_like && f.seq != 0 {
                         if let Some(tx) = self.pending.lock().unwrap().remove(&f.seq) {
                             let _ = tx.send(f);
                             continue; // 已配对，不向 UI 推送

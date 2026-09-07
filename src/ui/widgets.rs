@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::protocol::DeviceSettings;
+use crate::protocol::{DeviceSettings, FieldMask};
 use crate::state::{AppHandle, LogKind, ToastKind, UiEvent};
 
 // ============ Toast ============
@@ -209,10 +209,71 @@ pub fn show_local_settings(
 
 // ============ DiffPreviewBar ============
 
+/// 按 `mask` 从 `src` 投影出仅含被修改字段的 `DeviceSettings`，
+/// 用于构造 SET 请求体。未置位的字段保持 `Default`，避免污染固件侧解析。
+///
+/// 注意：i32 默认 0、String 默认 ""、bool 默认 false —— 固件端 `parseConfigSetCommand`
+/// 收到这种字段通常会丢弃（参见协议文档 §5.3）。但为了让"合法 0 / 空串"也能
+/// 正确下发，我们在投影时**直接用 src 的值**，不做"是否非默认"的二次过滤：
+/// mask 已经准确表达了"用户改了哪些字段"。
+fn select_masked(src: &DeviceSettings, mask: FieldMask) -> DeviceSettings {
+    let mut out = DeviceSettings::default();
+    // 直接逐字段拷贝被 mask 选中的项；不选的字段保持 default。
+    macro_rules! copy_if {
+        ($bit:expr, $f:ident) => {
+            if mask.test($bit) {
+                out.$f = src.$f.clone();
+            }
+        };
+    }
+    copy_if!(crate::protocol::F_WIFI_SWITCH, wifi_switch);
+    copy_if!(crate::protocol::F_CONNECT_HOST, connect_host);
+    copy_if!(crate::protocol::F_WIFI_SSID, wifi_ssid);
+    copy_if!(crate::protocol::F_WIFI_PASSWORD, wifi_password);
+    copy_if!(crate::protocol::F_WORK_MODE, work_mode);
+    copy_if!(crate::protocol::F_RGB_MODE, rgb_mode);
+    copy_if!(crate::protocol::F_RGB_SINGLE_COLAR, rgb_single_colar);
+    copy_if!(crate::protocol::F_RGB_CLICK_MODE, rgb_click_mode);
+    copy_if!(crate::protocol::F_RGB_BRIGHTNESS, rgb_brightness);
+    copy_if!(crate::protocol::F_TFT_THEME, tft_theme);
+    copy_if!(crate::protocol::F_TFT_BRIGHTNESS, tft_brightness);
+    copy_if!(crate::protocol::F_DEVICE_VOLUME, device_volume);
+    copy_if!(crate::protocol::F_AUDIO_ENABLE, audio_enable);
+    copy_if!(crate::protocol::F_POWER_MODE, power_mode);
+    copy_if!(crate::protocol::F_VOICE_ENABLE, voice_enable);
+    copy_if!(crate::protocol::F_VOICE_TRIGGER_KEY, voice_trigger_key);
+    copy_if!(crate::protocol::F_VOICE_MAX_RECORD_MS, voice_max_record_ms);
+    copy_if!(crate::protocol::F_VOICE_AUTO_ENTER, voice_auto_enter);
+    copy_if!(crate::protocol::F_VOICE_DEV_PID, voice_dev_pid);
+    copy_if!(crate::protocol::F_VOICE_CUID, voice_cuid);
+    copy_if!(crate::protocol::F_VOICE_BAIDU_API_KEY, voice_baidu_api_key);
+    copy_if!(
+        crate::protocol::F_VOICE_BAIDU_SECRET_KEY,
+        voice_baidu_secret_key
+    );
+    copy_if!(crate::protocol::F_PC_STATUS_MASK, pc_status_mask);
+    copy_if!(
+        crate::protocol::F_ACTIVE_KEYMAP_PROFILE,
+        active_keymap_profile
+    );
+    copy_if!(crate::protocol::F_ACTIVE_PROFILE_NAME, active_profile_name);
+    copy_if!(
+        crate::protocol::F_ACTIVE_PROFILE_HAS_CUSTOM_ICON,
+        active_profile_has_custom_icon
+    );
+    out
+}
+
 /// 把 diff 通过 0x08 下发；成功后让 settings 刷新
-pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings) {
+///
+/// 协议约定：固件按"字段是否出现在 `data.config` 中"判断增量（详见
+/// `docs/protocol-usage.md` §4 与固件侧 `parseConfigSetCommand.cpp`）。
+/// 因此这里**不发 `mask`** —— 内部 `FieldMask` 仅用于 App 端的 diff 判定。
+pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
     use crate::protocol::CMD_CONFIG_SET;
-    let payload = serde_json::json!({ "config": diff });
+    // 仅把 mask 置位的字段挑出来，避免发送空 diff 时把全字段白送给固件。
+    let payload_diff = select_masked(diff, mask);
+    let payload = serde_json::json!({ "config": &payload_diff });
     let _ = handle.with_link(|lm| {
         match lm.request(
             CMD_CONFIG_SET,
@@ -250,10 +311,11 @@ pub fn show_diff_bar(
     handle: &AppHandle,
     ui: &mut egui::Ui,
     diff: &DeviceSettings,
+    mask: FieldMask,
     can_apply: bool,
 ) -> DiffAction {
     let mut action = DiffAction::None;
-    let count = diff_field_count(diff);
+    let count = diff_field_count(diff, mask);
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .stroke(egui::Stroke::new(
@@ -278,28 +340,29 @@ pub fn show_diff_bar(
                     .max_width(420.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            if diff.tft_brightness != 0 {
+                            // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
+                            if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
                                 ui.label(format!("tft_brightness={}", diff.tft_brightness));
                             }
-                            if diff.tft_theme != 0 {
+                            if mask.test(crate::protocol::F_TFT_THEME) {
                                 ui.label(format!("tft_theme={}", diff.tft_theme));
                             }
-                            if diff.work_mode != 0 {
+                            if mask.test(crate::protocol::F_WORK_MODE) {
                                 ui.label(format!("work_mode={}", diff.work_mode));
                             }
-                            if diff.active_keymap_profile != 0 {
+                            if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
                                 ui.label(format!(
                                     "active_keymap_profile={}",
                                     diff.active_keymap_profile
                                 ));
                             }
-                            if diff.device_volume != 0 {
+                            if mask.test(crate::protocol::F_DEVICE_VOLUME) {
                                 ui.label(format!("device_volume={}", diff.device_volume));
                             }
-                            if diff.audio_enable != 0 {
+                            if mask.test(crate::protocol::F_AUDIO_ENABLE) {
                                 ui.label(format!("audio_enable={}", diff.audio_enable));
                             }
-                            if diff.power_mode != 0 {
+                            if mask.test(crate::protocol::F_POWER_MODE) {
                                 ui.label(format!("power_mode={}", diff.power_mode));
                             }
                         });
@@ -327,30 +390,10 @@ pub enum DiffAction {
     Discard,
 }
 
-fn diff_field_count(d: &DeviceSettings) -> usize {
-    let mut n = 0;
-    if d.tft_brightness != 0 {
-        n += 1;
-    }
-    if d.tft_theme != 0 {
-        n += 1;
-    }
-    if d.work_mode != 0 {
-        n += 1;
-    }
-    if d.active_keymap_profile != 0 {
-        n += 1;
-    }
-    if d.device_volume != 0 {
-        n += 1;
-    }
-    if d.audio_enable != 0 {
-        n += 1;
-    }
-    if d.power_mode != 0 {
-        n += 1;
-    }
-    n
+fn diff_field_count(_d: &DeviceSettings, mask: FieldMask) -> usize {
+    // 与 diff() 的 mask 严格对齐：count = mask 中置位的位数。
+    // 这样当 diff 含合法 0 / 空串字段时也能正确计入"几处变更"。
+    mask.bits().count_ones() as usize
 }
 
 // ============ 简易 FieldEditor 辅助 ============
@@ -365,4 +408,43 @@ pub enum FieldChange {
 #[allow(dead_code)]
 pub fn _kind_marker() -> LogKind {
     LogKind::App
+}
+
+// ============ Settings Panel 通用脚手架 ============
+
+/// 统一的"settings 类"面板脚手架：clone snapshot/draft → 调回调填表 →
+/// 计算 diff → 渲染 DiffPreviewBar → 把变更写回 draft。
+///
+/// `panel_body` 在 `ScrollArea::vertical` 内执行，就地修改 `draft`。
+/// 写回始终发生（即使没改），因为 tab 切换时也要把当前显示状态
+/// 同步到草稿，避免下次进入面板看到过期数据。
+///
+/// 适用面板：Settings / Lighting / WiFi / Voice。
+pub fn settings_panel_scaffold(
+    handle: &AppHandle,
+    ui: &mut egui::Ui,
+    panel_body: impl FnOnce(&mut egui::Ui, &DeviceSettings, &mut DeviceSettings),
+) {
+    let snapshot = handle.settings.lock().unwrap().clone();
+    let mut draft = handle.draft.lock().unwrap().clone();
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        panel_body(ui, &snapshot, &mut draft);
+    });
+
+    let (diff, mask) = draft.diff(&snapshot);
+    let has_diff = !mask.is_empty();
+
+    ui.add_space(8.0);
+    let action = show_diff_bar(handle, ui, &diff, mask, has_diff);
+    match action {
+        DiffAction::Apply => apply_diff(handle, &diff, mask),
+        DiffAction::Discard => {
+            *handle.draft.lock().unwrap() = snapshot.clone();
+        }
+        DiffAction::None => {}
+    }
+
+    // 始终同步 draft（tab 切换 / 切走再回来时保持一致）
+    *handle.draft.lock().unwrap() = draft;
 }

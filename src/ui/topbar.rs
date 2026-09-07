@@ -49,6 +49,25 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
         };
         ui.label(egui::RichText::new(port_text).weak());
 
+        // 设备信息：连接成功后显示 device_name + firmware_version
+        if matches!(state, ConnectionState::Online) {
+            let info = handle.device_info.lock().unwrap().clone();
+            if !info.device_name.is_empty() || !info.firmware_version.is_empty() {
+                ui.add_space(8.0);
+                let mut parts = Vec::new();
+                if !info.device_name.is_empty() {
+                    parts.push(info.device_name);
+                }
+                if !info.firmware_version.is_empty() {
+                    parts.push(format!("v{}", info.firmware_version));
+                }
+                if !info.device_id.is_empty() {
+                    parts.push(info.device_id);
+                }
+                ui.label(egui::RichText::new(parts.join(" · ")).weak().size(12.0));
+            }
+        }
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(crate::ui::fonts::IconTextButton::new(
@@ -84,7 +103,8 @@ fn handle_refresh(handle: &AppHandle) {
         match lm.request(CMD_CONFIG_GET, None, Duration::from_millis(1000)) {
             Ok(frame) => {
                 if let Some(data) = frame.data.as_ref() {
-                    if let Ok(s) = serde_json::from_value::<DeviceSettings>(data.clone()) {
+                    if let Ok(mut s) = serde_json::from_value::<DeviceSettings>(data.clone()) {
+                        s.mask_sensitive();
                         *handle.settings.lock().unwrap() = s;
                         handle.log_kind(crate::state::LogKind::Rx, "GET → 全量快照");
                     }

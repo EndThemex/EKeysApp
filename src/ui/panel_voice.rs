@@ -4,13 +4,10 @@
 //!       voice_dev_pid / voice_cuid / voice_baidu_api_key / voice_baidu_secret_key
 //! 协议阶段 06 生效
 
-use std::cell::Cell;
-
 use eframe::egui;
 
-use crate::protocol::DeviceSettings;
 use crate::state::AppHandle;
-use crate::ui::widgets::{DiffAction, apply_diff, show_diff_bar};
+use crate::ui::widgets::settings_panel_scaffold;
 
 #[derive(Default)]
 pub struct VoicePanelState;
@@ -20,11 +17,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
     ui.label("阶段 06 生效：百度语音识别配置");
     ui.add_space(4.0);
 
-    let snapshot = handle.settings.lock().unwrap().clone();
-    let mut draft = handle.draft.lock().unwrap().clone();
-    let dirty = Cell::new(false);
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {
         ui.group(|ui| {
             ui.label("启用语音");
             let mut on = if draft.voice_enable != 0 || snapshot.voice_enable != 0 {
@@ -34,7 +27,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             };
             if ui.checkbox(&mut on, "启用").changed() {
                 draft.voice_enable = if on { 1 } else { 0 };
-                dirty.set(true);
             }
 
             ui.add_space(6.0);
@@ -42,7 +34,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             let mut trig = draft.voice_trigger_key.max(snapshot.voice_trigger_key);
             if ui.add(egui::DragValue::new(&mut trig).speed(1)).changed() {
                 draft.voice_trigger_key = trig;
-                dirty.set(true);
             }
 
             ui.add_space(6.0);
@@ -53,7 +44,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
                 .changed()
             {
                 draft.voice_max_record_ms = ms;
-                dirty.set(true);
             }
 
             ui.add_space(6.0);
@@ -65,7 +55,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             };
             if ui.checkbox(&mut ae, "按下触发键后自动进入识别").changed() {
                 draft.voice_auto_enter = if ae { 1 } else { 0 };
-                dirty.set(true);
             }
         });
 
@@ -77,7 +66,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             let mut pid = draft.voice_dev_pid.max(snapshot.voice_dev_pid);
             if ui.add(egui::DragValue::new(&mut pid).speed(1)).changed() {
                 draft.voice_dev_pid = pid;
-                dirty.set(true);
             }
             ui.label("(常用: 1537=中文, 1737=英文, 1637=日语, 1837=韩语)");
 
@@ -93,7 +81,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
                 .changed()
             {
                 draft.voice_cuid = cuid;
-                dirty.set(true);
             }
 
             ui.add_space(6.0);
@@ -112,7 +99,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
                 .changed()
             {
                 draft.voice_baidu_api_key = ak;
-                dirty.set(true);
             }
 
             ui.add_space(6.0);
@@ -131,54 +117,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
                 .changed()
             {
                 draft.voice_baidu_secret_key = sk;
-                dirty.set(true);
             }
         });
     });
-
-    let diff = draft.diff(&snapshot);
-    let has_diff = voice_diff_count(&diff) > 0;
-
-    ui.add_space(8.0);
-    let action = show_diff_bar(handle, ui, &diff, has_diff);
-    match action {
-        DiffAction::Apply => apply_diff(handle, &diff),
-        DiffAction::Discard => *handle.draft.lock().unwrap() = snapshot.clone(),
-        DiffAction::None => {}
-    }
-
-    if dirty.get() {
-        *handle.draft.lock().unwrap() = draft;
-    } else {
-        *handle.draft.lock().unwrap() = draft;
-    }
-}
-
-fn voice_diff_count(d: &DeviceSettings) -> usize {
-    let mut n = 0;
-    if d.voice_enable != 0 {
-        n += 1;
-    }
-    if d.voice_trigger_key != 0 {
-        n += 1;
-    }
-    if d.voice_max_record_ms != 0 {
-        n += 1;
-    }
-    if d.voice_auto_enter != 0 {
-        n += 1;
-    }
-    if d.voice_dev_pid != 0 {
-        n += 1;
-    }
-    if !d.voice_cuid.is_empty() {
-        n += 1;
-    }
-    if !d.voice_baidu_api_key.is_empty() {
-        n += 1;
-    }
-    if !d.voice_baidu_secret_key.is_empty() {
-        n += 1;
-    }
-    n
 }

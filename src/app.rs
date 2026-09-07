@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use crate::link::LinkEvent;
-use crate::protocol::DeviceSettings;
+use crate::protocol::{DeviceSettings, FieldMask};
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
     panel_about, panel_connection, panel_keymap, panel_lighting, panel_log, panel_settings,
@@ -86,15 +86,26 @@ impl WxiApp {
             LinkEvent::Frame(f) => {
                 if f.is_push() {
                     if let Some(data) = f.data.as_ref() {
-                        if let Ok(new_snap) = serde_json::from_value::<DeviceSettings>(data.clone())
+                        if let Ok(mut new_snap) =
+                            serde_json::from_value::<DeviceSettings>(data.clone())
                         {
+                            // 脱敏：不存储设备回传的密钥明文（WiFi 密码 / 百度 Key）
+                            new_snap.mask_sensitive();
                             // 1. 记录旧快照
                             let old_snap = self.handle.settings.lock().unwrap().clone();
                             // 2. 用推送值刷新 settings
                             *self.handle.settings.lock().unwrap() = new_snap.clone();
                             // 3. 合并 draft（草稿优先）：仅刷新未修改字段
+                            //    设备主动推送属于"全量快照"，两端 mask 视为全置位，
+                            //    等价于所有字段都参与 merge。
                             let mut draft = self.handle.draft.lock().unwrap();
-                            DeviceSettings::merge_push(&new_snap, &old_snap, &mut draft);
+                            DeviceSettings::merge_push(
+                                &new_snap,
+                                &old_snap,
+                                FieldMask::all(),
+                                FieldMask::all(),
+                                &mut draft,
+                            );
                         }
                     }
                     self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
@@ -265,7 +276,7 @@ impl eframe::App for WxiApp {
                 Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
                 Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
                 Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
-                Page::About => panel_about::show(ui),
+                Page::About => panel_about::show(&self.handle, ui),
             }
         });
 

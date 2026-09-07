@@ -42,7 +42,7 @@ pub struct KeymapPanelState {
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
     ui.heading("键映射");
     ui.label(
-        egui::RichText::new("阶段 05 起对接 CMD_KEYMAP_GET / SET；当前为本地草稿预览")
+        egui::RichText::new("对接 CMD_KEYMAP_GET / SET：重新加载从设备拉取，下发写入当前 Profile")
             .weak()
             .size(11.0),
     );
@@ -120,18 +120,55 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
     let action = show_keymap_diff_bar(ui, &diff);
     match action {
         KeymapDiffAction::Apply => {
-            // 阶段 05：替换为 CMD_KEYMAP_SET 增量下发
-            // 这里先把 diff 应用到快照草稿即可（本地一致性），并记录日志
-            handle.log_kind(
-                crate::state::LogKind::Tx,
-                format!("下发键映射 → {} 项变更（待阶段 05 接入）", diff.len()),
-            );
-            let mut snap = handle.keymap.lock().unwrap();
-            snap.apply_diff(&diff);
-            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
-                crate::state::ToastKind::Info,
-                format!("已应用 {} 项键映射变更（本地）", diff.len()),
-            ));
+            // 0x06 CMD_KEYMAP_SET：把当前 profile 的 11 键整表下发（固件按
+            // physical 逐键覆盖，属于"整包覆盖"语义；增量精确定位留待固件
+            // 支持按 physical 分项后再说）。
+            use crate::protocol::{CMD_KEYMAP_SET, KeymapSetReq};
+            use std::time::Duration;
+            let req = KeymapSetReq {
+                keymap: draft.to_firmware_entries(),
+            };
+            let data = serde_json::to_value(&req).ok();
+            let mut success = false;
+            let _ = handle.with_link(|lm| {
+                match lm.request(CMD_KEYMAP_SET, data, Duration::from_millis(1500)) {
+                    Ok(frame) => {
+                        if frame.status() == Some(0) {
+                            success = true;
+                        } else {
+                            let msg = frame.error.unwrap_or_else(|| "固件拒绝键映射".to_string());
+                            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                                crate::state::ToastKind::Error,
+                                format!("下发失败: {msg}"),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                            crate::state::ToastKind::Error,
+                            format!("下发超时: {e}"),
+                        ));
+                    }
+                }
+            });
+            if success {
+                // 固件 ACK 后才落本地快照，避免失败时 UI 状态与实际不符
+                let mut snap = handle.keymap.lock().unwrap();
+                snap.apply_diff(&diff);
+                handle.log_kind(
+                    crate::state::LogKind::Tx,
+                    format!("下发键映射 → {} 项变更", diff.len()),
+                );
+                let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                    crate::state::ToastKind::Success,
+                    format!("已下发 {} 项键映射变更", diff.len()),
+                ));
+            } else {
+                handle.log_kind(
+                    crate::state::LogKind::App,
+                    "键映射下发未成功，保留本地草稿待重试".to_string(),
+                );
+            }
         }
         KeymapDiffAction::Discard => {
             *handle.keymap_draft.lock().unwrap() = snapshot.clone();
@@ -271,10 +308,49 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                 ))
                 .clicked()
             {
-                // 阶段 05：替换为 CMD_KEYMAP_GET
+                // 0x05 CMD_KEYMAP_GET：从固件拉当前 profile 的 11 键，
+                // 刷新快照 + 草稿。响应 `keymap` 在帧顶层（Frame::extra），
+                // 值是数组本体（不是 {"keymap": [...]} wrapper）。
+                use crate::protocol::CMD_KEYMAP_GET;
+                use std::time::Duration;
+                let mut changed = false;
+                let _ = handle.with_link(|lm| {
+                    match lm.request(CMD_KEYMAP_GET, None, Duration::from_millis(1000)) {
+                        Ok(frame) => {
+                            if let Some(v) = frame.extra_value("keymap") {
+                                if let Ok(entries) = serde_json::from_value::<
+                                    Vec<crate::protocol::FirmwareKeyEntry>,
+                                >(v.clone())
+                                {
+                                    let mut snap = handle.keymap.lock().unwrap();
+                                    snap.apply_firmware_entries(&entries);
+                                    drop(snap);
+                                    let mut draft = handle.keymap_draft.lock().unwrap();
+                                    changed = draft.apply_firmware_entries(&entries);
+                                    drop(draft);
+                                    *handle.selected_key.lock().unwrap() = None;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                                crate::state::ToastKind::Error,
+                                format!("重新加载失败: {e}"),
+                            ));
+                        }
+                    }
+                });
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
-                    crate::state::ToastKind::Info,
-                    "重新加载功能待阶段 05 接入".to_string(),
+                    if changed {
+                        crate::state::ToastKind::Success
+                    } else {
+                        crate::state::ToastKind::Info
+                    },
+                    if changed {
+                        "已从设备加载键映射".to_string()
+                    } else {
+                        "键映射与设备一致".to_string()
+                    },
                 ));
             }
             if ui
@@ -604,16 +680,6 @@ fn draw_encoder(
         );
     }
 
-    // 中心指示点（当前角度）—— 随时间变化模拟"动"
-    let t = Instant::now().elapsed().as_secs_f32();
-    let indicator_angle = t * 1.2;
-    let ir = radius * 0.55;
-    let ip = egui::pos2(
-        r.center().x + indicator_angle.cos() * ir,
-        r.center().y + indicator_angle.sin() * ir,
-    );
-    painter.circle_filled(ip, 3.0, Color32::from_rgb(0xFF, 0xC0, 0x60));
-
     // 中心文字（标签 / 缩写）
     painter.text(
         r.center(),
@@ -640,6 +706,25 @@ fn draw_encoder(
     let resp = ui.interact(rect, id, Sense::click());
     let hovered = resp.hovered();
     let clicked = resp.clicked();
+
+    // 中心指示点：仅在 hover 或选中时显示（呼吸式脉动），未交互不绘制、不请求重绘。
+    if hovered || is_sel {
+        let pulse = (0.5 + 0.5 * Instant::now().elapsed().as_secs_f32().sin()) as f32;
+        let alpha = (0.55 + pulse * 0.45) as f32;
+        let base = Color32::from_rgb(0xFF, 0xC0, 0x60);
+        let dot_color =
+            Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (alpha * 255.0) as u8);
+        let ir = radius * 0.55;
+        let angle = pulse * std::f32::consts::TAU;
+        let ip = egui::pos2(
+            r.center().x + angle.cos() * ir,
+            r.center().y + angle.sin() * ir,
+        );
+        painter.circle_filled(ip, 3.0, dot_color);
+        // 仅在动画进行时按需重绘（~30 fps），避免空闲时持续重绘。
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
+    }
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         let status = if is_pending { "待下发" } else { "已应用" };
