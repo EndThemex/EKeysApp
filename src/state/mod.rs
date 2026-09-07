@@ -156,6 +156,10 @@ fn backoff_secs(attempt: u32) -> u64 {
     }
 }
 
+/// 重连最大尝试次数。超过后取消任务、提示用户手动重连，避免无限循环
+/// 占用资源、掩盖真实硬件问题。
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
 impl AppHandle {
     pub fn new() -> Self {
         let (ui_tx, ui_rx) = std::sync::mpsc::channel();
@@ -184,6 +188,11 @@ impl AppHandle {
 
     /// 绑定 LinkManager（连接成功后调用）
     pub fn attach_link(&self, mut lm: LinkManager) {
+        // 防御性：覆盖前先把旧的 LinkManager 卸掉并 close，否则旧 LM 的
+        // writer / router / heartbeat 线程会泄漏并继续往断开的串口写。
+        if let Some(mut old) = self.link.lock().unwrap().take() {
+            old.close();
+        }
         lm.start_heartbeat();
         // events_rx 保留在 LinkManager 内部；UI 每帧通过 poll_events 拉取
         // （内部完成 seq 响应配对 + 心跳 ack 标记 + 状态同步）
@@ -201,14 +210,31 @@ impl AppHandle {
     pub fn auto_get(&self) {
         use crate::protocol::{CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, DeviceSettings};
         // 1) 设备信息
+        //
+        // 协议 §6.1：`0x03` 响应把 `device_info` 放在**帧顶层**，不在 `data` 里。
+        // `Frame` 用 `#[serde(flatten)]` 把所有未声明的顶层字段收集到 `extra`，
+        // 所以这里从 `frame.extra` 取 `device_info` 而不是 `frame.data`。
         let _ = self.with_link(|lm| {
             match lm.request(CMD_DEVICE_INFO_GET, None, Duration::from_millis(1000)) {
                 Ok(frame) => {
-                    if let Some(data) = frame.data.as_ref() {
-                        if let Ok(info) = serde_json::from_value::<DeviceInfo>(data.clone()) {
-                            *self.device_info.lock().unwrap() = info;
-                            self.log_kind(LogKind::Rx, "GET → 设备信息");
+                    if let Some(v) = frame.extra.get("device_info") {
+                        match serde_json::from_value::<DeviceInfo>(v.clone()) {
+                            Ok(info) => {
+                                *self.device_info.lock().unwrap() = info;
+                                self.log_kind(LogKind::Rx, "GET → 设备信息");
+                            }
+                            Err(e) => {
+                                self.log_kind(LogKind::App, format!("GET 设备信息解析失败: {e}"));
+                            }
                         }
+                    } else {
+                        self.log_kind(
+                            LogKind::App,
+                            format!(
+                                "GET 设备信息响应缺 device_info 字段: cmd=0x{:02X} status={:?}",
+                                frame.cmd, frame.status
+                            ),
+                        );
                     }
                 }
                 Err(e) => {
@@ -243,14 +269,20 @@ impl AppHandle {
             lm.close();
         }
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
+        // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
+        *self.pending_reconnect.lock().unwrap() = None;
     }
 
-    /// 启动后台重连循环（指数退避 1→2→4→5s）。
+    /// 启动后台重连循环（指数退避 1→2→4→5s，5 次后放弃）。
     /// 由 App 每帧 tick_reconnect() 驱动。
     pub fn schedule_reconnect(&self, port_name: String) {
         let mut slot = self.pending_reconnect.lock().unwrap();
-        if slot.is_some() {
-            return; // 已有重连任务
+        // 已存在任务则不重复调度；如果旧任务的目标端口不同，则替换为新端口
+        // （用户可能手动切换端口后断线）。
+        if let Some(existing) = slot.as_ref() {
+            if existing.port_name == port_name {
+                return;
+            }
         }
         *slot = Some(ReconnectJob {
             port_name,
@@ -267,6 +299,12 @@ impl AppHandle {
         if now < job.next_at_ms {
             return;
         }
+        // 防御性：探测前再确认一次没有残留的 LinkManager 占着串口。
+        // （正常路径下 reader 退出 → app.rs 收到 Disconnected → 主动 detach；
+        //  这里兜底覆盖"手动 reset、固件重启但 USB 不掉"等异常路径。）
+        if self.link.lock().unwrap().is_some() {
+            return; // 仍有连接占用，等下一次 tick 或用户操作
+        }
         // 探测
         match crate::link::serial::open(&job.port_name) {
             Ok(_port) => {
@@ -282,6 +320,18 @@ impl AppHandle {
             }
             Err(_) => {
                 job.attempt = job.attempt.saturating_add(1);
+                if job.attempt >= MAX_RECONNECT_ATTEMPTS {
+                    // 达到上限：放弃重连，清 job，让用户手动接管
+                    *slot = None;
+                    let _ = self.ui_tx.send(UiEvent::Toast(
+                        ToastKind::Warning,
+                        format!(
+                            "{} 重连失败（已尝试 {} 次），请检查设备后手动重连",
+                            job.port_name, MAX_RECONNECT_ATTEMPTS
+                        ),
+                    ));
+                    return;
+                }
                 job.next_at_ms = now + backoff_secs(job.attempt);
                 *slot = Some(job.clone());
                 let _ = self.ui_tx.send(UiEvent::Toast(

@@ -112,24 +112,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
             .min_size(egui::vec2(96.0, 32.0));
         if ui.add_enabled(can_connect, connect_btn).clicked() {
             if let Some(name) = st.selected.clone() {
-                // reader 退出回调：调度重连任务
-                let rec = handle.reconnector();
-                match crate::link::LinkManager::open(
-                    &name,
-                    std::sync::Arc::new(move || {
-                        let port = rec.last_port.lock().unwrap().clone();
-                        if let Some(p) = port {
-                            let mut slot = rec.pending_reconnect.lock().unwrap();
-                            if slot.is_none() {
-                                *slot = Some(crate::state::ReconnectJob {
-                                    port_name: p,
-                                    attempt: 0,
-                                    next_at_ms: now_ms() + 1000,
-                                });
-                            }
-                        }
-                    }),
-                ) {
+                // reader 退出回调现在为空：reader 异常退出时，router 会把
+                // State(Disconnected) 转发给 UI，由 app.rs::handle_link_event
+                // 统一处理 detach + schedule_reconnect（避免在 reader 线程里
+                // join 自己导致死锁）。
+                let _ = handle.reconnector(); // 占位：保留接口，未来若需要从
+                // reader 线程主动通知可扩展。
+                match crate::link::LinkManager::open(&name, std::sync::Arc::new(|| {})) {
                     Ok(lm) => {
                         *handle.last_port.lock().unwrap() = Some(name.clone());
                         handle.attach_link(lm);
@@ -211,34 +200,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
 }
 
 fn attempt_connect(handle: &AppHandle, name: &str) {
-    let rec = handle.reconnector();
-    let _ = LinkManager::open(
-        name,
-        std::sync::Arc::new(move || {
-            let port = rec.last_port.lock().unwrap().clone();
-            if let Some(p) = port {
-                let mut slot = rec.pending_reconnect.lock().unwrap();
-                if slot.is_none() {
-                    *slot = Some(crate::state::ReconnectJob {
-                        port_name: p,
-                        attempt: 0,
-                        next_at_ms: now_ms() + 1000,
-                    });
-                }
-            }
-        }),
-    )
-    .map(|lm| {
+    let _ = handle.reconnector(); // 占位：见 panel_connection.rs 主按钮的注释
+    let _ = LinkManager::open(name, std::sync::Arc::new(|| {})).map(|lm| {
         *handle.last_port.lock().unwrap() = Some(name.to_string());
         handle.attach_link(lm);
         // 同步端口名到顶栏（自动连接路径不发 Navigate，避免抢 UI）
         let _ = handle.ui_tx.send(UiEvent::CurrentPort(name.to_string()));
     });
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

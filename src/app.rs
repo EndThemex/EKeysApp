@@ -125,6 +125,21 @@ impl WxiApp {
                 *self.handle.state.lock().unwrap() = s.clone();
                 self.handle
                     .log_kind(LogKind::App, format!("状态变更: {s:?}"));
+
+                // 被动断开（reader 异常退出时由 router 转发）：卸掉旧 LM，
+                // 并按上次连接的端口自动调度重连任务。
+                // - 主动断开（用户点"断开"）走 detach_link() 直接改 state，
+                //   不会经 router 转发到这里；所以这里的 Disconnected 一定
+                //   是 reader 异常退出导致的。
+                // - 区分点：handle.link 是否仍持有 LM。被动断开时 LM 还在。
+                if matches!(s, crate::link::ConnectionState::Disconnected)
+                    && self.handle.link.lock().unwrap().is_some()
+                {
+                    self.handle.detach_link();
+                    if let Some(port) = self.handle.last_port.lock().unwrap().clone() {
+                        self.handle.schedule_reconnect(port);
+                    }
+                }
             }
             LinkEvent::Error(e) => {
                 self.handle
