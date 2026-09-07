@@ -135,6 +135,8 @@ pub const CMD_PROFILE_STATE: u8 = 0x10;
 pub const CMD_PROFILE_ICON_SET: u8 = 0x11;
 /// HA 状态推送（仅定义，未接通）
 pub const CMD_HA_STATUS: u8 = 0x12;
+/// 系统时间注入（App → 固件，写入 epoch + tz）
+pub const CMD_TIME_SET: u8 = 0x13;
 
 /// 响应帧命令 ID = 请求命令 ID | 0x80
 ///

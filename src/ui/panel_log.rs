@@ -73,14 +73,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     .button(format!("{}  清空", crate::ui::icons::r::TRASH))
                     .clicked()
                 {
-                    handle.log_buf.lock().unwrap().clear();
+                    handle.log.clear();
                 }
                 let copy_btn =
                     egui::Button::new(format!("{}  复制全部", crate::ui::icons::r::COPY))
                         .fill(crate::ui::ACCENT)
                         .corner_radius(egui::CornerRadius::same(6));
                 if ui.add(copy_btn).clicked() {
-                    let snapshot = handle.log_buf.lock().unwrap().snapshot();
+                    let snapshot = handle.log.snapshot();
                     let text = render_entries_text(&snapshot, st);
                     if text.is_empty() {
                         let _ = handle.ui_tx.send(UiEvent::Toast(
@@ -100,7 +100,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
     });
     ui.add_space(8.0);
 
-    let entries = handle.log_buf.lock().unwrap().snapshot();
+    let entries = handle.log.snapshot();
     let total_visible = count_visible(&entries, st);
     ui.label(
         egui::RichText::new(format!(
@@ -246,7 +246,7 @@ fn format_timestamp(ms: u64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", h, m, s, millis)
 }
 
-// 保留 SharedLog 引用以避免警告（util/log 中定义了 SharedLog，但本面板直接走 handle.log_buf）
+// 保留 SharedLog 引用以避免警告（util/log 中定义了 SharedLog，但本面板直接走 handle.log）
 #[allow(dead_code)]
 fn _shared_log_marker() -> SharedLog {
     SharedLog::new()

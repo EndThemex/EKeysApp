@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use crate::link::LinkEvent;
 use crate::protocol::{CMD_HEARTBEAT, Frame};
-
+use crate::state::LogKind;
+use crate::util::log::SharedLog;
 /// 心跳间隔（可由 UI 配置；阶段 04 先硬编码 1s）
 pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
 /// 允许的最大无响应时间：3 个周期
@@ -69,9 +70,11 @@ pub fn spawn(
     write_tx: Sender<WriterMsg>,
     handle: HeartbeatHandle,
     link_tx: Sender<LinkEvent>,
+    log: SharedLog,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        log.push(LogKind::App, "heartbeat 线程启动".to_string());
         let interval = Duration::from_millis(HEARTBEAT_INTERVAL_MS);
         let timeout = interval * HEARTBEAT_TIMEOUT_MULTIPLIER;
         let grace = Duration::from_millis(HEARTBEAT_BOOT_GRACE_MS);
@@ -83,6 +86,11 @@ pub fn spawn(
         // 把发送逻辑抽出是为了让退避循环也能继续探测（而不是纯 sleep）。
         let send_one = |s: u32| -> bool {
             let frame = Frame::request(CMD_HEARTBEAT, s, None);
+            // 心跳专属 Tx 日志：写入完整 JSON 行（与实际下发的字节一致），
+            // 便于日志面板直接复制抓包。
+            if let Ok(line) = serde_json::to_string(&frame) {
+                log.push(LogKind::Tx, format!("Tx → {line}"));
+            }
             write_tx.send(WriterMsg::Frame(frame)).is_ok()
         };
 
@@ -116,6 +124,13 @@ pub fn spawn(
 
             if !in_grace && age > timeout {
                 let _ = link_tx.send(LinkEvent::State(crate::link::ConnectionState::Reconnecting));
+                log.push(
+                    LogKind::App,
+                    format!(
+                        "心跳超时 (age={:?}, timeout={timeout:?})，进入 Reconnecting",
+                        age
+                    ),
+                );
                 // 退避：每个周期继续发心跳探测，直到收到一次 ack。
                 // 旧实现只在循环里 sleep，等不到 ack 就一直卡在 Reconnecting。
                 while handle.last_ack_age() > timeout {
@@ -129,6 +144,7 @@ pub fn spawn(
                     thread::sleep(interval);
                 }
                 let _ = link_tx.send(LinkEvent::State(crate::link::ConnectionState::Online));
+                log.push(LogKind::App, "心跳恢复，重连为 Online".to_string());
             }
         }
     })

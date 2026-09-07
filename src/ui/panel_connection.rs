@@ -112,27 +112,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
             .min_size(egui::vec2(96.0, 32.0));
         if ui.add_enabled(can_connect, connect_btn).clicked() {
             if let Some(name) = st.selected.clone() {
-                // reader 退出回调现在为空：reader 异常退出时，router 会把
-                // State(Disconnected) 转发给 UI，由 app.rs::handle_link_event
-                // 统一处理 detach + schedule_reconnect（避免在 reader 线程里
-                // join 自己导致死锁）。
-                let _ = handle.reconnector(); // 占位：保留接口，未来若需要从
-                // reader 线程主动通知可扩展。
-                match crate::link::LinkManager::open(&name, std::sync::Arc::new(|| {})) {
-                    Ok(lm) => {
-                        *handle.last_port.lock().unwrap() = Some(name.clone());
-                        handle.attach_link(lm);
-                        handle.log_kind(crate::state::LogKind::App, format!("已连接到 {name}"));
-                        // 同步端口名到 AppHandle 的 current_port（顶栏用）
-                        let _ = handle.ui_tx.send(UiEvent::CurrentPort(name.clone()));
+                match handle.attempt_connect(&name) {
+                    Ok(()) => {
+                        // 连接成功 → 默认跳到设置页（沿用原有交互）
                         let _ = handle.ui_tx.send(UiEvent::Navigate(Page::Settings));
-                        let _ = handle.ui_tx.send(UiEvent::Toast(
-                            crate::state::ToastKind::Success,
-                            "已连接".into(),
-                        ));
                     }
                     Err(e) => {
-                        handle.log_kind(crate::state::LogKind::App, format!("连接失败: {e}"));
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             crate::state::ToastKind::Error,
                             format!("连接失败: {e}"),
@@ -186,6 +171,25 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
         if ui.checkbox(&mut ac, "启动时自动连接上次端口").changed() {
             *handle.auto_connect.lock().unwrap() = ac;
         }
+
+        // 重连中：显示取消按钮，直接停止自动重连循环。
+        // 仅在确实有挂起重连任务时出现，避免误触发；点击后清空 pending_reconnect，
+        // 下次 tick_reconnect() 就不会再发起探测/连接。
+        let reconnecting = handle.pending_reconnect.lock().unwrap().is_some();
+        if reconnecting && !is_online {
+            ui.add_space(6.0);
+            if ui
+                .button("✕ 取消重连")
+                .on_hover_text("停止当前正在进行的自动重连")
+                .clicked()
+            {
+                handle.cancel_reconnect();
+                let _ = handle.ui_tx.send(UiEvent::Toast(
+                    crate::state::ToastKind::Info,
+                    "已取消重连".into(),
+                ));
+            }
+        }
     });
 
     // 自动连接（仅当 Disconnected + 有 last_port + auto_connect=true + 还未尝试过）
@@ -193,18 +197,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
         if let Some(p) = handle.last_port.lock().unwrap().clone() {
             st.auto_connect_done = true;
             st.selected = Some(p.clone());
-            // 触发连接（同上逻辑简化版）
-            attempt_connect(handle, &p);
+            // 自动连接路径不发 Navigate，避免抢 UI；错误也只记日志，
+            // 由后续手动连接 / 重连任务继续兜底。
+            if let Err(e) = handle.attempt_connect(&p) {
+                handle.log_kind(crate::state::LogKind::App, format!("自动连接失败: {e}"));
+            }
         }
     }
-}
-
-fn attempt_connect(handle: &AppHandle, name: &str) {
-    let _ = handle.reconnector(); // 占位：见 panel_connection.rs 主按钮的注释
-    let _ = LinkManager::open(name, std::sync::Arc::new(|| {})).map(|lm| {
-        *handle.last_port.lock().unwrap() = Some(name.to_string());
-        handle.attach_link(lm);
-        // 同步端口名到顶栏（自动连接路径不发 Navigate，避免抢 UI）
-        let _ = handle.ui_tx.send(UiEvent::CurrentPort(name.to_string()));
-    });
 }

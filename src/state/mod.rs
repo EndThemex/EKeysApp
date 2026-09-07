@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkManager};
 use crate::protocol::{DeviceInfo, DeviceSettings, KeyAction, KeyRef, KeymapData};
+use crate::util::log::SharedLog;
 
 /// 单条日志条目（应用层日志 + 固件日志共用）
 #[derive(Debug, Clone)]
@@ -95,7 +96,9 @@ pub struct AppHandle {
     pub settings: Arc<Mutex<DeviceSettings>>, // 设备最新快照
     pub draft: Arc<Mutex<DeviceSettings>>,    // 用户编辑未下发的草稿
     pub state: Arc<Mutex<ConnectionState>>,
-    pub log_buf: Arc<Mutex<LogBuffer>>,
+    /// 共享日志缓冲；Link 层（Tx/Rx）与 UI 层（App/Firmware）共用同一个 buffer，
+    /// 这样连接/协议帧日志和 UI 业务日志可以统一在 Log 面板查看。
+    pub log: SharedLog,
     pub page: Arc<Mutex<Page>>,
     pub ui_tx: Sender<UiEvent>,
     pub ui_rx: Receiver<UiEvent>,
@@ -132,12 +135,38 @@ pub struct ReconnectJob {
     pub next_at_ms: u64,
 }
 
-/// 给 reader 退出回调用的轻量句柄（只持必要字段，全部 Send + Sync）
+/// 给 reader 退出回调用的轻量句柄（只持必要字段，全部 Send + Sync）。
+///
+/// 调用它的闭包来自 `LinkManager::open` 的 `on_reader_exit` 参数；当 reader
+/// 异常退出（且 router 没机会转发 State(Disconnected)）时触发，作为兜底重连。
 #[derive(Clone)]
 pub struct ReconnectorHandle {
     pub last_port: Arc<Mutex<Option<String>>>,
     pub ui_tx: Sender<UiEvent>,
     pub pending_reconnect: Arc<Mutex<Option<ReconnectJob>>>,
+}
+
+impl ReconnectorHandle {
+    /// 触发兜底重连调度：仅在 router 没机会转 Disconnected 的极端场景下使用。
+    pub fn trigger(&self) {
+        let Some(port) = self.last_port.lock().unwrap().clone() else {
+            return;
+        };
+        let mut slot = self.pending_reconnect.lock().unwrap();
+        // 已经有任务就别重复塞
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(ReconnectJob {
+            port_name: port.clone(),
+            attempt: 0,
+            next_at_ms: now_ms() + 1000,
+        });
+        let _ = self.ui_tx.send(UiEvent::Toast(
+            ToastKind::Warning,
+            format!("检测到 {port} 异常断开，开始自动重连…"),
+        ));
+    }
 }
 
 fn now_ms() -> u64 {
@@ -167,7 +196,7 @@ impl AppHandle {
             settings: Arc::new(Mutex::new(DeviceSettings::default())),
             draft: Arc::new(Mutex::new(DeviceSettings::default())),
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
-            log_buf: Arc::new(Mutex::new(LogBuffer::new(5000))),
+            log: SharedLog::new(),
             page: Arc::new(Mutex::new(Page::Connect)),
             ui_tx,
             ui_rx,
@@ -193,7 +222,7 @@ impl AppHandle {
         if let Some(mut old) = self.link.lock().unwrap().take() {
             old.close();
         }
-        lm.start_heartbeat();
+        lm.start_heartbeat(self.log.clone());
         // events_rx 保留在 LinkManager 内部；UI 每帧通过 poll_events 拉取
         // （内部完成 seq 响应配对 + 心跳 ack 标记 + 状态同步）
         *self.link.lock().unwrap() = Some(lm);
@@ -208,7 +237,38 @@ impl AppHandle {
     /// 自动 GET：连接成功后拉取设备信息 + 全量设置。
     /// 失败只写日志，不弹 Toast（避免断线后连刷错误）。
     pub fn auto_get(&self) {
-        use crate::protocol::{CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, DeviceSettings};
+        use crate::protocol::{CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, CMD_TIME_SET, DeviceSettings};
+        // 0) 同步本地时间到设备
+        //
+        // 协议 §9.4：连接后先下发 `0x13 CMD_TIME_SET`，写入 epoch + tz。
+        // 设备收到后立即 settimeofday() + setenv("TZ")，并在下一 1s tick 刷新主屏时间/日期/星期。
+        // NTP 未同步时这是主控可见时间的唯一来源；NTP 已同步时也会被后续 SNTP 覆盖，行为可接受。
+        let _ = self.with_link(|lm| {
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let data = serde_json::json!({
+                "epoch": epoch,
+                "tz": "CST-8",
+            });
+            match lm.request(CMD_TIME_SET, Some(data), Duration::from_millis(1000)) {
+                Ok(frame) => {
+                    let status = frame.status.unwrap_or(0);
+                    if status == 0 {
+                        self.log_kind(LogKind::Tx, "SET → 系统时间");
+                    } else {
+                        self.log_kind(
+                            LogKind::App,
+                            format!("SET 系统时间失败: {}", frame.error.unwrap_or_default()),
+                        );
+                    }
+                }
+                Err(e) => {
+                    self.log_kind(LogKind::App, format!("SET 系统时间超时: {e}"));
+                }
+            }
+        });
         // 1) 设备信息
         //
         // 协议 §6.1：`0x03` 响应把 `device_info` 放在**帧顶层**，不在 `data` 里。
@@ -265,12 +325,56 @@ impl AppHandle {
 
     /// 关闭连接
     pub fn detach_link(&self) {
+        let prev_port = self.port_name_or_last();
         if let Some(mut lm) = self.link.lock().unwrap().take() {
             lm.close();
         }
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
         // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
         *self.pending_reconnect.lock().unwrap() = None;
+        if let Some(p) = prev_port {
+            self.log_kind(LogKind::App, format!("已断开 {p}"));
+        } else {
+            self.log_kind(LogKind::App, "已断开");
+        }
+    }
+
+    fn port_name_or_last(&self) -> Option<String> {
+        self.link
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|lm| lm.port_name().to_string()))
+            .or_else(|| self.last_port.lock().ok().and_then(|p| p.clone()))
+    }
+
+    /// 建立一条新连接（共享路径：手动按钮 / 自动连接 / 重连都走这里）。
+    /// 成功会附带：写入 `last_port`、顶栏 `CurrentPort`、成功 Toast；
+    /// 失败仅返回错误，调用方决定是否推 Toast / 是否调度重连。
+    pub fn attempt_connect(&self, name: &str) -> Result<(), String> {
+        // 把 ReconnectorHandle 包成 reader 退出回调。router 转发 State(Disconnected)
+        // 是主路径；这里只在 router 也挂了时兜底触发重连。
+        let recon = self.reconnector();
+        let on_exit: std::sync::Arc<dyn Fn() + Send + Sync> =
+            std::sync::Arc::new(move || recon.trigger());
+        match crate::link::LinkManager::open(name, self.log.clone(), on_exit) {
+            Ok(lm) => {
+                *self.last_port.lock().unwrap() = Some(name.to_string());
+                // 切到新端口 → 清掉旧的重连任务，避免新连接跑起来后还在探测旧端口
+                self.cancel_reconnect();
+                self.log_kind(LogKind::App, format!("打开串口成功 {name}，启动后台线程"));
+                self.attach_link(lm);
+                self.log_kind(LogKind::App, format!("已连接到 {name}"));
+                let _ = self.ui_tx.send(UiEvent::CurrentPort(name.to_string()));
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::Toast(ToastKind::Success, "已连接".into()));
+                Ok(())
+            }
+            Err(e) => {
+                self.log_kind(LogKind::App, format!("连接失败: {e}"));
+                Err(e)
+            }
+        }
     }
 
     /// 启动后台重连循环（指数退避 1→2→4→5s，5 次后放弃）。
@@ -278,21 +382,24 @@ impl AppHandle {
     pub fn schedule_reconnect(&self, port_name: String) {
         let mut slot = self.pending_reconnect.lock().unwrap();
         // 已存在任务则不重复调度；如果旧任务的目标端口不同，则替换为新端口
-        // （用户可能手动切换端口后断线）。
+        // （用户可能手动切换端口后断线）。attempt 不重置，保留退避节奏。
         if let Some(existing) = slot.as_ref() {
             if existing.port_name == port_name {
                 return;
             }
         }
         *slot = Some(ReconnectJob {
-            port_name,
+            port_name: port_name.clone(),
             attempt: 0,
             next_at_ms: now_ms() + 1000,
         });
+        drop(slot);
+        self.log_kind(LogKind::App, format!("调度自动重连 {port_name}"));
     }
 
     /// 每帧调用：处理重连状态机
     pub fn tick_reconnect(&self) {
+        // 先复制一份 job，避免长时间持锁（包括 attempt_connect 内部也会 lock）
         let mut slot = self.pending_reconnect.lock().unwrap();
         let Some(mut job) = slot.clone() else { return };
         let now = now_ms();
@@ -305,41 +412,62 @@ impl AppHandle {
         if self.link.lock().unwrap().is_some() {
             return; // 仍有连接占用，等下一次 tick 或用户操作
         }
-        // 探测
+        // 先释放 pending_reconnect 的锁，再做可能阻塞的探测/连接。
+        // 否则 attempt_connect 内部若再 lock 同一把锁会死锁。
+        *slot = None;
+        drop(slot);
+
+        // 探测：仅确认设备是否回来了
         match crate::link::serial::open(&job.port_name) {
             Ok(_port) => {
-                // 探测成功：仅作为提示，状态保持 Disconnected
-                // —— LinkManager 由用户在 Connect 页手动接管。
-                // 不在这里置 Online，避免 link == None 但 state == Online
-                // 的"幽灵在线"假象。
-                *slot = None;
-                let _ = self.ui_tx.send(UiEvent::Toast(
-                    ToastKind::Success,
-                    format!("{} 已就绪，请重新连接", job.port_name),
-                ));
+                // 探测成功：直接建立完整连接。
+                // 这里不再"仅弹 Toast 让用户手动接管"，否则重连名存实亡。
+                match self.attempt_connect(&job.port_name) {
+                    Ok(()) => {
+                        // 连接成功：attempt_connect 已经清掉 pending_reconnect 并推 Success Toast
+                        let _ = self.ui_tx.send(UiEvent::Toast(
+                            ToastKind::Info,
+                            format!("已自动重连到 {}", job.port_name),
+                        ));
+                    }
+                    Err(_) => {
+                        // 设备能开但 LinkManager 启动失败（极少见）→ 计入 attempt
+                        job.attempt = job.attempt.saturating_add(1);
+                        self.apply_reconnect_failure(&mut job);
+                    }
+                }
             }
             Err(_) => {
                 job.attempt = job.attempt.saturating_add(1);
-                if job.attempt >= MAX_RECONNECT_ATTEMPTS {
-                    // 达到上限：放弃重连，清 job，让用户手动接管
-                    *slot = None;
-                    let _ = self.ui_tx.send(UiEvent::Toast(
-                        ToastKind::Warning,
-                        format!(
-                            "{} 重连失败（已尝试 {} 次），请检查设备后手动重连",
-                            job.port_name, MAX_RECONNECT_ATTEMPTS
-                        ),
-                    ));
-                    return;
-                }
-                job.next_at_ms = now + backoff_secs(job.attempt);
-                *slot = Some(job.clone());
-                let _ = self.ui_tx.send(UiEvent::Toast(
-                    ToastKind::Info,
-                    format!("重连 {} 第 {} 次…", job.port_name, job.attempt),
-                ));
+                self.apply_reconnect_failure(&mut job);
             }
         }
+    }
+
+    /// 重连失败统一处理：写日志 + 推 Toast + 决定是否继续退避 / 放弃。
+    fn apply_reconnect_failure(&self, job: &mut ReconnectJob) {
+        if job.attempt >= MAX_RECONNECT_ATTEMPTS {
+            *self.pending_reconnect.lock().unwrap() = None;
+            let _ = self.ui_tx.send(UiEvent::Toast(
+                ToastKind::Warning,
+                format!(
+                    "{} 重连失败（已尝试 {} 次），请检查设备后手动重连",
+                    job.port_name, MAX_RECONNECT_ATTEMPTS
+                ),
+            ));
+            return;
+        }
+        let next_at_ms = now_ms() + backoff_secs(job.attempt);
+        let next_job = ReconnectJob {
+            port_name: job.port_name.clone(),
+            attempt: job.attempt,
+            next_at_ms,
+        };
+        *self.pending_reconnect.lock().unwrap() = Some(next_job);
+        let _ = self.ui_tx.send(UiEvent::Toast(
+            ToastKind::Info,
+            format!("重连 {} 第 {} 次…", job.port_name, job.attempt),
+        ));
     }
 
     /// 取消待重连任务
@@ -367,15 +495,7 @@ impl AppHandle {
 
     /// 推一条应用日志
     pub fn log_app(&self, text: impl Into<String>) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        self.log_buf.lock().unwrap().push(LogEntry {
-            ts_ms: now,
-            kind: LogKind::App,
-            text: text.into(),
-        });
+        self.log.push(LogKind::App, text);
     }
 
     /// 便捷访问当前语言设置（避免每次 clone Arc）
@@ -390,15 +510,7 @@ impl AppHandle {
 
     /// 推一条 Tx/Rx/Firmware 日志
     pub fn log_kind(&self, kind: LogKind, text: impl Into<String>) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        self.log_buf.lock().unwrap().push(LogEntry {
-            ts_ms: now,
-            kind,
-            text: text.into(),
-        });
+        self.log.push(kind, text);
     }
 }
 
