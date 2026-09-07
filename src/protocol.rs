@@ -643,13 +643,18 @@ pub struct DeviceInfoSetResp {
 // 两者目前**没有一一对应**——这里只声明固件侧协议字段，供 App 端收发时使用。
 
 /// 单个物理键的固件侧表示（最大 11 键）。
+///
+/// 固件优先级：`function` > `text` > `normal` > `macro`（cmd_keymap.cpp）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct FirmwareKeyEntry {
     pub physical: u8, // 1~11
     #[serde(default)]
     pub normal: String,
-    #[serde(default)]
+    #[serde(rename = "macro", default)]
     pub macro_: String, // C++ 字段名 macro；Rust 保留字所以改 macro_
+    /// 文本注入串（ASCII ≤128；按键触发整串输出一次）
+    #[serde(default)]
+    pub text: String,
     #[serde(default)]
     pub function: String,
 }
@@ -1011,34 +1016,33 @@ pub fn top_level<T: serde::de::DeserializeOwned>(f: &Frame) -> Result<T, Protoco
 // 协议命令。设计上完全独立于 DeviceSettings，便于后面直接拆成单独的
 // 命令而不影响现有 Settings 面板。
 
-/// 按键可执行的动作（与固件 HID encoder 对齐的最小子集）。
+/// 修饰键位掩码（`KeyAction::Combo::mods` 用；bit 位与 HID modifier 顺序对齐）。
+pub const MOD_CTRL: u8 = 1 << 0; // LCtrl 0xE0
+pub const MOD_SHIFT: u8 = 1 << 1; // LShift 0xE1
+pub const MOD_ALT: u8 = 1 << 2; // LAlt 0xE2
+pub const MOD_GUI: u8 = 1 << 3; // LWin 0xE3
+
+/// 键动作。模型与固件 KeyResolver/KeyNameTable 的**真实解析能力**对齐：
+/// - 固件 `normal` 通道：`+` 分隔多段**同时按下**，段可为单字符键名 / `0xNN` /
+///   修饰键名（Ctrl/Shift/Alt/Win，大小写不敏感）；
+/// - 固件 `text` 通道：ASCII 文本注入（≤128 字符），按键触发整串输出一次；
+/// - 固件 `function` 通道：单槽组合键（如 `Ctrl+c`，整串传入）、单独修饰键、
+///   功能串 `KEY_FUNCTION_ASR`；`MEDIA_*` / `MOUSE_*` 等其它串固件
+///   **无法解析**（按键无效），App 仅原样透传展示，不伪造语义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum KeyAction {
     /// 未绑定（透传 / 触发默认）
     None,
-    /// 普通键：value 为 HID Usage ID（如 'A' = 0x04）
+    /// 普通单键：value 为 HID Usage ID（如 'A' = 0x04；0xE0~0xE3 修饰键单独成键）
     Keyboard(u16),
-    /// 多媒体
-    Media(MediaKey),
-    /// 鼠标动作
-    Mouse(MouseAction),
-    /// 宏：按键序列（简化版，延时写死在每步后）
-    Macro(Vec<MacroStep>),
-    /// 切到指定 layer（按下时进入，松手回到 Base）
-    LayerSwitch(u8),
-    /// 旋钮动作：旋转或按下
-    Encoder(EncoderAction),
-}
-
-/// 旋钮子动作：顺时针 / 逆时针 / 按下
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EncoderAction {
-    /// 顺时针
-    Cw,
-    /// 逆时针
-    Ccw,
-    /// 按下
-    Press,
+    /// 组合键：修饰键 + 主键同时按（如 Ctrl+Shift+S）
+    Combo { mods: u8, code: u16 },
+    /// 多个非修饰键同时按（固件 normal 通道 "a+b" 语义）
+    Chord(Vec<u16>),
+    /// 文本注入：按键触发整串输出一次（ASCII ≤128）
+    Text(String),
+    /// 固件功能串原样透传（`KEY_FUNCTION_ASR` / `MEDIA_PLAY` / 任意未识别串）
+    Function(String),
 }
 
 impl Default for KeyAction {
@@ -1047,17 +1051,94 @@ impl Default for KeyAction {
     }
 }
 
+/// 修饰键掩码 → 固件修饰键段名（顺序固定，用于编码/展示）。
+pub fn mods_names(mods: u8) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if mods & MOD_CTRL != 0 {
+        out.push("Ctrl");
+    }
+    if mods & MOD_SHIFT != 0 {
+        out.push("Shift");
+    }
+    if mods & MOD_ALT != 0 {
+        out.push("Alt");
+    }
+    if mods & MOD_GUI != 0 {
+        out.push("Win");
+    }
+    out
+}
+
+/// 修饰键掩码 → 主修饰键的 HID Usage ID（0xE0~0xE3；掩码为 0 返回 0xE0）。
+pub fn mods_primary_usage(mods: u8) -> u16 {
+    0xE0 + mods.trailing_zeros() as u16
+}
+
+/// 修饰键段名 → 位掩码（大小写不敏感；与固件 resolveModifierName 同名单集）。
+pub fn modifier_name_to_mod(name: &str) -> Option<u8> {
+    let n = name.trim();
+    if n.eq_ignore_ascii_case("Ctrl")
+        || n.eq_ignore_ascii_case("Control")
+        || n.eq_ignore_ascii_case("Ctrl_L")
+    {
+        return Some(MOD_CTRL);
+    }
+    if n.eq_ignore_ascii_case("Shift") || n.eq_ignore_ascii_case("Shift_L") {
+        return Some(MOD_SHIFT);
+    }
+    if n.eq_ignore_ascii_case("Alt") || n.eq_ignore_ascii_case("Option") || n.eq_ignore_ascii_case("Alt_L")
+    {
+        return Some(MOD_ALT);
+    }
+    if n.eq_ignore_ascii_case("Win")
+        || n.eq_ignore_ascii_case("GUI")
+        || n.eq_ignore_ascii_case("Meta")
+        || n.eq_ignore_ascii_case("Cmd")
+        || n.eq_ignore_ascii_case("Super")
+    {
+        return Some(MOD_GUI);
+    }
+    None
+}
+
 impl KeyAction {
     /// 给 UI 展示用的简短标签
     pub fn label(&self) -> String {
         match self {
             KeyAction::None => "未绑定".into(),
-            KeyAction::Keyboard(code) => format!("K 0x{code:02X}"),
-            KeyAction::Media(m) => format!("Media: {m:?}"),
-            KeyAction::Mouse(m) => format!("Mouse: {m:?}"),
-            KeyAction::Macro(steps) => format!("Macro ({} 步)", steps.len()),
-            KeyAction::LayerSwitch(l) => format!("→ Layer {l}"),
-            KeyAction::Encoder(e) => format!("Enc: {e:?}"),
+            KeyAction::Keyboard(code) => hid_key_label(*code)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("0x{code:02X}")),
+            KeyAction::Combo { mods, code } => {
+                let mut s = mods_names(*mods).join("+");
+                if !s.is_empty() {
+                    s.push('+');
+                }
+                s.push_str(
+                    &hid_key_label(*code)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("0x{code:02X}")),
+                );
+                s
+            }
+            KeyAction::Chord(codes) => codes
+                .iter()
+                .map(|c| {
+                    hid_key_label(*c)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("0x{c:02X}"))
+                })
+                .collect::<Vec<_>>()
+                .join("+"),
+            KeyAction::Text(t) => {
+                // 过长只展示前 12 字符，避免 DiffBar/Drawer 撑爆
+                let mut d: String = t.chars().take(12).collect();
+                if t.chars().count() > 12 {
+                    d.push('…');
+                }
+                format!("文本:{d}")
+            }
+            KeyAction::Function(f) => function_label(f),
         }
     }
 
@@ -1066,100 +1147,259 @@ impl KeyAction {
         !matches!(self, KeyAction::None)
     }
 
-    /// 转成固件 `FirmwareKeyEntry` 的字符串三件套 `(normal, macro, function)`。
+    /// 转成固件 `0x06` 单键条目。
     ///
-    /// 与固件 `cmd_keymap.cpp` 的规则对齐：`function` 非空时优先，`normal` /
-    /// `macro` 留空。固件当前仅能解析 a-z / 0-9 / Enter / Backspace / Space
-    /// 与 `0xNN` 字面量（`KeyNameTable.cpp`），因此：
-    /// - `Keyboard(code)` → `normal = "0xNN"`（固件可无损解析回 code）；
-    /// - `Media / Mouse / Macro / LayerSwitch / Encoder` → 尽力编码为
-    ///   `function` 字符串，但固件**无法解析**，按键会变成无效（固件跳过
-    ///   0x00）；这是两端模型差异的固有限制，见 `protocol-usage.md` §9.4。
-    pub fn to_firmware_strings(&self) -> (String, String, String) {
+    /// 与固件 `cmd_keymap.cpp` / `KeyNameTable.cpp` 规则对齐：
+    /// - `Keyboard` → `normal = "0xNN"`（固件字面量可无损解析，覆盖全部键位）；
+    /// - `Combo` → `normal = "Ctrl+Shift+0xNN"`（前缀修饰键段 + 字面量，
+    ///   固件 normal 通道逐段 press，即标准组合键）；
+    /// - `Chord` → `normal = "0xNN+0xMM"`（多键同按）；
+    /// - `Text` → `text` 通道；
+    /// - `Function` → `function` 通道原样透传（含 KEY_FUNCTION_ASR）。
+    pub fn to_firmware_entry(&self, physical: u8) -> FirmwareKeyEntry {
+        let mut e = FirmwareKeyEntry {
+            physical,
+            ..Default::default()
+        };
         match self {
-            KeyAction::Keyboard(code) => (format!("0x{code:02X}"), String::new(), String::new()),
-            KeyAction::Media(m) => (String::new(), String::new(), format!("MEDIA_{m:?}")),
-            KeyAction::Mouse(m) => (String::new(), String::new(), format!("MOUSE_{m:?}")),
-            KeyAction::Macro(steps) => {
-                let mut s = String::new();
-                for st in steps {
-                    if !s.is_empty() {
-                        s.push('+');
-                    }
-                    s.push_str(&st.action.label());
+            KeyAction::None => {}
+            KeyAction::Keyboard(code) => e.normal = format!("0x{code:02X}"),
+            KeyAction::Combo { mods, code } => {
+                let mut s = mods_names(*mods).join("+");
+                if !s.is_empty() {
+                    s.push('+');
                 }
-                (String::new(), s, String::new())
+                s.push_str(&format!("0x{code:02X}"));
+                e.normal = s;
             }
-            KeyAction::LayerSwitch(l) => (String::new(), String::new(), format!("LAYER_{l}")),
-            KeyAction::Encoder(e) => (String::new(), String::new(), format!("ENC_{e:?}")),
-            KeyAction::None => (String::new(), String::new(), String::new()),
+            KeyAction::Chord(codes) => {
+                e.normal = codes
+                    .iter()
+                    .map(|c| format!("0x{c:02X}"))
+                    .collect::<Vec<_>>()
+                    .join("+");
+            }
+            KeyAction::Text(t) => {
+                // 固件上限 128 字符（kMaxTextLen），App 端先行截断兜底
+                e.text = t.chars().take(128).collect();
+            }
+            KeyAction::Function(f) => e.function = f.trim().to_string(),
         }
+        e
     }
 
-    /// 从固件字符串还原动作（`0x05` GET 回读用）。
+    /// 从固件 `0x05` 单键条目还原动作。
     ///
-    /// - `function` 非空：尝试识别 `MEDIA_* / MOUSE_* / ENC_* / LAYER_*`，
-    ///   无法识别时按普通键名解析；
-    /// - `normal` 非空：按 `+` 取第一个键名 → `Keyboard`（固件当前单键模型）；
-    /// - `macro` 非空：固件的宏是 `+` 连接的键序列，App 的 `Macro` 是带延时
-    ///   的步进模型，**无法无损还原** → 返回 `None`（键变未绑定）。
-    pub fn from_firmware_strings(normal: &str, macro_: &str, function: &str) -> KeyAction {
-        if !function.is_empty() {
-            let f = function.trim();
-            if let Some(m) = parse_media_function(f) {
-                return KeyAction::Media(m);
-            }
-            if let Some(m) = parse_mouse_function(f) {
-                return KeyAction::Mouse(m);
-            }
-            if let Some(l) = f.strip_prefix("LAYER_").and_then(|s| s.parse::<u8>().ok()) {
-                return KeyAction::LayerSwitch(l);
-            }
-            if let Some(code) = name_to_hid(f) {
-                return KeyAction::Keyboard(code);
-            }
-            return KeyAction::None;
+    /// 通道优先级与固件一致：`function` > `text` > `normal` > `macro`。
+    /// 无法识别的内容一律落入 `Function(原文)` 原样保留——保证 GET → 应用
+    /// → SET 的整表下发**不会静默清掉**设备上 App 不认识的配置。
+    pub fn from_firmware_entry(e: &FirmwareKeyEntry) -> KeyAction {
+        let f = e.function.trim();
+        if !f.is_empty() {
+            return KeyAction::Function(f.to_string());
         }
-        if !normal.is_empty() {
-            // 固件用 "+" 连接多个键；App 当前单键模型，取第一个
-            let first = normal.split('+').next().unwrap_or(normal).trim();
-            if let Some(code) = name_to_hid(first) {
-                return KeyAction::Keyboard(code);
-            }
-            return KeyAction::None;
+        if !e.text.is_empty() {
+            return KeyAction::Text(e.text.clone());
         }
-        if !macro_.is_empty() {
-            // 无法还原步进宏 → 未绑定（见文档 §9.4 模型差异）
-            return KeyAction::None;
+        let n = e.normal.trim();
+        if !n.is_empty() {
+            return parse_normal_string(n);
+        }
+        let m = e.macro_.trim();
+        if !m.is_empty() {
+            // 固件宏通道暂未实现播放（协议文档 §7.1"请勿使用"）；
+            // 原样透传到 function 通道仅保留可见性，不会凭空产生输出。
+            return KeyAction::Function(m.to_string());
         }
         KeyAction::None
     }
 }
 
-/// 解析固件 `function` 字符串为媒体键；不认识返回 `None`。
-fn parse_media_function(f: &str) -> Option<MediaKey> {
+/// 解析固件 `normal` 通道字符串（`+` 分段同时按下）。
+///
+/// 规则（与 `KeyNameTable::resolveKeyName` 对齐）：
+/// - 除末段外若全为修饰键名 → `Combo`（末段为键）或全修饰 `Chord`（如 `Ctrl+Shift`）；
+/// - 无修饰前缀、单段 → `Keyboard`（修饰键名单独成键也算）；
+/// - 无修饰前缀、多段非修饰键 → `Chord`；
+/// - 其余无法解析 → `Function(原文)` 原样保留，避免下发时静默丢失。
+fn parse_normal_string(n: &str) -> KeyAction {
+    let segments: Vec<&str> = n.split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return KeyAction::None;
+    }
+    // 前缀修饰键段
+    let mut mods = 0u8;
+    let mut idx = 0usize;
+    while idx + 1 < segments.len() {
+        match modifier_name_to_mod(segments[idx]) {
+            Some(m) => {
+                mods |= m;
+                idx += 1;
+            }
+            None => break,
+        }
+    }
+    let rest = &segments[idx..];
+    if rest.len() == 1 {
+        let seg = rest[0];
+        if idx == 0 {
+            // 单段：修饰键单独成键（如 "Ctrl"）或普通键
+            if let Some(m) = modifier_name_to_mod(seg) {
+                return KeyAction::Keyboard(mods_primary_usage(m));
+            }
+            return match name_to_hid(seg) {
+                Some(code) => KeyAction::Keyboard(code),
+                None => KeyAction::Function(n.to_string()),
+            };
+        }
+        // 修饰前缀 + 单末段
+        if let Some(m) = modifier_name_to_mod(seg) {
+            // "Ctrl+Shift" 全修饰：同按两个修饰键
+            mods |= m;
+            return KeyAction::Chord(
+                segments[..idx + 1]
+                    .iter()
+                    .filter_map(|s| modifier_name_to_mod(s))
+                    .map(mods_primary_usage)
+                    .collect(),
+            );
+        }
+        return match name_to_hid(seg) {
+            Some(code) => KeyAction::Combo { mods, code },
+            None => KeyAction::Function(n.to_string()),
+        };
+    }
+    if idx == 0 {
+        // 多段非修饰键同按（如 "a+b"）
+        let codes: Option<Vec<u16>> = rest.iter().map(|s| name_to_hid(s)).collect();
+        return match codes {
+            Some(codes) if !codes.is_empty() => KeyAction::Chord(codes),
+            _ => KeyAction::Function(n.to_string()),
+        };
+    }
+    // 修饰前缀 + 多个非修饰段：固件语义未定义，整串透传
+    KeyAction::Function(n.to_string())
+}
+
+/// 固件功能串 → 友好展示名；未识别原样返回。
+fn function_label(f: &str) -> String {
     match f {
-        "MEDIA_PlayPause" | "MEDIA_PLAY_PAUSE" | "MEDIA_PLAY" => Some(MediaKey::PlayPause),
-        "MEDIA_Next" | "MEDIA_NEXT" => Some(MediaKey::Next),
-        "MEDIA_Prev" | "MEDIA_PREV" => Some(MediaKey::Prev),
-        "MEDIA_VolUp" | "MEDIA_VOLUME_UP" => Some(MediaKey::VolUp),
-        "MEDIA_VolDown" | "MEDIA_VOLUME_DOWN" => Some(MediaKey::VolDown),
-        "MEDIA_Mute" | "MEDIA_MUTE" => Some(MediaKey::Mute),
-        _ => None,
+        "KEY_FUNCTION_ASR" => "语音识别 (ASR)".into(),
+        "MEDIA_PLAY" | "MEDIA_PLAY_PAUSE" | "MEDIA_PlayPause" => "媒体: 播放/暂停".into(),
+        "MEDIA_NEXT" | "MEDIA_Next" => "媒体: 下一曲".into(),
+        "MEDIA_PREV" | "MEDIA_Prev" => "媒体: 上一曲".into(),
+        "MEDIA_VOLUME_UP" | "MEDIA_VolUp" => "媒体: 音量+".into(),
+        "MEDIA_VOLUME_DOWN" | "MEDIA_VolDown" => "媒体: 音量-".into(),
+        "MEDIA_MUTE" | "MEDIA_Mute" => "媒体: 静音".into(),
+        "MOUSE_LEFT" | "MOUSE_LeftClick" => "鼠标: 左键".into(),
+        "MOUSE_RIGHT" | "MOUSE_RightClick" => "鼠标: 右键".into(),
+        "MOUSE_MIDDLE" | "MOUSE_MiddleClick" => "鼠标: 中键".into(),
+        "MOUSE_SCROLL_UP" | "MOUSE_ScrollUp" => "鼠标: 滚轮上".into(),
+        "MOUSE_SCROLL_DOWN" | "MOUSE_ScrollDown" => "鼠标: 滚轮下".into(),
+        other => other.to_string(),
     }
 }
 
-/// 解析固件 `function` 字符串为鼠标动作；不认识返回 `None`。
-fn parse_mouse_function(f: &str) -> Option<MouseAction> {
-    match f {
-        "MOUSE_LeftClick" | "MOUSE_LEFT" => Some(MouseAction::LeftClick),
-        "MOUSE_RightClick" | "MOUSE_RIGHT" => Some(MouseAction::RightClick),
-        "MOUSE_MiddleClick" | "MOUSE_MIDDLE" => Some(MouseAction::MiddleClick),
-        "MOUSE_ScrollUp" | "MOUSE_SCROLL_UP" => Some(MouseAction::ScrollUp),
-        "MOUSE_ScrollDown" | "MOUSE_SCROLL_DOWN" => Some(MouseAction::ScrollDown),
-        _ => None,
-    }
+/// HID Usage ID → 展示用键名（覆盖 App 编辑器提供的全部键位）。
+///
+/// 仅用于 UI 展示；下发编码始终用 `0xNN` 字面量（固件可无损解析），
+/// 与固件 KeyNameTable 的具名键子集（Enter/Backspace/Space）无关。
+pub fn hid_key_label(code: u16) -> Option<&'static str> {
+    HID_KEY_CHOICES
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, n)| *n)
 }
+
+/// App 编辑器可选键位表（(HID Usage ID, 展示名)）。
+pub const HID_KEY_CHOICES: &[(u16, &str)] = &[
+    (0x04, "A"),
+    (0x05, "B"),
+    (0x06, "C"),
+    (0x07, "D"),
+    (0x08, "E"),
+    (0x09, "F"),
+    (0x0A, "G"),
+    (0x0B, "H"),
+    (0x0C, "I"),
+    (0x0D, "J"),
+    (0x0E, "K"),
+    (0x0F, "L"),
+    (0x10, "M"),
+    (0x11, "N"),
+    (0x12, "O"),
+    (0x13, "P"),
+    (0x14, "Q"),
+    (0x15, "R"),
+    (0x16, "S"),
+    (0x17, "T"),
+    (0x18, "U"),
+    (0x19, "V"),
+    (0x1A, "W"),
+    (0x1B, "X"),
+    (0x1C, "Y"),
+    (0x1D, "Z"),
+    (0x1E, "1"),
+    (0x1F, "2"),
+    (0x20, "3"),
+    (0x21, "4"),
+    (0x22, "5"),
+    (0x23, "6"),
+    (0x24, "7"),
+    (0x25, "8"),
+    (0x26, "9"),
+    (0x27, "0"),
+    (0x28, "Enter"),
+    (0x29, "Escape"),
+    (0x2A, "Backspace"),
+    (0x2B, "Tab"),
+    (0x2C, "Space"),
+    (0x2D, "-"),
+    (0x2E, "="),
+    (0x2F, "["),
+    (0x30, "]"),
+    (0x31, "\\"),
+    (0x33, ";"),
+    (0x34, "'"),
+    (0x35, "`"),
+    (0x36, ","),
+    (0x37, "."),
+    (0x38, "/"),
+    (0x39, "CapsLock"),
+    (0x3A, "F1"),
+    (0x3B, "F2"),
+    (0x3C, "F3"),
+    (0x3D, "F4"),
+    (0x3E, "F5"),
+    (0x3F, "F6"),
+    (0x40, "F7"),
+    (0x41, "F8"),
+    (0x42, "F9"),
+    (0x43, "F10"),
+    (0x44, "F11"),
+    (0x45, "F12"),
+    (0x46, "PrintScreen"),
+    (0x47, "ScrollLock"),
+    (0x48, "Pause"),
+    (0x49, "Insert"),
+    (0x4A, "Home"),
+    (0x4B, "PageUp"),
+    (0x4C, "Delete"),
+    (0x4D, "End"),
+    (0x4E, "PageDown"),
+    (0x4F, "→"),
+    (0x50, "←"),
+    (0x51, "↓"),
+    (0x52, "↑"),
+    (0xE0, "LCtrl"),
+    (0xE1, "LShift"),
+    (0xE2, "LAlt"),
+    (0xE3, "LGUI"),
+    (0xE4, "RCtrl"),
+    (0xE5, "RShift"),
+    (0xE6, "RAlt"),
+    (0xE7, "RGUI"),
+];
 
 /// HID Usage ID → 键名字符串（与固件 `KeyNameTable` 支持的子集对齐）。
 ///
@@ -1203,32 +1443,6 @@ pub fn name_to_hid(name: &str) -> Option<u16> {
         '0' => Some(0x27),
         _ => None,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MediaKey {
-    PlayPause,
-    Next,
-    Prev,
-    VolUp,
-    VolDown,
-    Mute,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MouseAction {
-    LeftClick,
-    RightClick,
-    MiddleClick,
-    ScrollUp,
-    ScrollDown,
-}
-
-/// 宏里的一步：按键 + 延时（毫秒）
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MacroStep {
-    pub action: KeyAction,
-    pub delay_ms: u32,
 }
 
 /// 物理槽位类型：普通按键还是旋钮（编码器）。
@@ -1481,13 +1695,7 @@ impl KeymapData {
                     })
                     .cloned()
                     .unwrap_or(KeyAction::None);
-                let (normal, macro_, function) = action.to_firmware_strings();
-                FirmwareKeyEntry {
-                    physical: i as u8 + 1,
-                    normal,
-                    macro_,
-                    function,
-                }
+                action.to_firmware_entry(i as u8 + 1)
             })
             .collect()
     }
@@ -1516,7 +1724,7 @@ impl KeymapData {
                 break;
             };
             let key = KeyRef { layer: 0, row, col };
-            let action = KeyAction::from_firmware_strings(&e.normal, &e.macro_, &e.function);
+            let action = KeyAction::from_firmware_entry(e);
             let is_set = action.is_set();
             let prev = profile.bindings.get(&key).cloned();
             match (&prev, is_set) {
@@ -2094,17 +2302,18 @@ mod tests {
 
     #[test]
     fn firmware_key_entry_uses_macro_field() {
-        // 固件字段名是 macro；序列化时应输出 "macro_" 还是 "macro"？
-        // 由 serde rename 控制：当前实现保持 macro_（避免与 Rust 关键字冲突）。
+        // 固件字段名是 macro（Rust 侧 macro_ 经 serde rename 对齐）；
         // 这里只校验序列化稳定、不报 panic。
         let e = FirmwareKeyEntry {
             physical: 1,
             normal: "a".into(),
             macro_: "Ctrl+c".into(),
+            text: String::new(),
             function: String::new(),
         };
         let s = serde_json::to_string(&e).to("s");
         assert!(s.contains("physical"));
+        assert!(s.contains("\"macro\""), "序列化字段名必须是 macro");
     }
 
     #[test]
@@ -2222,38 +2431,84 @@ mod tests {
         }
     }
 
-    /// KeyAction ↔ 固件字符串：Keyboard 用 0xNN 无损往返；Media/Mouse 识别。
+    /// KeyAction ↔ 固件条目：单键/组合键/多键同按/文本/功能串 全部无损往返。
     #[test]
     fn firmware_strings_roundtrip() {
         // Keyboard 无损
         let k = KeyAction::Keyboard(0x04);
-        let (n, m, f) = k.to_firmware_strings();
-        assert_eq!(n, "0x04");
-        assert_eq!(m, "");
-        assert_eq!(f, "");
-        assert_eq!(KeyAction::from_firmware_strings(&n, &m, &f), k);
+        let e = k.to_firmware_entry(1);
+        assert_eq!(e.normal, "0x04");
+        assert_eq!(KeyAction::from_firmware_entry(&e), k);
 
-        // Media 经 function 往返
-        let med = KeyAction::Media(MediaKey::PlayPause);
-        let (n, m, f) = med.to_firmware_strings();
-        assert_eq!(f, "MEDIA_PlayPause");
-        assert_eq!(KeyAction::from_firmware_strings(&n, &m, &f), med);
+        // 修饰键单独成键（"Ctrl" → 0xE0）
+        let e = FirmwareKeyEntry {
+            physical: 1,
+            normal: "Ctrl".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            KeyAction::from_firmware_entry(&e),
+            KeyAction::Keyboard(0xE0)
+        );
 
-        // Mouse 经 function 往返
-        let mo = KeyAction::Mouse(MouseAction::ScrollUp);
-        let (n, m, f) = mo.to_firmware_strings();
-        assert_eq!(f, "MOUSE_ScrollUp");
-        assert_eq!(KeyAction::from_firmware_strings(&n, &m, &f), mo);
+        // 组合键：normal "Ctrl+Shift+c" → Combo，往返一致
+        let combo = KeyAction::Combo {
+            mods: MOD_CTRL | MOD_SHIFT,
+            code: 0x06,
+        };
+        let e = combo.to_firmware_entry(1);
+        assert_eq!(e.normal, "Ctrl+Shift+0x06");
+        assert_eq!(KeyAction::from_firmware_entry(&e), combo);
 
-        // normal 支持固件 "+" 多键：App 取第一个
-        let act = KeyAction::from_firmware_strings("a+b", "", "");
-        assert_eq!(act, KeyAction::Keyboard(0x04));
+        // 多键同按："a+b" → Chord，往返一致
+        let e = FirmwareKeyEntry {
+            physical: 1,
+            normal: "a+b".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            KeyAction::from_firmware_entry(&e),
+            KeyAction::Chord(vec![0x04, 0x05])
+        );
+
+        // 文本通道往返
+        let text = KeyAction::Text("hello@example.com".into());
+        let e = text.to_firmware_entry(1);
+        assert_eq!(e.text, "hello@example.com");
+        assert_eq!(e.normal, "");
+        assert_eq!(KeyAction::from_firmware_entry(&e), text);
+
+        // 功能串（ASR）往返
+        let asr = KeyAction::Function("KEY_FUNCTION_ASR".into());
+        let e = asr.to_firmware_entry(1);
+        assert_eq!(e.function, "KEY_FUNCTION_ASR");
+        assert_eq!(KeyAction::from_firmware_entry(&e), asr);
+
+        // 未知 function 串原样保留（不丢数据）
+        let e = FirmwareKeyEntry {
+            physical: 1,
+            function: "MEDIA_PLAY".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            KeyAction::from_firmware_entry(&e),
+            KeyAction::Function("MEDIA_PLAY".into())
+        );
+
+        // macro 通道内容透传保留（固件宏未实现，不静默丢弃）
+        let e = FirmwareKeyEntry {
+            physical: 1,
+            macro_: "a+b".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            KeyAction::from_firmware_entry(&e),
+            KeyAction::Function("a+b".into())
+        );
 
         // 空 → None
-        assert_eq!(
-            KeyAction::from_firmware_strings("", "", ""),
-            KeyAction::None
-        );
+        let e = FirmwareKeyEntry::default();
+        assert_eq!(KeyAction::from_firmware_entry(&e), KeyAction::None);
     }
 
     /// KeymapData ↔ 固件 11 键往返：demo 布局 11 个按键全部可还原。
@@ -2278,7 +2533,7 @@ mod tests {
                     row: 2,
                     col: 3,
                 },
-                KeyAction::Media(MediaKey::VolUp), // K11 → 音量+
+                KeyAction::Function("KEY_FUNCTION_ASR".into()), // K11 → 语音识别
             );
         }
         let entries = kd.to_firmware_entries();
@@ -2287,7 +2542,7 @@ mod tests {
         assert_eq!(entries[0].normal, "0x04");
         assert_eq!(entries[9].physical, 10);
         assert_eq!(entries[10].physical, 11);
-        assert_eq!(entries[10].function, "MEDIA_VolUp");
+        assert_eq!(entries[10].function, "KEY_FUNCTION_ASR");
         // 旋钮槽（KNOB，row0 col3）不在 11 键里
         assert!(
             !entries.iter().any(|e| e.normal == "0x00"),
@@ -2313,7 +2568,7 @@ mod tests {
                 row: 2,
                 col: 3
             }),
-            Some(&KeyAction::Media(MediaKey::VolUp))
+            Some(&KeyAction::Function("KEY_FUNCTION_ASR".into()))
         );
     }
 

@@ -173,6 +173,8 @@ impl WxiApp {
             // 都用于刷新 Settings 页的当前 Profile 展示。
             CMD_PROFILE_STATE => match top_level::<ProfileState>(&f) {
                 Ok(ps) => {
+                    // 记录刷新前的本地 active_profile，用于判断是否需要重拉键映射
+                    let prev_profile = self.handle.keymap.lock().unwrap().active_profile;
                     self.handle.apply_profile_state(&ps);
                     self.handle.log_kind(
                         LogKind::Rx,
@@ -181,6 +183,14 @@ impl WxiApp {
                             ps.active_profile, ps.profile_name
                         ),
                     );
+                    // 设备端切了 Profile（0x06/0x08 只作用于激活 Profile）→
+                    // 重拉 0x05 键映射，否则键映射页展示的还是旧 Profile 的数据
+                    if ps.active_profile != prev_profile {
+                        if let Err(e) = self.handle.refresh_keymap_from_device() {
+                            self.handle
+                                .log_kind(LogKind::App, format!("Profile 切换后重拉键映射失败: {e}"));
+                        }
+                    }
                 }
                 Err(e) => {
                     self.handle

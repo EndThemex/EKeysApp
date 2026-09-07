@@ -9,7 +9,8 @@ use std::time::Duration;
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkManager};
 use crate::protocol::{
-    DeviceInfo, DeviceSettings, FieldMask, KeyAction, KeyRef, KeymapData, ProfileState,
+    DeviceInfo, DeviceSettings, FieldMask, FirmwareKeyEntry, KeyAction, KeyRef, KeymapData,
+    ProfileState,
 };
 use crate::util::log::SharedLog;
 
@@ -349,10 +350,13 @@ impl AppHandle {
                 }
             }
         });
+        // 3) 当前 Profile 的键映射（0x05；失败仅记日志，键映射页可手动"重新加载"）
+        if let Err(e) = self.refresh_keymap_from_device() {
+            self.log_kind(LogKind::App, format!("GET 键映射失败: {e}"));
+        }
     }
 
     /// 将一份新配置快照落地：脱敏 → 更新 `settings` → 同步 `draft` 中未编辑字段。
-    ///
     /// 三条来源统一走这里，保证 draft 合并行为一致（否则连接后 draft 停留在
     /// 全默认值，Settings 页会误报"有未应用更改"，Ctrl+Enter 还会把默认值刷到设备）：
     /// - 连接后 `auto_get()` 的 0x07 响应
@@ -402,6 +406,50 @@ impl AppHandle {
     /// 本次连接是否已成功读取全量配置
     pub fn is_config_loaded(&self) -> bool {
         self.config_loaded.load(Ordering::Acquire)
+    }
+
+    /// 从设备拉取当前 Profile 的 11 键映射（0x05），同步进快照与草稿。
+    ///
+    /// 响应的 `keymap` 数组位于帧顶层（Frame::extra），不是 `data.keymap`。
+    /// 拉取前先把快照/草稿的 active_profile 对齐设备当前 Profile
+    /// （settings.active_keymap_profile），保证条目写入正确的 Profile。
+    /// 返回 Ok(条目数) / Err(原因)。
+    pub fn refresh_keymap_from_device(&self) -> Result<usize, String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(crate::protocol::CMD_KEYMAP_GET, None, Duration::from_millis(1000))
+                .map_err(|e| format!("0x05 请求失败: {e}"))?;
+            let v = frame.extra_value("keymap").ok_or_else(|| {
+                format!(
+                    "0x05 响应缺 keymap 字段: cmd=0x{:02X} status={:?}",
+                    frame.cmd, frame.status
+                )
+            })?;
+            let entries =
+                serde_json::from_value::<Vec<FirmwareKeyEntry>>(v.clone())
+                    .map_err(|e| format!("0x05 keymap 解析失败: {e}"))?;
+            let n = entries.len();
+            let dev_profile = self.settings.lock().unwrap().active_keymap_profile as u8;
+            {
+                let mut snap = self.keymap.lock().unwrap();
+                if snap.profile(dev_profile).is_some() {
+                    snap.active_profile = dev_profile;
+                }
+                snap.apply_firmware_entries(&entries);
+            }
+            {
+                let mut draft = self.keymap_draft.lock().unwrap();
+                if draft.profile(dev_profile).is_some() {
+                    draft.active_profile = dev_profile;
+                }
+                draft.apply_firmware_entries(&entries);
+            }
+            // 选中键引用可能属于旧 Profile，直接清掉避免误导
+            *self.selected_key.lock().unwrap() = None;
+            self.log_kind(LogKind::Rx, format!("GET → 键映射（{n} 键）"));
+            Ok(n)
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
     }
 
     /// 关闭连接
