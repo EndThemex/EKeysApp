@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use crate::link::LinkEvent;
-use crate::protocol::{DeviceSettings, FieldMask};
+use crate::protocol::{response_cmd, top_level, DeviceSettings, ProfileState, CMD_CONFIG_GET, CMD_PROFILE_STATE};
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
     panel_about, panel_connection, panel_keymap, panel_lighting, panel_log, panel_settings,
@@ -81,33 +81,50 @@ impl WxiApp {
     fn handle_link_event(&mut self, e: LinkEvent) {
         match e {
             LinkEvent::Frame(f) => {
-                if f.is_push() {
-                    if let Some(data) = f.data.as_ref() {
-                        if let Ok(mut new_snap) =
-                            serde_json::from_value::<DeviceSettings>(data.clone())
+                // 异类顶层帧（0x10/0x0C/0x0F）cmd 最高位不为 1，不会命中 is_push()，
+                // 必须先分流，否则会掉进下方错误分支误报"未知错误" Toast。
+                if crate::protocol::is_top_level_cmd(f.cmd) {
+                    self.handle_top_level_frame(f);
+                } else if f.is_push() {
+                    // 设备主动推送的全量配置快照（0x87 seq=0）
+                    match f.data.as_ref() {
+                        Some(data) => match serde_json::from_value::<DeviceSettings>(data.clone())
                         {
-                            // 脱敏：不存储设备回传的密钥明文（WiFi 密码 / 百度 Key）
-                            new_snap.mask_sensitive();
-                            // 1. 记录旧快照
-                            let old_snap = self.handle.settings.lock().unwrap().clone();
-                            // 2. 用推送值刷新 settings
-                            *self.handle.settings.lock().unwrap() = new_snap.clone();
-                            // 3. 合并 draft（草稿优先）：仅刷新未修改字段
-                            //    设备主动推送属于"全量快照"，两端 mask 视为全置位，
-                            //    等价于所有字段都参与 merge。
-                            let mut draft = self.handle.draft.lock().unwrap();
-                            DeviceSettings::merge_push(
-                                &new_snap,
-                                &old_snap,
-                                FieldMask::all(),
-                                FieldMask::all(),
-                                &mut draft,
-                            );
+                            Ok(mut new_snap) => {
+                                self.handle.apply_settings_snapshot(&mut new_snap);
+                                self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
+                            }
+                            Err(e) => {
+                                self.handle
+                                    .log_kind(LogKind::App, format!("推送快照解析失败: {e}"));
+                            }
+                        },
+                        None => {
+                            self.handle.log_kind(LogKind::App, "推送快照缺 data 字段");
                         }
                     }
-                    self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
                 } else {
                     if f.status() == Some(0) {
+                        // 迟到的 0x87 响应（request 已超时、未配对）：快照仍有效，
+                        // 落地展示而不是只打一条 ACK 把数据丢掉。
+                        if f.cmd == response_cmd(CMD_CONFIG_GET) {
+                            if let Some(data) = f.data.as_ref() {
+                                match serde_json::from_value::<DeviceSettings>(data.clone()) {
+                                    Ok(mut snap) => {
+                                        self.handle.apply_settings_snapshot(&mut snap);
+                                        self.handle
+                                            .log_kind(LogKind::Rx, "Rx ← 全量快照（迟到响应）");
+                                        return; // handled，避免重复 ACK 日志
+                                    }
+                                    Err(e) => {
+                                        self.handle.log_kind(
+                                            LogKind::App,
+                                            format!("迟到快照解析失败: {e}"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         self.handle
                             .log_kind(LogKind::Rx, format!("ACK ← 0x{:02X}", f.cmd));
                     } else {
@@ -146,6 +163,33 @@ impl WxiApp {
                     .log_kind(LogKind::App, format!("Link 错误: {e}"));
                 push_toast(&mut self.toasts, ToastKind::Error, e, 5000);
             }
+        }
+    }
+
+    /// 异类顶层帧分发：body 在帧顶层而非 `data`，各命令单独解析。
+    fn handle_top_level_frame(&mut self, f: crate::protocol::Frame) {
+        match f.cmd {
+            // 0x10 Profile State：查询响应（seq≠0）与切换/连接推送（seq=0）同格式，
+            // 都用于刷新 Settings 页的当前 Profile 展示。
+            CMD_PROFILE_STATE => match top_level::<ProfileState>(&f) {
+                Ok(ps) => {
+                    self.handle.apply_profile_state(&ps);
+                    self.handle.log_kind(
+                        LogKind::Rx,
+                        format!(
+                            "Rx ← Profile: #{} \"{}\"",
+                            ps.active_profile, ps.profile_name
+                        ),
+                    );
+                }
+                Err(e) => {
+                    self.handle
+                        .log_kind(LogKind::App, format!("Profile 状态解析失败: {e}"));
+                }
+            },
+            // 0x0C 语音文本 / 0x0F 音乐控制：推送链路尚未接入 UI，
+            // router 已记录帧头日志，这里只吞掉避免误报错误。
+            _ => {}
         }
     }
 

@@ -337,7 +337,7 @@ App 端 Link 层在收到 `Frame` 后，按以下优先级分发：
 App 的 `KeymapData`（4 层 × 槽位 × 绑定表）与固件"每 Profile 11 个物理键"模型**不对等**，映射规则如下（已实现并单测）：
 
 - **映射基准**：当前 active profile 的 **layer 0（Base）**；旋钮槽（`SlotKind::Encoder`）跳过（固件不支持）；
-- 剩余按键按 `(row, col)` 升序编号为 `physical` 1~11（与 App 4×3 布局一致）；
+- 剩余按键按 `(row, col)` 升序编号为 `physical` 1~11（与 App 3 行 × 4 列布局一致）；
 - `KeymapData::to_firmware_entries()` 生成 `0x06` 请求体；`apply_firmware_entries()` 解析 `0x05` 响应写回；
 - **动作编码**（`KeyAction::to_firmware_strings`）：
   - `Keyboard(code)` → `normal = "0xNN"`（固件 `KeyNameTable` 可无损解析回 code）；

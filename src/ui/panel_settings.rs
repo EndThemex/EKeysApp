@@ -48,6 +48,15 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
     ui.heading("设备设置");
     ui.add_space(4.0);
 
+    // 在线但尚未成功读到 0x07 全量快照 → 提示用户当前展示的不是设备真实配置
+    if handle.state.lock().unwrap().is_online() && !handle.is_config_loaded() {
+        ui.label(
+            egui::RichText::new("正在读取设备配置…（若长时间无变化，请查看日志或点顶栏“刷新”）")
+                .weak(),
+        );
+        ui.add_space(4.0);
+    }
+
     // 快捷键：Ctrl+Enter 应用 / Esc 放弃（基于当前 draft vs snapshot）
     let ctrl_enter = ui
         .ctx()

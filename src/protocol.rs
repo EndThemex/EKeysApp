@@ -1611,13 +1611,12 @@ fn hid_kbd_from_char(c: char) -> u16 {
     }
 }
 
-/// 4×3 小键盘基础层的槽位定义（不含绑定）。仅用于 demo。
+/// 3 行 × 4 列小键盘基础层的槽位定义（不含绑定）。仅用于 demo。
 ///
-/// 4 行 × 3 列；row 0 第 3 个槽位是旋钮，其余 11 个是普通键：
-///   row 0: K1 / K2 / [KNOB]      （col 2, row 0 → 旋钮）
-///   row 1: K3 / K4 / K5
-///   row 2: K6 / K7 / K8
-///   row 3: K9 / K10/ K11
+/// 3 行 × 4 列；row 0 第 4 个槽位是旋钮，其余 11 个是普通键：
+///   row 0: K1 / K2 / K3 / [KNOB]   （col 3, row 0 → 旋钮，第一行第四个）
+///   row 1: K4 / K5 / K6 / K7
+///   row 2: K8 / K9 / K10/ K11
 ///
 /// 旋钮用 `width_units = 1.0` + `kind = Encoder` 标识；宽度与按键一致，
 /// 渲染层判断 `kind` 后画一个圆形刻度盘代替方键。
@@ -1626,15 +1625,15 @@ fn demo_base_4x3() -> Vec<KeySlot> {
     let normal: [(&str, u8, u8); 11] = [
         ("K1", 0, 0),
         ("K2", 0, 1),
-        ("K3", 1, 0),
-        ("K4", 1, 1),
-        ("K5", 1, 2),
-        ("K6", 2, 0),
-        ("K7", 2, 1),
-        ("K8", 2, 2),
-        ("K9", 3, 0),
-        ("K10", 3, 1),
-        ("K11", 3, 2),
+        ("K3", 0, 2),
+        ("K4", 1, 0),
+        ("K5", 1, 1),
+        ("K6", 1, 2),
+        ("K7", 1, 3),
+        ("K8", 2, 0),
+        ("K9", 2, 1),
+        ("K10", 2, 2),
+        ("K11", 2, 3),
     ];
     for (label, row, col) in normal.iter() {
         out.push(KeySlot {
@@ -1647,7 +1646,7 @@ fn demo_base_4x3() -> Vec<KeySlot> {
     }
     out.push(KeySlot {
         row: 0,
-        col: 2,
+        col: 3,
         label: "KNOB".into(),
         width_units: 1.0,
         kind: SlotKind::Encoder,
@@ -2276,8 +2275,8 @@ mod tests {
             p.bindings.insert(
                 KeyRef {
                     layer: 0,
-                    row: 3,
-                    col: 2,
+                    row: 2,
+                    col: 3,
                 },
                 KeyAction::Media(MediaKey::VolUp), // K11 → 音量+
             );
@@ -2289,7 +2288,7 @@ mod tests {
         assert_eq!(entries[9].physical, 10);
         assert_eq!(entries[10].physical, 11);
         assert_eq!(entries[10].function, "MEDIA_VolUp");
-        // 旋钮槽（KNOB，row0 col2）不在 11 键里
+        // 旋钮槽（KNOB，row0 col3）不在 11 键里
         assert!(
             !entries.iter().any(|e| e.normal == "0x00"),
             "旋钮不应被编码"
@@ -2311,8 +2310,8 @@ mod tests {
         assert_eq!(
             p.bindings.get(&KeyRef {
                 layer: 0,
-                row: 3,
-                col: 2
+                row: 2,
+                col: 3
             }),
             Some(&KeyAction::Media(MediaKey::VolUp))
         );

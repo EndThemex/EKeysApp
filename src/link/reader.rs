@@ -55,7 +55,17 @@ pub fn run_shared(
                     }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // 关键：空闲时必须让出锁窗口，不能立刻重新 lock。
+                // Windows 的 std::sync::Mutex（SRWLock）不公平：reader 释放后
+                // 立即重拿，writer 会持续抢锁失败、被饿死数秒（实测 Tx 实际
+                // 写入比入队晚 6s+，设备心跳响应成批迟到 → 心跳假超时反复
+                // 进 Reconnecting）。sleep 打断 lock convoy，writer 在此窗口
+                // 必然能拿到锁；空闲→有数据的首字节延迟增加 ≤ 一个 sleep，
+                // 对本应用无感。
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
             Err(e) => {
                 log.push(LogKind::App, format!("串口读失败: {e}"));
                 let _ = tx.send(LinkEvent::Error(format!("串口读失败: {e}")));

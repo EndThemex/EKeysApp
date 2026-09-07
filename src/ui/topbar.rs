@@ -98,18 +98,25 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
 fn handle_refresh(handle: &AppHandle) {
     use crate::protocol::{CMD_CONFIG_GET, DeviceSettings};
     use std::time::Duration;
-    // 直接在 UI 线程发请求；超时 1s
+    // 直接在 UI 线程发请求；超时 1s。
+    // 落地统一走 apply_settings_snapshot（含脱敏 + draft 同步）。
     let _ = handle.with_link(|lm| {
         match lm.request(CMD_CONFIG_GET, None, Duration::from_millis(1000)) {
-            Ok(frame) => {
-                if let Some(data) = frame.data.as_ref() {
-                    if let Ok(mut s) = serde_json::from_value::<DeviceSettings>(data.clone()) {
-                        s.mask_sensitive();
-                        *handle.settings.lock().unwrap() = s;
+            Ok(frame) => match frame.data.as_ref() {
+                Some(data) => match serde_json::from_value::<DeviceSettings>(data.clone()) {
+                    Ok(mut s) => {
+                        handle.apply_settings_snapshot(&mut s);
                         handle.log_kind(crate::state::LogKind::Rx, "GET → 全量快照");
                     }
+                    Err(e) => {
+                        handle
+                            .log_kind(crate::state::LogKind::App, format!("GET 配置解析失败: {e}"));
+                    }
+                },
+                None => {
+                    handle.log_kind(crate::state::LogKind::App, "GET 配置响应缺 data 字段");
                 }
-            }
+            },
             Err(e) => {
                 handle.log_kind(crate::state::LogKind::App, format!("GET 失败: {e}"));
             }

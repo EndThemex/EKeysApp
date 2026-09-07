@@ -54,11 +54,20 @@ pub fn list_ports() -> Vec<PortInfo> {
 
 /// 打开一个端口（固定 115200）
 pub fn open(name: &str) -> serialport::Result<Box<dyn serialport::SerialPort>> {
-    serialport::new(name, 115_200)
+    let mut port = serialport::new(name, 115_200)
         .timeout(std::time::Duration::from_millis(100))
         .data_bits(serialport::DataBits::Eight)
         .stop_bits(serialport::StopBits::One)
         .parity(serialport::Parity::None)
         .flow_control(serialport::FlowControl::None)
-        .open()
+        .open()?;
+    /*
+     * 固件使用 TinyUSB CDC（ARDUINO_USB_MODE=0），其 USBCDC::write 在
+     * host 未断言 DTR 时会静默丢弃所有输出（tud_cdc_n_connected == DTR），
+     * 导致 App 收不到任何回复/日志。serialport crate 打开端口默认不拉
+     * DTR/RTS，必须显式断言。
+     */
+    port.write_data_terminal_ready(true)?;
+    port.write_request_to_send(true)?;
+    Ok(port)
 }

@@ -1,13 +1,16 @@
 //! AppHandle：UI 可读的共享状态 + 事件总线。
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkManager};
-use crate::protocol::{DeviceInfo, DeviceSettings, KeyAction, KeyRef, KeymapData};
+use crate::protocol::{
+    DeviceInfo, DeviceSettings, FieldMask, KeyAction, KeyRef, KeymapData, ProfileState,
+};
 use crate::util::log::SharedLog;
 
 /// 单条日志条目（应用层日志 + 固件日志共用）
@@ -126,6 +129,9 @@ pub struct AppHandle {
     /// 设备信息快照（device_name / device_id / firmware_version）。
     /// 启动或重连后由 `0x03 CMD_DEVICE_INFO_GET` 刷新。
     pub device_info: Arc<Mutex<DeviceInfo>>,
+    /// 本次连接是否已成功读取全量配置（0x07）。
+    /// 断开时重置；Settings 页据此显示"正在读取设备配置…"提示。
+    pub config_loaded: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +218,7 @@ impl AppHandle {
             pending_binding: Arc::new(Mutex::new(None)),
             capture_keyboard: Arc::new(Mutex::new(false)),
             device_info: Arc::new(Mutex::new(DeviceInfo::default())),
+            config_loaded: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -274,53 +281,127 @@ impl AppHandle {
         // 协议 §6.1：`0x03` 响应把 `device_info` 放在**帧顶层**，不在 `data` 里。
         // `Frame` 用 `#[serde(flatten)]` 把所有未声明的顶层字段收集到 `extra`，
         // 所以这里从 `frame.extra` 取 `device_info` 而不是 `frame.data`。
+        // 连接初期设备可能正忙，超时重试一次（共 2 次尝试）。
         let _ = self.with_link(|lm| {
-            match lm.request(CMD_DEVICE_INFO_GET, None, Duration::from_millis(1000)) {
-                Ok(frame) => {
-                    if let Some(v) = frame.extra.get("device_info") {
-                        match serde_json::from_value::<DeviceInfo>(v.clone()) {
-                            Ok(info) => {
-                                *self.device_info.lock().unwrap() = info;
-                                self.log_kind(LogKind::Rx, "GET → 设备信息");
-                            }
-                            Err(e) => {
-                                self.log_kind(LogKind::App, format!("GET 设备信息解析失败: {e}"));
-                            }
-                        }
-                    } else {
+            let mut resp = None;
+            for attempt in 1..=2 {
+                match lm.request(CMD_DEVICE_INFO_GET, None, Duration::from_millis(1000)) {
+                    Ok(frame) => {
+                        resp = Some(frame);
+                        break;
+                    }
+                    Err(e) => {
                         self.log_kind(
                             LogKind::App,
-                            format!(
-                                "GET 设备信息响应缺 device_info 字段: cmd=0x{:02X} status={:?}",
-                                frame.cmd, frame.status
-                            ),
+                            format!("GET 设备信息超时（第 {attempt} 次）: {e}"),
                         );
                     }
                 }
-                Err(e) => {
-                    self.log_kind(LogKind::App, format!("GET 设备信息超时: {e}"));
-                }
             }
-        });
-        // 2) 全量设置
-        let _ = self.with_link(|lm| {
-            match lm.request(CMD_CONFIG_GET, None, Duration::from_millis(1000)) {
-                Ok(frame) => {
-                    if let Some(data) = frame.data.as_ref() {
-                        if let Ok(mut snap) = serde_json::from_value::<DeviceSettings>(data.clone())
-                        {
-                            // 脱敏：不存储设备回传的密钥明文
-                            snap.mask_sensitive();
-                            *self.settings.lock().unwrap() = snap;
-                            self.log_kind(LogKind::Rx, "GET → 全量快照");
-                        }
+            let Some(frame) = resp else { return };
+            if let Some(v) = frame.extra.get("device_info") {
+                match serde_json::from_value::<DeviceInfo>(v.clone()) {
+                    Ok(info) => {
+                        *self.device_info.lock().unwrap() = info;
+                        self.log_kind(LogKind::Rx, "GET → 设备信息");
+                    }
+                    Err(e) => {
+                        self.log_kind(LogKind::App, format!("GET 设备信息解析失败: {e}"));
                     }
                 }
-                Err(e) => {
-                    self.log_kind(LogKind::App, format!("GET 超时: {e}"));
+            } else {
+                self.log_kind(
+                    LogKind::App,
+                    format!(
+                        "GET 设备信息响应缺 device_info 字段: cmd=0x{:02X} status={:?}",
+                        frame.cmd, frame.status
+                    ),
+                );
+            }
+        });
+        // 2) 全量设置（1s 超时 × 2 次尝试；失败仅记日志，UI 显示"正在读取"提示）
+        let _ = self.with_link(|lm| {
+            let mut resp = None;
+            for attempt in 1..=2 {
+                match lm.request(CMD_CONFIG_GET, None, Duration::from_millis(1000)) {
+                    Ok(frame) => {
+                        resp = Some(frame);
+                        break;
+                    }
+                    Err(e) => {
+                        self.log_kind(LogKind::App, format!("GET 超时（第 {attempt} 次）: {e}"));
+                    }
+                }
+            }
+            let Some(frame) = resp else { return };
+            match frame.data.as_ref() {
+                Some(data) => match serde_json::from_value::<DeviceSettings>(data.clone()) {
+                    Ok(mut snap) => {
+                        self.apply_settings_snapshot(&mut snap);
+                        self.log_kind(LogKind::Rx, "GET → 全量快照");
+                    }
+                    Err(e) => {
+                        self.log_kind(LogKind::App, format!("GET 配置解析失败: {e}"));
+                    }
+                },
+                None => {
+                    self.log_kind(LogKind::App, "GET 配置响应缺 data 字段");
                 }
             }
         });
+    }
+
+    /// 将一份新配置快照落地：脱敏 → 更新 `settings` → 同步 `draft` 中未编辑字段。
+    ///
+    /// 三条来源统一走这里，保证 draft 合并行为一致（否则连接后 draft 停留在
+    /// 全默认值，Settings 页会误报"有未应用更改"，Ctrl+Enter 还会把默认值刷到设备）：
+    /// - 连接后 `auto_get()` 的 0x07 响应
+    /// - 顶栏"刷新"的 0x07 响应
+    /// - 设备主动推送（0x87 seq=0）
+    pub fn apply_settings_snapshot(&self, snap: &mut DeviceSettings) {
+        // 脱敏：不存储设备回传的密钥明文
+        snap.mask_sensitive();
+        let old = self.settings.lock().unwrap().clone();
+        *self.settings.lock().unwrap() = snap.clone();
+        // draft 合并：与旧快照一致的字段（未被编辑）跟随新快照，已编辑字段保留草稿值
+        let mut draft = self.draft.lock().unwrap();
+        DeviceSettings::merge_push(snap, &old, FieldMask::all(), FieldMask::all(), &mut draft);
+        drop(draft);
+        self.config_loaded.store(true, Ordering::Release);
+    }
+
+    /// 应用设备推送的 Profile 状态（0x10）：更新快照与草稿中的 Profile 展示字段。
+    /// 草稿未被编辑的字段跟随新值（与 merge_push 同语义）。
+    pub fn apply_profile_state(&self, ps: &ProfileState) {
+        let old = {
+            let s = self.settings.lock().unwrap();
+            (
+                s.active_keymap_profile,
+                s.active_profile_name.clone(),
+                s.active_profile_has_custom_icon,
+            )
+        };
+        {
+            let mut s = self.settings.lock().unwrap();
+            s.active_keymap_profile = ps.active_profile as i32;
+            s.active_profile_name = ps.profile_name.clone();
+            s.active_profile_has_custom_icon = ps.has_custom_icon;
+        }
+        let mut d = self.draft.lock().unwrap();
+        if d.active_keymap_profile == old.0 {
+            d.active_keymap_profile = ps.active_profile as i32;
+        }
+        if d.active_profile_name == old.1 {
+            d.active_profile_name = ps.profile_name.clone();
+        }
+        if d.active_profile_has_custom_icon == old.2 {
+            d.active_profile_has_custom_icon = ps.has_custom_icon;
+        }
+    }
+
+    /// 本次连接是否已成功读取全量配置
+    pub fn is_config_loaded(&self) -> bool {
+        self.config_loaded.load(Ordering::Acquire)
     }
 
     /// 关闭连接
@@ -330,6 +411,8 @@ impl AppHandle {
             lm.close();
         }
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
+        // 本次连接的配置读取状态作废；重连成功后由 auto_get() 重新置位
+        self.config_loaded.store(false, Ordering::Release);
         // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
         *self.pending_reconnect.lock().unwrap() = None;
         if let Some(p) = prev_port {
