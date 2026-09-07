@@ -1,10 +1,11 @@
-//! Link 层：串口 + 读写线程 + 状态机 + 心跳。
+//! Link 层：串口 + 后台线程（reader / writer / router / heartbeat）+ 状态机。
 //!
-//! 这是协议层与硬件之间的唯一桥梁。UI 通过 `LinkManager` 发请求、订阅事件。
+//! 这是协议层与硬件之间的唯一桥梁。UI 通过 `LinkManager` 发请求、每帧 `poll_events` 拉事件。
 //!
 //! 线程模型：
 //! - reader 线程：`Arc<Mutex<Box<dyn SerialPort>>>` 共享，循环 read + 行缓冲
 //! - writer 线程：消费 `WriterMsg`，按需 flush
+//! - router 线程：消费内部事件流 → 心跳 ack 标记 + seq 响应配对 + 状态同步，转发 UI 事件
 //! - heartbeat 线程：周期发 0x0a；超时降级 Reconnecting
 
 pub mod heartbeat;
@@ -58,10 +59,12 @@ type PendingMap = Arc<Mutex<HashMap<u32, Sender<Frame>>>>;
 /// reader 退出回调类型
 type OnReaderExit = Arc<dyn Fn() + Send + Sync>;
 
-/// LinkManager：持有串口（共享）+ 三个后台线程
+/// LinkManager：持有串口（共享）+ 后台线程（reader / writer / router / heartbeat）
 pub struct LinkManager {
     port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
-    events_rx_slot: Option<Receiver<LinkEvent>>,
+    /// UI 侧事件接收端（由 router 线程投递）；`poll_events` 每帧拉取
+    ui_rx_slot: Option<Receiver<LinkEvent>>,
+    /// 内部事件通道发送端（reader / heartbeat → router）
     events_tx: Sender<LinkEvent>,
     write_tx: Sender<WriterMsg>,
     pending: PendingMap,
@@ -72,6 +75,7 @@ pub struct LinkManager {
     on_reader_exit: OnReaderExit,
     _reader: Option<JoinHandle<()>>,
     _writer: Option<JoinHandle<()>>,
+    _router: Option<JoinHandle<()>>,
     _heartbeat: Option<JoinHandle<()>>,
 }
 
@@ -92,20 +96,25 @@ impl LinkManager {
         port: Box<dyn serialport::SerialPort>,
         on_reader_exit: OnReaderExit,
     ) -> Result<Self, String> {
+        // 内部通道：reader / heartbeat → router
         let (event_tx, event_rx) = channel::<LinkEvent>();
+        // UI 通道：router → poll_events
+        let (ui_tx, ui_rx) = channel::<LinkEvent>();
         let (write_tx, write_rx) = channel::<WriterMsg>();
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let hb = HeartbeatHandle::new();
         let stop = Arc::new(AtomicBool::new(false));
+        let state: Arc<Mutex<ConnectionState>> = Arc::new(Mutex::new(ConnectionState::Online));
 
         let port: Arc<Mutex<Box<dyn serialport::SerialPort>>> = Arc::new(Mutex::new(port));
 
         // reader：共享 port
         let port_for_reader = Arc::clone(&port);
         let tx_for_reader = event_tx.clone();
+        let stop_for_reader = Arc::clone(&stop);
         let on_reader_exit_th = on_reader_exit.clone();
         let reader = thread::spawn(move || {
-            reader::run_shared(port_for_reader, tx_for_reader.clone());
+            reader::run_shared(port_for_reader, tx_for_reader.clone(), stop_for_reader);
             let _ = tx_for_reader.send(LinkEvent::State(ConnectionState::Disconnected));
             // reader 异常退出 → 调用 on_reader_exit 回调（由 AppHandle 注入）
             on_reader_exit_th();
@@ -137,23 +146,71 @@ impl LinkManager {
             }
         });
 
+        // router：持续消费内部事件流，独立于 UI 线程完成
+        // 1) 心跳 ack 标记  2) seq 响应配对（request() 依赖，UI 阻塞等待时也能送达）
+        // 3) 状态同步       4) 其余事件转发给 UI
+        //
+        // 注意：不能把配对放在 UI 线程的 poll_events 里——request() 会阻塞 UI
+        // 线程等待响应，此时无人配对，所有请求必然超时。
+        let pending_for_router = Arc::clone(&pending);
+        let state_for_router = Arc::clone(&state);
+        let hb_for_router = hb.clone();
+        let router = thread::spawn(move || {
+            loop {
+                match event_rx.recv() {
+                    Ok(LinkEvent::Frame(f)) => {
+                        // 心跳响应 → mark_ack
+                        if f.cmd == protocol::response_cmd(protocol::CMD_HEARTBEAT) {
+                            hb_for_router.mark_ack(f.seq as u64);
+                        }
+
+                        // 异类命令识别（body 在帧顶层，非 `data`）：
+                        // - 0x10 Profile State：响应帧 cmd 仍是 0x10（不是 0x90）
+                        // - 0x0C Voice Text / 0x0F Music Control：固件→App 推送
+                        let is_response_like = f.is_response()
+                            || (f.cmd == protocol::CMD_PROFILE_STATE
+                                && protocol::is_top_level_cmd(f.cmd));
+
+                        // 配对响应：响应类命令且 seq != 0 且在 pending 表中
+                        if is_response_like && f.seq != 0 {
+                            if let Some(tx) = pending_for_router.lock().unwrap().remove(&f.seq) {
+                                let _ = tx.send(f);
+                                continue; // 已配对，不向 UI 转发
+                            }
+                        }
+                        // seq=0 主动推送 / 未配对响应 → 交给 UI
+                        let _ = ui_tx.send(LinkEvent::Frame(f));
+                    }
+                    Ok(LinkEvent::State(s)) => {
+                        *state_for_router.lock().unwrap() = s.clone();
+                        let _ = ui_tx.send(LinkEvent::State(s));
+                    }
+                    Ok(other) => {
+                        let _ = ui_tx.send(other);
+                    }
+                    Err(_) => return, // 所有发送端已关闭（LinkManager 析构）
+                }
+            }
+        });
+
         // 初始状态序列
         let _ = event_tx.send(LinkEvent::State(ConnectionState::Connecting));
         let _ = event_tx.send(LinkEvent::State(ConnectionState::Online));
 
         Ok(Self {
             port,
-            events_rx_slot: Some(event_rx),
+            ui_rx_slot: Some(ui_rx),
             events_tx: event_tx,
             write_tx,
             pending,
-            state: Arc::new(Mutex::new(ConnectionState::Online)),
+            state,
             hb,
             stop,
             port_name: name,
             on_reader_exit,
             _reader: Some(reader),
             _writer: Some(writer),
+            _router: Some(router),
             _heartbeat: None,
         })
     }
@@ -191,15 +248,6 @@ impl LinkManager {
         self.state.lock().unwrap().clone()
     }
 
-    /// 订阅事件占位 —— 实际订阅发生在 attach 时（见 AppHandle::attach_link）。
-    /// 保留 API 以兼容未来扩展。
-    pub fn _subscribe_compat() {}
-
-    /// 取走内部的 events_rx（一次性；attach 时使用）
-    pub fn take_events(&mut self) -> Receiver<LinkEvent> {
-        std::mem::replace(&mut self.events_rx_slot, None).expect("events_rx already consumed")
-    }
-
     /// 当前连接的端口名
     pub fn port_name(&self) -> &str {
         &self.port_name
@@ -234,49 +282,15 @@ impl LinkManager {
         }
     }
 
-    /// 拉一批事件并在内部完成 seq 配对与状态更新。
+    /// 拉一批 UI 事件（router 线程已完成 seq 配对 / 心跳 ack / 状态同步）。
     /// UI 每帧调用一次。
     pub fn poll_events(&self) -> Vec<LinkEvent> {
         let mut out = Vec::new();
-        let Some(rx) = self.events_rx_slot.as_ref() else {
+        let Some(rx) = self.ui_rx_slot.as_ref() else {
             return out;
         };
         while let Ok(ev) = rx.try_recv() {
-            match ev {
-                LinkEvent::Frame(f) => {
-                    // 心跳响应 → mark_ack
-                    if f.cmd == protocol::response_cmd(protocol::CMD_HEARTBEAT) {
-                        self.hb.mark_ack(f.seq as u64);
-                    }
-
-                    // 异类命令识别（body 在帧顶层，非 `data`）：
-                    // - 0x10 Profile State：响应帧 cmd 仍是 0x10（不是 0x90）
-                    // - 0x0C Voice Text：固件→App 推送，cmd 保持 0x0c
-                    // - 0x0F Music Control：固件→App 推送，cmd 保持 0x0f
-                    //
-                    // 这些命令的响应/推送**不应**走 `is_response()` 判定（因为
-                    // 0x10 / 0x0c / 0x0f 的最高位都是 0）。下面用 `is_top_level_cmd`
-                    // 单独识别，再走"响应 + seq!=0 配对"或"seq=0 推送"两条路径。
-                    let is_response_like = f.is_response()
-                        || (f.cmd == protocol::CMD_PROFILE_STATE
-                            && protocol::is_top_level_cmd(f.cmd));
-
-                    // 配对响应：响应类命令且 seq != 0 且在 pending 表中
-                    if is_response_like && f.seq != 0 {
-                        if let Some(tx) = self.pending.lock().unwrap().remove(&f.seq) {
-                            let _ = tx.send(f);
-                            continue; // 已配对，不向 UI 推送
-                        }
-                    }
-                    // seq=0 主动推送 / 未配对响应 → 交给 UI
-                    out.push(LinkEvent::Frame(f));
-                }
-                LinkEvent::State(s) => {
-                    *self.state.lock().unwrap() = s.clone();
-                    out.push(LinkEvent::State(s));
-                }
-                other => out.push(other),
-            }
+            out.push(ev);
         }
         out
     }

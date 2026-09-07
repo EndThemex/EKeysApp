@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{Language, LocalConfig, Theme};
-use crate::link::{ConnectionState, LinkEvent, LinkManager};
+use crate::link::{ConnectionState, LinkManager};
 use crate::protocol::{DeviceInfo, DeviceSettings, KeyAction, KeyRef, KeymapData};
 
 /// 单条日志条目（应用层日志 + 固件日志共用）
@@ -61,6 +61,8 @@ pub enum UiEvent {
     OpenLocalSettings,
     ConfirmYes(UiConfirmKind),
     ConfirmNo(UiConfirmKind),
+    /// 当前连接端口变化（顶栏显示 + 切换页面时保持显示）
+    CurrentPort(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,7 +97,6 @@ pub struct AppHandle {
     pub state: Arc<Mutex<ConnectionState>>,
     pub log_buf: Arc<Mutex<LogBuffer>>,
     pub page: Arc<Mutex<Page>>,
-    pub link_events: Mutex<Option<Receiver<LinkEvent>>>,
     pub ui_tx: Sender<UiEvent>,
     pub ui_rx: Receiver<UiEvent>,
     pub link: Mutex<Option<LinkManager>>,
@@ -164,7 +165,6 @@ impl AppHandle {
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             log_buf: Arc::new(Mutex::new(LogBuffer::new(5000))),
             page: Arc::new(Mutex::new(Page::Connect)),
-            link_events: Mutex::new(None),
             ui_tx,
             ui_rx,
             link: Mutex::new(None),
@@ -185,10 +185,12 @@ impl AppHandle {
     /// 绑定 LinkManager（连接成功后调用）
     pub fn attach_link(&self, mut lm: LinkManager) {
         lm.start_heartbeat();
-        // take 出 events_rx
-        let rx = lm.take_events();
-        *self.link_events.lock().unwrap() = Some(rx);
+        // events_rx 保留在 LinkManager 内部；UI 每帧通过 poll_events 拉取
+        // （内部完成 seq 响应配对 + 心跳 ack 标记 + 状态同步）
         *self.link.lock().unwrap() = Some(lm);
+
+        // 同步共享 state：UI 顶栏/侧栏/连接页都从这里读
+        *self.state.lock().unwrap() = ConnectionState::Online;
 
         // 连接成功 → 自动 GET 设备信息 + 全量快照
         self.auto_get();
@@ -268,13 +270,15 @@ impl AppHandle {
         // 探测
         match crate::link::serial::open(&job.port_name) {
             Ok(_port) => {
-                // 探测成功：通知 UI 让用户重新点 Connect 接管
+                // 探测成功：仅作为提示，状态保持 Disconnected
+                // —— LinkManager 由用户在 Connect 页手动接管。
+                // 不在这里置 Online，避免 link == None 但 state == Online
+                // 的"幽灵在线"假象。
                 *slot = None;
                 let _ = self.ui_tx.send(UiEvent::Toast(
                     ToastKind::Success,
                     format!("{} 已就绪，请重新连接", job.port_name),
                 ));
-                *self.state.lock().unwrap() = ConnectionState::Online;
             }
             Err(_) => {
                 job.attempt = job.attempt.saturating_add(1);

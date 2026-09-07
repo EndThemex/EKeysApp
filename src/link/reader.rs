@@ -1,6 +1,7 @@
 //! 后台读线程：按行分帧 → 协议帧/固件日志分流。
 
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,12 +9,20 @@ use std::time::Duration;
 use crate::link::LinkEvent;
 use crate::protocol;
 
-/// 共享端口版的读循环（reader 与 writer 通过 Mutex 串行访问）
-pub fn run_shared(port: Arc<Mutex<Box<dyn serialport::SerialPort>>>, tx: Sender<LinkEvent>) {
+/// 共享端口版的读循环（reader 与 writer 通过 Mutex 串行访问）。
+/// `stop` 置位后退出，保证 `LinkManager::close()` 的 join 能返回。
+pub fn run_shared(
+    port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    tx: Sender<LinkEvent>,
+    stop: Arc<AtomicBool>,
+) {
     let mut buf = [0u8; 512];
     let mut line = String::with_capacity(256);
 
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         let read_result = {
             let mut p = match port.lock() {
                 Ok(g) => g,

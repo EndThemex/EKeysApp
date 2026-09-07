@@ -66,16 +66,13 @@ impl WxiApp {
     }
 
     fn drain_link_events(&mut self) {
-        // 拿到订阅 Receiver，drain 一批事件（不持锁 recv）
-        let mut evs: Vec<LinkEvent> = vec![];
-        {
-            let slot = self.handle.link_events.lock().unwrap();
-            if let Some(rx) = slot.as_ref() {
-                while let Ok(e) = rx.try_recv() {
-                    evs.push(e);
-                }
-            }
-        }
+        // 通过 LinkManager::poll_events 拉取一批事件：
+        // 内部完成 seq 响应配对（request() 依赖）、心跳 ack 标记与状态同步，
+        // 只把 UI 关心的事件（未配对帧 / 推送 / 状态 / 日志 / 错误）透传出来。
+        let evs = self
+            .handle
+            .with_link(|lm| lm.poll_events())
+            .unwrap_or_default();
         for e in evs {
             self.handle_link_event(e);
         }
@@ -124,6 +121,8 @@ impl WxiApp {
                 self.handle.log_kind(LogKind::Firmware, s);
             }
             LinkEvent::State(s) => {
+                // 状态变化必须同步进共享 state：顶栏/侧栏/连接页 UI 直接读这里
+                *self.handle.state.lock().unwrap() = s.clone();
                 self.handle
                     .log_kind(LogKind::App, format!("状态变更: {s:?}"));
             }
@@ -164,6 +163,10 @@ impl WxiApp {
                 }
                 UiEvent::OpenLocalSettings => {
                     self.local_settings_open = true;
+                }
+                UiEvent::CurrentPort(p) => {
+                    // 顶栏端口名显示；与 handle.last_port 解耦（后者是"上次端口"，用于自动连接）
+                    self.current_port = if p.is_empty() { None } else { Some(p) };
                 }
             }
         }
@@ -226,6 +229,8 @@ impl eframe::App for WxiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_link_events();
         self.drain_ui_events();
+        // 重连状态机：每帧驱动；time-to-next-try 之前直接 return
+        self.handle.tick_reconnect();
         self.handle_shortcuts(ctx);
 
         // chrome（顶栏/侧栏/底栏）统一底色，与内容区形成清晰分区

@@ -134,6 +134,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                         *handle.last_port.lock().unwrap() = Some(name.clone());
                         handle.attach_link(lm);
                         handle.log_kind(crate::state::LogKind::App, format!("已连接到 {name}"));
+                        // 同步端口名到 AppHandle 的 current_port（顶栏用）
+                        let _ = handle.ui_tx.send(UiEvent::CurrentPort(name.clone()));
                         let _ = handle.ui_tx.send(UiEvent::Navigate(Page::Settings));
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             crate::state::ToastKind::Success,
@@ -157,6 +159,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
         if ui.add_enabled(is_online, disconnect_btn).clicked() {
             handle.detach_link();
             handle.log_kind(crate::state::LogKind::App, "已断开");
+            // 清空顶栏端口名显示
+            let _ = handle.ui_tx.send(UiEvent::CurrentPort(String::new()));
         }
     });
 
@@ -227,6 +231,8 @@ fn attempt_connect(handle: &AppHandle, name: &str) {
     .map(|lm| {
         *handle.last_port.lock().unwrap() = Some(name.to_string());
         handle.attach_link(lm);
+        // 同步端口名到顶栏（自动连接路径不发 Navigate，避免抢 UI）
+        let _ = handle.ui_tx.send(UiEvent::CurrentPort(name.to_string()));
     });
 }
 
