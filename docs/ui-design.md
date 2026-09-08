@@ -195,7 +195,7 @@
 | 🔊 Audio   | `device_volume`, `audio_enable`                                                                                                                                | `Slider`, `Switch`                         |
 | � Power    | `power_mode`                                                                                                                                                   | `ComboBox`                                 |
 | 📶 WiFi    | `wifi_switch`, `connect_host`, `wifi_ssid`, `wifi_password`                                                                                                    | 阶段 06                                    |
-| 🎤 Voice   | `voice_enable`, `voice_trigger_key`, `voice_max_record_ms`, `voice_auto_enter`, `voice_dev_pid`, `voice_cuid`, `voice_baidu_api_key`, `voice_baidu_secret_key` | 阶段 06                                    |
+| 🎤 Voice   | `voice_enable`, `voice_trigger_key`, `voice_max_record_ms`, `voice_auto_enter`, `voice_cuid`, `voice_tencent_secret_id`, `voice_tencent_secret_key` | 阶段 06（阶段 08 迁移腾讯云）              |
 | 🖥 PC      | `pc_status_mask`                                                                                                                                               | 阶段 05（位掩码编辑器）                    |
 
 > **组件选型原则**：枚举/小范围 int → `ComboBox`；0~100 连续值 → `Slider`；位掩码 → 自定义 `BitMaskField`；字符串 → `TextEdit` (单行)；只读字段 → `Label` + 复制按钮。

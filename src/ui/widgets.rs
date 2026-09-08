@@ -296,21 +296,16 @@ fn build_config_payload(diff: &DeviceSettings, mask: FieldMask) -> serde_json::V
         "voice_auto_enter",
         voice_auto_enter
     );
-    put_if!(
-        crate::protocol::F_VOICE_DEV_PID,
-        "voice_dev_pid",
-        voice_dev_pid
-    );
     put_if!(crate::protocol::F_VOICE_CUID, "voice_cuid", voice_cuid);
     put_if!(
-        crate::protocol::F_VOICE_BAIDU_API_KEY,
-        "voice_baidu_api_key",
-        voice_baidu_api_key
+        crate::protocol::F_VOICE_TENCENT_SECRET_ID,
+        "voice_tencent_secret_id",
+        voice_tencent_secret_id
     );
     put_if!(
-        crate::protocol::F_VOICE_BAIDU_SECRET_KEY,
-        "voice_baidu_secret_key",
-        voice_baidu_secret_key
+        crate::protocol::F_VOICE_TENCENT_SECRET_KEY,
+        "voice_tencent_secret_key",
+        voice_tencent_secret_key
     );
     put_if!(
         crate::protocol::F_PC_STATUS_MASK,
@@ -351,9 +346,17 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
                     ));
                 } else {
                     handle.log_kind(crate::state::LogKind::Tx, "SET → 已下发");
+                    // 包含敏感字段时单独推一条更显眼的 Success Toast，
+                    // 因为这些字段设备回读永远是 "***"，UI 没有"已更新"的视觉反馈点。
+                    let secret_names = secret_field_names(mask);
+                    let toast_text = if secret_names.is_empty() {
+                        "已应用".to_string()
+                    } else {
+                        format!("已应用（含敏感字段：{}）", secret_names.join("、"))
+                    };
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Success,
-                        "已应用".to_string(),
+                        toast_text,
                     ));
                 }
             }
@@ -467,6 +470,23 @@ fn diff_field_count(_d: &DeviceSettings, mask: FieldMask) -> usize {
     // 与 diff() 的 mask 严格对齐：count = mask 中置位的位数。
     // 这样当 diff 含合法 0 / 空串字段时也能正确计入"几处变更"。
     mask.bits().count_ones() as usize
+}
+
+/// 列出 mask 中置位的敏感字段名（按协议字段名），用于在 SET 成功 Toast 中
+/// 提示用户"哪些密钥类字段已下发"。设备回读这些字段永远是 "***"，
+/// 没有别的反馈点；这里给一个明确反馈避免用户怀疑"密码到底有没有更新"。
+fn secret_field_names(mask: FieldMask) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if mask.test(crate::protocol::F_WIFI_PASSWORD) {
+        names.push("WiFi 密码");
+    }
+    if mask.test(crate::protocol::F_VOICE_TENCENT_SECRET_ID) {
+        names.push("SecretId");
+    }
+    if mask.test(crate::protocol::F_VOICE_TENCENT_SECRET_KEY) {
+        names.push("SecretKey");
+    }
+    names
 }
 
 // ============ 简易 FieldEditor 辅助 ============

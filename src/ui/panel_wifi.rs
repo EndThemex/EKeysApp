@@ -41,10 +41,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
 
             ui.add_space(6.0);
             ui.label("网络名称（≤32 字节）");
-            let mut ssid = if draft.wifi_ssid.is_empty() {
-                snapshot.wifi_ssid.clone()
-            } else {
+            // SSID 是明文回读字段：用"草稿 != 旧快照"判断是否被编辑，
+            // 否则用户输入的 SSID 会被设备回传值覆盖。
+            let mut ssid = if draft.wifi_ssid != snapshot.wifi_ssid {
                 draft.wifi_ssid.clone()
+            } else {
+                snapshot.wifi_ssid.clone()
             };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut ssid)

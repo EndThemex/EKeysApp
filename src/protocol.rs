@@ -62,7 +62,8 @@ impl std::ops::BitOr for FieldMask {
     }
 }
 
-/// 字段序号常量。新增字段 → 末尾追加；删字段 → 不要重用编号。
+/// 字段序号常量。位编号与固件 `cmd_config.cpp` 快照字段顺序对齐；
+/// `FieldMask` 仅 App 内部使用（不落盘、不下发），字段增删时整体重排保持连续。
 pub const F_WIFI_SWITCH: u8 = 0;
 pub const F_CONNECT_HOST: u8 = 1;
 pub const F_WIFI_SSID: u8 = 2;
@@ -81,18 +82,17 @@ pub const F_VOICE_ENABLE: u8 = 14;
 pub const F_VOICE_TRIGGER_KEY: u8 = 15;
 pub const F_VOICE_MAX_RECORD_MS: u8 = 16;
 pub const F_VOICE_AUTO_ENTER: u8 = 17;
-pub const F_VOICE_DEV_PID: u8 = 18;
-pub const F_VOICE_CUID: u8 = 19;
-pub const F_VOICE_BAIDU_API_KEY: u8 = 20;
-pub const F_VOICE_BAIDU_SECRET_KEY: u8 = 21;
-pub const F_PC_STATUS_MASK: u8 = 22;
-pub const F_ACTIVE_KEYMAP_PROFILE: u8 = 23;
-pub const F_ACTIVE_PROFILE_NAME: u8 = 24;
-pub const F_ACTIVE_PROFILE_HAS_CUSTOM_ICON: u8 = 25;
+pub const F_VOICE_CUID: u8 = 18;
+pub const F_VOICE_TENCENT_SECRET_ID: u8 = 19;
+pub const F_VOICE_TENCENT_SECRET_KEY: u8 = 20;
+pub const F_PC_STATUS_MASK: u8 = 21;
+pub const F_ACTIVE_KEYMAP_PROFILE: u8 = 22;
+pub const F_ACTIVE_PROFILE_NAME: u8 = 23;
+pub const F_ACTIVE_PROFILE_HAS_CUSTOM_ICON: u8 = 24;
 
 /// 字段清单；新增字段时同步追加到末尾，并对应一个新编号。
 /// 配合宏使用，确保 `diff` / `is_any_diff` / `merge_push` 不漏字段。
-pub const FIELD_COUNT: usize = 26;
+pub const FIELD_COUNT: usize = 25;
 
 // ---------- 命令 ID（与协议 §2 对齐） ----------
 //
@@ -312,7 +312,7 @@ pub struct DeviceSettings {
     #[serde(default)]
     pub power_mode: i32,
 
-    // Voice（阶段 06 生效）
+    // Voice（阶段 06 生效；阶段 08 迁移为腾讯云一句话识别）
     #[serde(default)]
     pub voice_enable: i32,
     #[serde(default)]
@@ -322,13 +322,11 @@ pub struct DeviceSettings {
     #[serde(default)]
     pub voice_auto_enter: i32,
     #[serde(default)]
-    pub voice_dev_pid: i32,
-    #[serde(default)]
     pub voice_cuid: String,
     #[serde(default)]
-    pub voice_baidu_api_key: String,
+    pub voice_tencent_secret_id: String,
     #[serde(default)]
-    pub voice_baidu_secret_key: String,
+    pub voice_tencent_secret_key: String,
 
     // PC（阶段 05 生效）
     #[serde(default)]
@@ -409,28 +407,27 @@ impl DeviceSettings {
         clamp_min_max!(voice_trigger_key, 0, 11);
         // 最大录音时长：1000~60000 ms
         clamp_min_max!(voice_max_record_ms, 1000, 60000);
-        // 百度语音 PID：0~65535
-        clamp_min_max!(voice_dev_pid, 0, 65535);
         // 字符串按字节截断（不切断 UTF-8 字符边界）：
-        // - wifi_ssid 32 字节
-        // - wifi_password / 百度 Key 64 字节
+        // - wifi_ssid / voice_cuid 32 字节
+        // - wifi_password / 腾讯云 SecretId/SecretKey 64 字节
         changed |= truncate_bytes(&mut self.wifi_ssid, 32);
         changed |= truncate_bytes(&mut self.wifi_password, 64);
-        changed |= truncate_bytes(&mut self.voice_baidu_api_key, 64);
-        changed |= truncate_bytes(&mut self.voice_baidu_secret_key, 64);
+        changed |= truncate_bytes(&mut self.voice_cuid, 32);
+        changed |= truncate_bytes(&mut self.voice_tencent_secret_id, 64);
+        changed |= truncate_bytes(&mut self.voice_tencent_secret_key, 64);
 
         changed
     }
 
     /// 把敏感字段替换为 `***`（就地）。
     ///
-    /// 用于**设备 → App** 方向：推送/GET 快照含 WiFi 密码与百度语音密钥明文。
+    /// 用于**设备 → App** 方向：推送/GET 快照含 WiFi 密码与腾讯云语音密钥明文。
     /// App 不存储、不展示这些明文；用户需要修改时在 UI 输入新值即可。
     /// 被 mask 的字段若在草稿中保持不变，不会进入 diff 下发（值相同）。
     pub fn mask_sensitive(&mut self) {
         self.wifi_password = "***".into();
-        self.voice_baidu_api_key = "***".into();
-        self.voice_baidu_secret_key = "***".into();
+        self.voice_tencent_secret_id = "***".into();
+        self.voice_tencent_secret_key = "***".into();
     }
 
     /// 计算与另一份快照的差异（仅包含有变化的字段），返回 (差量值, 字段掩码)。
@@ -467,10 +464,9 @@ impl DeviceSettings {
         cmp!(F_VOICE_TRIGGER_KEY, voice_trigger_key);
         cmp!(F_VOICE_MAX_RECORD_MS, voice_max_record_ms);
         cmp!(F_VOICE_AUTO_ENTER, voice_auto_enter);
-        cmp!(F_VOICE_DEV_PID, voice_dev_pid);
         cmp!(F_VOICE_CUID, voice_cuid);
-        cmp!(F_VOICE_BAIDU_API_KEY, voice_baidu_api_key);
-        cmp!(F_VOICE_BAIDU_SECRET_KEY, voice_baidu_secret_key);
+        cmp!(F_VOICE_TENCENT_SECRET_ID, voice_tencent_secret_id);
+        cmp!(F_VOICE_TENCENT_SECRET_KEY, voice_tencent_secret_key);
         cmp!(F_PC_STATUS_MASK, pc_status_mask);
         cmp!(F_ACTIVE_KEYMAP_PROFILE, active_keymap_profile);
         cmp!(F_ACTIVE_PROFILE_NAME, active_profile_name);
@@ -523,10 +519,9 @@ impl DeviceSettings {
         merge_field!(F_VOICE_TRIGGER_KEY, voice_trigger_key);
         merge_field!(F_VOICE_MAX_RECORD_MS, voice_max_record_ms);
         merge_field!(F_VOICE_AUTO_ENTER, voice_auto_enter);
-        merge_field!(F_VOICE_DEV_PID, voice_dev_pid);
         merge_field!(F_VOICE_CUID, voice_cuid);
-        merge_field!(F_VOICE_BAIDU_API_KEY, voice_baidu_api_key);
-        merge_field!(F_VOICE_BAIDU_SECRET_KEY, voice_baidu_secret_key);
+        merge_field!(F_VOICE_TENCENT_SECRET_ID, voice_tencent_secret_id);
+        merge_field!(F_VOICE_TENCENT_SECRET_KEY, voice_tencent_secret_key);
         merge_field!(F_PC_STATUS_MASK, pc_status_mask);
         merge_field!(F_ACTIVE_KEYMAP_PROFILE, active_keymap_profile);
         merge_field!(F_ACTIVE_PROFILE_NAME, active_profile_name);
@@ -563,10 +558,9 @@ impl DeviceSettings {
         apply_field!(F_VOICE_TRIGGER_KEY, voice_trigger_key);
         apply_field!(F_VOICE_MAX_RECORD_MS, voice_max_record_ms);
         apply_field!(F_VOICE_AUTO_ENTER, voice_auto_enter);
-        apply_field!(F_VOICE_DEV_PID, voice_dev_pid);
         apply_field!(F_VOICE_CUID, voice_cuid);
-        apply_field!(F_VOICE_BAIDU_API_KEY, voice_baidu_api_key);
-        apply_field!(F_VOICE_BAIDU_SECRET_KEY, voice_baidu_secret_key);
+        apply_field!(F_VOICE_TENCENT_SECRET_ID, voice_tencent_secret_id);
+        apply_field!(F_VOICE_TENCENT_SECRET_KEY, voice_tencent_secret_key);
         apply_field!(F_PC_STATUS_MASK, pc_status_mask);
         apply_field!(F_ACTIVE_KEYMAP_PROFILE, active_keymap_profile);
         apply_field!(F_ACTIVE_PROFILE_NAME, active_profile_name);
@@ -1959,10 +1953,9 @@ mod tests {
             F_VOICE_TRIGGER_KEY,
             F_VOICE_MAX_RECORD_MS,
             F_VOICE_AUTO_ENTER,
-            F_VOICE_DEV_PID,
             F_VOICE_CUID,
-            F_VOICE_BAIDU_API_KEY,
-            F_VOICE_BAIDU_SECRET_KEY,
+            F_VOICE_TENCENT_SECRET_ID,
+            F_VOICE_TENCENT_SECRET_KEY,
             F_PC_STATUS_MASK,
             F_ACTIVE_KEYMAP_PROFILE,
             F_ACTIVE_PROFILE_NAME,
@@ -2000,10 +1993,9 @@ mod tests {
             voice_trigger_key: 1,
             voice_max_record_ms: 1000,
             voice_auto_enter: 1,
-            voice_dev_pid: 1,
             voice_cuid: "cuid".into(),
-            voice_baidu_api_key: "ak".into(),
-            voice_baidu_secret_key: "sk".into(),
+            voice_tencent_secret_id: "id".into(),
+            voice_tencent_secret_key: "sk".into(),
             pc_status_mask: 1,
             active_keymap_profile: 1,
             active_profile_name: "P1".into(),
@@ -2048,10 +2040,9 @@ mod tests {
             voice_trigger_key: 1,
             voice_max_record_ms: 1000,
             voice_auto_enter: 1,
-            voice_dev_pid: 1,
             voice_cuid: "cuid".into(),
-            voice_baidu_api_key: "ak".into(),
-            voice_baidu_secret_key: "sk".into(),
+            voice_tencent_secret_id: "id".into(),
+            voice_tencent_secret_key: "sk".into(),
             pc_status_mask: 1,
             active_keymap_profile: 1,
             active_profile_name: "P1".into(),
@@ -2070,14 +2061,14 @@ mod tests {
     fn mask_sensitive_blankets_secrets() {
         let mut s = DeviceSettings {
             wifi_password: "real-password".into(),
-            voice_baidu_api_key: "ak-123".into(),
-            voice_baidu_secret_key: "sk-456".into(),
+            voice_tencent_secret_id: "id-123".into(),
+            voice_tencent_secret_key: "sk-456".into(),
             ..Default::default()
         };
         s.mask_sensitive();
         assert_eq!(s.wifi_password, "***");
-        assert_eq!(s.voice_baidu_api_key, "***");
-        assert_eq!(s.voice_baidu_secret_key, "***");
+        assert_eq!(s.voice_tencent_secret_id, "***");
+        assert_eq!(s.voice_tencent_secret_key, "***");
         // 非敏感字段不受影响
         assert_eq!(s.wifi_ssid, "");
     }
@@ -2106,7 +2097,6 @@ mod tests {
         s.voice_auto_enter = -2; // → 1
         s.voice_trigger_key = 99; // → 11
         s.voice_max_record_ms = 50; // → 1000
-        s.voice_dev_pid = -1; // → 0
         // RGB 钳位（与固件 RGBLightControl.h:22 / ClickHighlight.h:34 对齐）
         s.rgb_mode = 99; // → 7
         s.rgb_single_color = -10; // → 0
@@ -2116,7 +2106,8 @@ mod tests {
         s.rgb_brightness = 999; // → 100（再赋一次，覆盖前面）
         s.wifi_ssid = "x".repeat(64); // → 32 字节
         s.wifi_password = "p".repeat(128); // → 64 字节
-        s.voice_baidu_api_key = "k".repeat(100); // → 64 字节
+        s.voice_cuid = "c".repeat(40); // → 32 字节
+        s.voice_tencent_secret_key = "k".repeat(100); // → 64 字节
         assert!(s.clamp());
 
         assert_eq!(s.work_mode, 0);
@@ -2127,14 +2118,14 @@ mod tests {
         assert_eq!(s.voice_auto_enter, 1);
         assert_eq!(s.voice_trigger_key, 11);
         assert_eq!(s.voice_max_record_ms, 1000);
-        assert_eq!(s.voice_dev_pid, 0);
         assert_eq!(s.rgb_mode, 7);
         assert_eq!(s.rgb_single_color, 23);
         assert_eq!(s.rgb_click_mode, 2);
         assert_eq!(s.rgb_brightness, 100);
         assert_eq!(s.wifi_ssid.len(), 32);
         assert_eq!(s.wifi_password.len(), 64);
-        assert_eq!(s.voice_baidu_api_key.len(), 64);
+        assert_eq!(s.voice_cuid.len(), 32);
+        assert_eq!(s.voice_tencent_secret_key.len(), 64);
 
         // 二次 clamp 无变化
         assert!(!s.clamp());

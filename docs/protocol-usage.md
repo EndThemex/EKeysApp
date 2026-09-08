@@ -86,7 +86,7 @@ App 端已声明全部 **18 个命令常量**（与固件 `SerialProtocol.h` 对
 | 3   | `wifi_password`                  | string | **永远不要把明文密码回显给 App**（见 §7） |
 | 4   | `work_mode`                      | i32    | 0=USB / 1=BLE / 2=2.4G                    |
 | 5   | `rgb_mode`                       | i32    |                                           |
-| 6   | `rgb_single_colar`               | i32    |                                           |
+| 6   | `rgb_single_color`               | i32    |                                           |
 | 7   | `rgb_click_mode`                 | i32    |                                           |
 | 8   | `rgb_brightness`                 | i32    |                                           |
 | 9   | `tft_theme`                      | i32    |                                           |
@@ -98,16 +98,16 @@ App 端已声明全部 **18 个命令常量**（与固件 `SerialProtocol.h` 对
 | 15  | `voice_trigger_key`              | i32    |                                           |
 | 16  | `voice_max_record_ms`            | i32    |                                           |
 | 17  | `voice_auto_enter`               | i32    |                                           |
-| 18  | `voice_dev_pid`                  | i32    |                                           |
-| 19  | `voice_cuid`                     | string |                                           |
-| 20  | `voice_baidu_api_key`            | string |                                           |
-| 21  | `voice_baidu_secret_key`         | string |                                           |
-| 22  | `pc_status_mask`                 | i32    |                                           |
-| 23  | `active_keymap_profile`          | i32    | 0~7（App 端 `clamp()` 钳位）              |
-| 24  | `active_profile_name`            | string |                                           |
-| 25  | `active_profile_has_custom_icon` | bool   |                                           |
+| 18  | `voice_cuid`                     | string | 腾讯协议不使用，固件保留字段              |
+| 19  | `voice_tencent_secret_id`        | string | 敏感字段，App 端脱敏（见 §7）             |
+| 20  | `voice_tencent_secret_key`       | string | 敏感字段，App 端脱敏（见 §7）             |
+| 21  | `pc_status_mask`                 | i32    |                                           |
+| 22  | `active_keymap_profile`          | i32    | 0~7（App 端 `clamp()` 钳位）              |
+| 23  | `active_profile_name`            | string |                                           |
+| 24  | `active_profile_has_custom_icon` | bool   |                                           |
 
 > ⚠️ `#` 是 `FieldMask` 的 bit 编号。**新增字段必须同步在 App 端 `FIELD_COUNT` 与位号上追加，固件侧字段顺序保持一致**。位号定义见 `protocol.rs` 顶部 `F_*` 常量。
+> 阶段 08：`voice_dev_pid` / `voice_baidu_api_key` / `voice_baidu_secret_key` 已随百度 ASR → 腾讯云一句话识别迁移删除，`FieldMask` 仅 App 内部使用（不落盘、不下发），位号已整体重排保持连续。
 
 ---
 
@@ -169,8 +169,7 @@ App 内部 `diff()` / `apply()` 使用 `FieldMask` 显式标记"哪些字段有�
 | `wifi_switch` / `connect_host` / `voice_enable` / `voice_auto_enter` | 归一化为 `0/1`                                   |
 | `voice_trigger_key`                                                  | `< 0 → 0`，`> 11 → 11`                           |
 | `voice_max_record_ms`                                                | 钳制到 `1000~60000`                              |
-| `voice_dev_pid`                                                      | 钳制到 `0~65535`                                 |
-| 字符串                                                               | 超过容量时截断；WiFi 密码和百度 Key 最大 64 字节 |
+| 字符串                                                               | 超过容量时截断；WiFi 密码和腾讯云 SecretId/SecretKey 最大 64 字节，`voice_cuid` 32 字节 |
 | 未知字段                                                             | 忽略                                             |
 
 App 端 `DeviceSettings::clamp()` **已覆盖上表全部规则**（含字符串截断，按字节截断且不切断 UTF-8 字符边界）。App 在下发前对 diff 先做 `clamp()`，固件侧仍保留自己的钳位作为兜底。如果固件端将来修改钳位规则，需同步通知 App 维护者（钳位变更可能导致 diff 计算与实际下发值不同步）。
@@ -194,7 +193,7 @@ App 端 `DeviceSettings::clamp()` **已覆盖上表全部规则**（含字符串
 App 收到后行为（见 `app.rs::handle_link_event`）：
 
 1. 用 `serde_json::from_value::<DeviceSettings>` 解析；
-2. **脱敏**：`wifi_password` / `voice_baidu_api_key` / `voice_baidu_secret_key` 替换为 `***`，App 不存储设备回传的密钥明文（见 §7）；
+2. **脱敏**：`wifi_password` / `voice_tencent_secret_id` / `voice_tencent_secret_key` 替换为 `***`，App 不存储设备回传的密钥明文（见 §7）；
 3. 写入 `settings`（App 内部快照）；
 4. 对 `draft` 做 `merge_push`：草稿里**未改动的字段**用推送值刷新，**用户改过**的字段保留草稿值。
 5. 日志面板打 `PUSH ← 全量快照`。
@@ -257,7 +256,7 @@ App 收到后行为（见 `app.rs::handle_link_event`）：
 
 ## 7. 敏感字段约定
 
-`wifi_password`、`voice_baidu_api_key`、`voice_baidu_secret_key` 是敏感字段。
+`wifi_password`、`voice_tencent_secret_id`、`voice_tencent_secret_key` 是敏感字段。
 
 **App 端已实现脱敏（当前生效）**：
 
@@ -321,7 +320,7 @@ App 收到后：
 
 - **Option 字段**统一用 `skip_serializing_if = "Option::is_none"`：App 不下发空字段，固件按"字段是否存在"判断增量。
 - **顶层 body** 命令（`0x10` / `0x0c` / `0x0f`）的响应**不走 `data`**，解析时调用 `parse_top_level::<T>`。
-- 字符串字段长度上限沿用固件协议（WiFi 密码/百度 Key 64 字节、`device_name`/`serial` 32 字节）。
+- 字符串字段长度上限沿用固件协议（WiFi 密码/腾讯云 SecretId/SecretKey 64 字节、`device_name`/`serial` 32 字节）。
 
 ### 9.2 命令路由建议
 
@@ -411,7 +410,7 @@ mask.intersect(other) / mask.union(other)
 
 // 7. DeviceSettings 工具
 DeviceSettings::clamp() -> bool   // 覆盖固件全部钳位规则（含字符串截断）
-device.mask_sensitive()          // wifi_password / voice_baidu_* → "***"
+device.mask_sensitive()          // wifi_password / voice_tencent_* → "***"
 device.diff(&other) -> (DeviceSettings, FieldMask)
 device.apply(&diff, mask)
 DeviceSettings::merge_push(&new, &old, old_mask, new_mask, &mut draft)
