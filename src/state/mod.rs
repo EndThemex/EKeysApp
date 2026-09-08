@@ -1,10 +1,10 @@
 //! AppHandle：UI 可读的共享状态 + 事件总线。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkManager};
@@ -133,6 +133,16 @@ pub struct AppHandle {
     /// 本次连接是否已成功读取全量配置（0x07）。
     /// 断开时重置；Settings 页据此显示"正在读取设备配置…"提示。
     pub config_loaded: Arc<AtomicBool>,
+    /// 本次连接累计 Tx 帧数（用于底栏"已发送 N"展示）。
+    /// 由 LinkManager writer 写入成功后自增；断开连接 / 新连接开始时清零。
+    pub tx_count: Arc<AtomicU64>,
+    /// 本次连接累计 Rx 帧数（用于底栏"已接收 N"展示）。
+    /// 由 router 线程收到一帧后自增；断开连接 / 新连接开始时清零。
+    pub rx_count: Arc<AtomicU64>,
+    /// 本次连接起始时刻（用于底栏"运行时长"展示）；断开连接后清零。
+    /// 用 `Mutex<Option<Instant>>` 是为了断开后能可靠判 None（避免 `Instant::now() - 0`
+    /// 出现在断线状态下的 UI 中）。
+    pub uptime_start: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +230,9 @@ impl AppHandle {
             capture_keyboard: Arc::new(Mutex::new(false)),
             device_info: Arc::new(Mutex::new(DeviceInfo::default())),
             config_loaded: Arc::new(AtomicBool::new(false)),
+            tx_count: Arc::new(AtomicU64::new(0)),
+            rx_count: Arc::new(AtomicU64::new(0)),
+            uptime_start: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -234,6 +247,11 @@ impl AppHandle {
         // events_rx 保留在 LinkManager 内部；UI 每帧通过 poll_events 拉取
         // （内部完成 seq 响应配对 + 心跳 ack 标记 + 状态同步）
         *self.link.lock().unwrap() = Some(lm);
+
+        // 新连接开始：清零计数 + 标记 uptime 起点
+        self.tx_count.store(0, Ordering::Relaxed);
+        self.rx_count.store(0, Ordering::Relaxed);
+        *self.uptime_start.lock().unwrap() = Some(Instant::now());
 
         // 同步共享 state：UI 顶栏/侧栏/连接页都从这里读
         *self.state.lock().unwrap() = ConnectionState::Online;
@@ -417,7 +435,11 @@ impl AppHandle {
     pub fn refresh_keymap_from_device(&self) -> Result<usize, String> {
         self.with_link(|lm| {
             let frame = lm
-                .request(crate::protocol::CMD_KEYMAP_GET, None, Duration::from_millis(1000))
+                .request(
+                    crate::protocol::CMD_KEYMAP_GET,
+                    None,
+                    Duration::from_millis(1000),
+                )
                 .map_err(|e| format!("0x05 请求失败: {e}"))?;
             let v = frame.extra_value("keymap").ok_or_else(|| {
                 format!(
@@ -425,9 +447,8 @@ impl AppHandle {
                     frame.cmd, frame.status
                 )
             })?;
-            let entries =
-                serde_json::from_value::<Vec<FirmwareKeyEntry>>(v.clone())
-                    .map_err(|e| format!("0x05 keymap 解析失败: {e}"))?;
+            let entries = serde_json::from_value::<Vec<FirmwareKeyEntry>>(v.clone())
+                .map_err(|e| format!("0x05 keymap 解析失败: {e}"))?;
             let n = entries.len();
             let dev_profile = self.settings.lock().unwrap().active_keymap_profile as u8;
             {
@@ -461,6 +482,10 @@ impl AppHandle {
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
         // 本次连接的配置读取状态作废；重连成功后由 auto_get() 重新置位
         self.config_loaded.store(false, Ordering::Release);
+        // 断开连接：清零 Tx/Rx 计数 + 清掉 uptime，UI 立即回到"未连接"展示
+        self.tx_count.store(0, Ordering::Relaxed);
+        self.rx_count.store(0, Ordering::Relaxed);
+        *self.uptime_start.lock().unwrap() = None;
         // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
         *self.pending_reconnect.lock().unwrap() = None;
         if let Some(p) = prev_port {
@@ -487,7 +512,14 @@ impl AppHandle {
         let recon = self.reconnector();
         let on_exit: std::sync::Arc<dyn Fn() + Send + Sync> =
             std::sync::Arc::new(move || recon.trigger());
-        match crate::link::LinkManager::open(name, self.log.clone(), on_exit) {
+        // 把底栏用的 Tx / Rx / uptime 计数句柄传给 LinkManager。
+        // writer 写入成功 +1 tx，router 收到帧 +1 rx；uptime 起点在 attach_link 里写。
+        let counters = (
+            Arc::clone(&self.tx_count),
+            Arc::clone(&self.rx_count),
+            Arc::clone(&self.uptime_start),
+        );
+        match crate::link::LinkManager::open(name, self.log.clone(), on_exit, counters) {
             Ok(lm) => {
                 *self.last_port.lock().unwrap() = Some(name.to_string());
                 // 切到新端口 → 清掉旧的重连任务，避免新连接跑起来后还在探测旧端口

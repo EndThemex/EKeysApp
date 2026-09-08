@@ -20,11 +20,11 @@ pub mod serial;
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{self, DeviceSettings, Frame, HeartbeatResp};
 use crate::state::LogKind;
@@ -67,6 +67,11 @@ type PendingMap = Arc<Mutex<HashMap<u32, Sender<Frame>>>>;
 /// reader 退出回调类型
 type OnReaderExit = Arc<dyn Fn() + Send + Sync>;
 
+/// Tx / Rx 计数 + uptime 起点（与 AppHandle 共享）。
+/// 写在 LinkManager 上是为了让 writer / router 闭包能直接 clone 使用，
+/// 避免在线程内部再做"延迟初始化"的二次锁。
+type Counters = (Arc<AtomicU64>, Arc<AtomicU64>, Arc<Mutex<Option<Instant>>>);
+
 /// LinkManager：持有串口（共享）+ 后台线程（reader / writer / router / heartbeat）
 pub struct LinkManager {
     /// 共享日志缓冲；request() 失败时也会在这里推 App 日志。
@@ -90,6 +95,8 @@ pub struct LinkManager {
     _writer: Option<JoinHandle<()>>,
     _router: Option<JoinHandle<()>>,
     _heartbeat: Option<JoinHandle<()>>,
+    /// Tx/Rx 计数 + uptime 起点（与 AppHandle 共享）。close() 时 take 走。
+    counters: Option<Counters>,
 }
 
 impl LinkManager {
@@ -99,9 +106,14 @@ impl LinkManager {
     }
 
     /// 打开端口并启动后台线程
-    pub fn open(name: &str, log: SharedLog, on_reader_exit: OnReaderExit) -> Result<Self, String> {
+    pub fn open(
+        name: &str,
+        log: SharedLog,
+        on_reader_exit: OnReaderExit,
+        counters: Counters,
+    ) -> Result<Self, String> {
         let port = serial::open(name).map_err(|e| format!("打开串口失败: {e}"))?;
-        Self::from_port(name.to_string(), port, log, on_reader_exit)
+        Self::from_port(name.to_string(), port, log, on_reader_exit, counters)
     }
 
     fn from_port(
@@ -109,6 +121,7 @@ impl LinkManager {
         port: Box<dyn serialport::SerialPort>,
         log: SharedLog,
         on_reader_exit: OnReaderExit,
+        counters: Counters,
     ) -> Result<Self, String> {
         // 内部通道：reader / heartbeat → router
         let (event_tx, event_rx) = channel::<LinkEvent>();
@@ -119,6 +132,8 @@ impl LinkManager {
         let hb = HeartbeatHandle::new();
         let stop = Arc::new(AtomicBool::new(false));
         let state: Arc<Mutex<ConnectionState>> = Arc::new(Mutex::new(ConnectionState::Online));
+
+        let (tx_counter, rx_counter, uptime_start) = counters;
 
         let port: Arc<Mutex<Box<dyn serialport::SerialPort>>> = Arc::new(Mutex::new(port));
 
@@ -153,6 +168,9 @@ impl LinkManager {
         // writer：共享 port
         let port_for_writer = Arc::clone(&port);
         let log_for_writer = log.clone();
+        // Tx 计数（成功写入底层串口后才 +1，序列化/写入失败的帧不计入）。
+        // 由 AppHandle 通过 counters 参数传入；UI 在 statusbar 读这个值。
+        let tx_counter_w = Arc::clone(&tx_counter);
         let writer = thread::spawn(move || {
             loop {
                 match write_rx.recv() {
@@ -181,11 +199,17 @@ impl LinkManager {
                                     LogKind::App,
                                     format!("串口写入失败 cmd=0x{cmd:02X} seq={seq}: {e}"),
                                 );
-                            } else if cmd != protocol::CMD_HEARTBEAT {
-                                // 心跳 Tx 已在 heartbeat.rs 中按完整 JSON 记录，
-                                // 这里跳过避免同一秒两条 Tx 日志。
-                                log_for_writer
-                                    .push(LogKind::Tx, format!("Tx → cmd=0x{cmd:02X} seq={seq}"));
+                            } else {
+                                // 实际字节已经写到 OS 缓冲，Tx 计数 +1。
+                                tx_counter_w.fetch_add(1, Ordering::Relaxed);
+                                if cmd != protocol::CMD_HEARTBEAT {
+                                    // 心跳 Tx 已在 heartbeat.rs 中按完整 JSON 记录，
+                                    // 这里跳过避免同一秒两条 Tx 日志。
+                                    log_for_writer.push(
+                                        LogKind::Tx,
+                                        format!("Tx → cmd=0x{cmd:02X} seq={seq}"),
+                                    );
+                                }
                             }
                             let _ = p.flush();
                         }
@@ -205,11 +229,16 @@ impl LinkManager {
         let state_for_router = Arc::clone(&state);
         let hb_for_router = hb.clone();
         let log_for_router = log.clone();
+        // Rx 计数（router 每收到一帧就 +1；heartbeat ack、seq 配对成功、推送
+        // 全部计入，便于 UI 直观看到下行流量。心跳 1Hz 时该值每秒 +1）。
+        let rx_counter_r = Arc::clone(&rx_counter);
         let router = thread::spawn(move || {
             log_for_router.push(LogKind::App, "router 线程启动".to_string());
             loop {
                 match event_rx.recv() {
                     Ok(LinkEvent::Frame(f)) => {
+                        // 任何一帧都算 Rx（heartbeat ack、seq 配对成功、主动推送全包含）。
+                        rx_counter_r.fetch_add(1, Ordering::Relaxed);
                         // 心跳响应 → mark_ack
                         if f.cmd == protocol::response_cmd(protocol::CMD_HEARTBEAT) {
                             hb_for_router.mark_ack(f.seq as u64);
@@ -330,6 +359,11 @@ impl LinkManager {
             _writer: Some(writer),
             _router: Some(router),
             _heartbeat: None,
+            counters: Some((
+                Arc::clone(&tx_counter),
+                Arc::clone(&rx_counter),
+                uptime_start,
+            )),
         })
     }
 
