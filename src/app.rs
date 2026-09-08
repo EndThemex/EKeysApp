@@ -3,7 +3,9 @@
 use eframe::egui;
 
 use crate::link::LinkEvent;
-use crate::protocol::{response_cmd, top_level, DeviceSettings, ProfileState, CMD_CONFIG_GET, CMD_PROFILE_STATE};
+use crate::protocol::{
+    CMD_CONFIG_GET, CMD_PROFILE_STATE, DeviceSettings, ProfileState, response_cmd, top_level,
+};
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
     panel_about, panel_connection, panel_keymap, panel_lighting, panel_log, panel_settings,
@@ -88,17 +90,18 @@ impl WxiApp {
                 } else if f.is_push() {
                     // 设备主动推送的全量配置快照（0x87 seq=0）
                     match f.data.as_ref() {
-                        Some(data) => match serde_json::from_value::<DeviceSettings>(data.clone())
-                        {
-                            Ok(mut new_snap) => {
-                                self.handle.apply_settings_snapshot(&mut new_snap);
-                                self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
+                        Some(data) => {
+                            match serde_json::from_value::<DeviceSettings>(data.clone()) {
+                                Ok(mut new_snap) => {
+                                    self.handle.apply_settings_snapshot(&mut new_snap);
+                                    self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
+                                }
+                                Err(e) => {
+                                    self.handle
+                                        .log_kind(LogKind::App, format!("推送快照解析失败: {e}"));
+                                }
                             }
-                            Err(e) => {
-                                self.handle
-                                    .log_kind(LogKind::App, format!("推送快照解析失败: {e}"));
-                            }
-                        },
+                        }
                         None => {
                             self.handle.log_kind(LogKind::App, "推送快照缺 data 字段");
                         }
@@ -187,8 +190,10 @@ impl WxiApp {
                     // 重拉 0x05 键映射，否则键映射页展示的还是旧 Profile 的数据
                     if ps.active_profile != prev_profile {
                         if let Err(e) = self.handle.refresh_keymap_from_device() {
-                            self.handle
-                                .log_kind(LogKind::App, format!("Profile 切换后重拉键映射失败: {e}"));
+                            self.handle.log_kind(
+                                LogKind::App,
+                                format!("Profile 切换后重拉键映射失败: {e}"),
+                            );
                         }
                     }
                 }
@@ -341,17 +346,31 @@ impl eframe::App for WxiApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let page = *self.handle.page.lock().unwrap();
-            match page {
-                Page::Connect => panel_connection::show(&self.handle, ui, &mut self.connect_st),
-                Page::Settings => panel_settings::show(&self.handle, ui, &mut self.settings_st),
-                Page::Keymap => panel_keymap::show(&self.handle, ui, &mut self.keymap_st),
-                Page::Lighting => panel_lighting::show(&self.handle, ui, &mut self.lighting_st),
-                Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
-                Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
-                Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
-                Page::About => panel_about::show(&self.handle, ui),
-            }
+            // 外层统一加垂直滚动：保证任何面板在窗口缩到很窄 / 很高时都不会
+            // 被截断——页面内部已经自带 ScrollArea 的（Settings/WiFi/Voice/
+            // Lighting/Log）会被两层滚动自然组合；其它面板的内容超出可视区
+            // 时直接滚动显示。
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let page = *self.handle.page.lock().unwrap();
+                    match page {
+                        Page::Connect => {
+                            panel_connection::show(&self.handle, ui, &mut self.connect_st)
+                        }
+                        Page::Settings => {
+                            panel_settings::show(&self.handle, ui, &mut self.settings_st)
+                        }
+                        Page::Keymap => panel_keymap::show(&self.handle, ui, &mut self.keymap_st),
+                        Page::Lighting => {
+                            panel_lighting::show(&self.handle, ui, &mut self.lighting_st)
+                        }
+                        Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
+                        Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
+                        Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
+                        Page::About => panel_about::show(&self.handle, ui),
+                    }
+                });
         });
 
         if self.confirm_open {

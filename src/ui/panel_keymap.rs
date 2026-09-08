@@ -14,8 +14,8 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::protocol::{
-    hid_key_label, HID_KEY_CHOICES, KeyAction, KeymapData, KeymapDiffEntry, SlotKind, MOD_ALT,
-    MOD_CTRL, MOD_GUI, MOD_SHIFT,
+    HID_KEY_CHOICES, KeyAction, KeymapData, KeymapDiffEntry, MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT,
+    SlotKind, hid_key_label,
 };
 use crate::state::AppHandle;
 
@@ -192,7 +192,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
 /// Profile。设备随后推送 0x10 ProfileState → app.rs 触发 0x05 重拉键映射，
 /// 快照与草稿随之对齐。离线时静默跳过（本地草稿切换仍然生效）。
 fn switch_device_profile(handle: &AppHandle, profile: u8) {
-    use crate::protocol::{DeviceSettings, FieldMask, F_ACTIVE_KEYMAP_PROFILE};
+    use crate::protocol::{DeviceSettings, F_ACTIVE_KEYMAP_PROFILE, FieldMask};
     let diff = DeviceSettings {
         active_keymap_profile: profile as i32,
         ..Default::default()
@@ -342,12 +342,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
 
 // -------- 键盘图 + 键位 --------
 
-fn draw_keyboard(
-    handle: &AppHandle,
-    ui: &mut egui::Ui,
-    draft: &KeymapData,
-    snapshot: &KeymapData,
-) {
+fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snapshot: &KeymapData) {
     let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
 
@@ -671,7 +666,11 @@ fn draw_encoder(
 
     // 中心文字：绑定动作标签优先，未绑定显示物理标签
     let action_label = keycap_text(slot, binding);
-    let font_size = if action_label.chars().count() > 4 { 9.0 } else { 13.0 };
+    let font_size = if action_label.chars().count() > 4 {
+        9.0
+    } else {
+        13.0
+    };
     painter.text(
         r.center(),
         egui::Align2::CENTER_CENTER,
@@ -810,7 +809,14 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             let mut draft_action =
                                 st.draft_action.clone().unwrap_or(KeyAction::None);
                             let mut kind_idx = action_kind_index(&draft_action);
-                            let kinds = ["未绑定", "普通键", "组合键", "多键同按", "文本注入", "固件功能"];
+                            let kinds = [
+                                "未绑定",
+                                "普通键",
+                                "组合键",
+                                "多键同按",
+                                "文本注入",
+                                "固件功能",
+                            ];
                             let prev_kind = kind_idx;
                             egui::ComboBox::from_id_salt("action-kind")
                                 .selected_text(kinds[kind_idx])
@@ -1029,8 +1035,7 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
     if st.capture_keyboard {
         // 激活态：明显的捕获提示条
         let pulse = (0.5 + 0.5 * Instant::now().elapsed().as_secs_f32().sin()) as f32;
-        let border_color =
-            Color32::from_rgb(0xFF, 0xA0, 0x40).gamma_multiply(0.6 + pulse * 0.4);
+        let border_color = Color32::from_rgb(0xFF, 0xA0, 0x40).gamma_multiply(0.6 + pulse * 0.4);
         let t = 0.15 + pulse * 0.10;
         let a = Color32::from_rgb(0x40, 0x28, 0x10);
         let b = Color32::from_rgb(0xFF, 0xA0, 0x40);
@@ -1096,7 +1101,9 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("按任意键捕获").strong());
                         ui.label(
-                            egui::RichText::new("把键盘按下的键映射到此按键").weak().size(10.0),
+                            egui::RichText::new("把键盘按下的键映射到此按键")
+                                .weak()
+                                .size(10.0),
                         );
                     });
                 });
@@ -1165,7 +1172,9 @@ fn edit_action_params(
                 KeyAction::Keyboard(c) => (0u8, *c),
                 _ => (0u8, 0x04),
             };
-            ui.horizontal(|ui| {
+            // Drawer 固定 280px，"Ctrl/Shift/Alt/Win" 4 个 toggle + 标签 + 主键 ComboBox
+            // 横向放不下，用 horizontal_wrapped 让修饰键行自然换行。
+            ui.horizontal_wrapped(|ui| {
                 ui.label("修饰键:");
                 for (bit, name) in [
                     (MOD_CTRL, "Ctrl"),
@@ -1179,8 +1188,10 @@ fn edit_action_params(
                     }
                 }
             });
-            ui.horizontal(|ui| {
+            ui.vertical(|ui| {
                 ui.label("主键:");
+                // ComboBox 在 vertical 子层里直接拿父容器全宽，长键名（如
+                // "Arrow Left (0x50)"）不会再被横向裁断。
                 hid_key_combo(ui, "combo-key", &mut code);
             });
 
@@ -1205,9 +1216,7 @@ fn edit_action_params(
                 KeyAction::Chord(_) => vec![0x04],
                 _ => vec![0x04],
             };
-            ui.label(
-                egui::RichText::new("以下按键同时按下：").weak().size(11.0),
-            );
+            ui.label(egui::RichText::new("以下按键同时按下：").weak().size(11.0));
             let mut i = 0;
             while i < codes.len() {
                 let name = hid_key_label(codes[i])
@@ -1274,7 +1283,9 @@ fn edit_action_params(
             }
             if !resp.has_focus() && text.is_empty() {
                 ui.label(
-                    egui::RichText::new("例：常用邮箱、口令、命令行片段").weak().size(10.0),
+                    egui::RichText::new("例：常用邮箱、口令、命令行片段")
+                        .weak()
+                        .size(10.0),
                 );
             }
             *current = KeyAction::Text(text);
@@ -1323,10 +1334,7 @@ fn default_for_kind(kind: usize, prev: &KeyAction) -> KeyAction {
             _ => KeyAction::Keyboard(0x04),
         },
         2 => match prev {
-            KeyAction::Keyboard(c) => KeyAction::Combo {
-                mods: 0,
-                code: *c,
-            },
+            KeyAction::Keyboard(c) => KeyAction::Combo { mods: 0, code: *c },
             _ => KeyAction::Combo {
                 mods: 0,
                 code: 0x04,
