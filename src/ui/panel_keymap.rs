@@ -239,11 +239,11 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
             if p as u8 != draft.active_profile {
                 draft.active_profile = p as u8;
                 // 切 profile 时清空选中键与编辑草稿（避免上一个 profile 的
-                // KeyRef / 草稿动作误导当前），并向设备发 0x08 对齐激活档
+                // KeyRef / 草稿动作误导当前）。Profile 切换本身进入
+                // DiffPreviewBar，由"应用"按钮统一发 0x08 + 0x06 下发。
                 *handle.selected_key.lock().unwrap() = None;
                 st.draft_action = None;
                 st.selected_ref = None;
-                switch_device_profile(handle, p as u8);
             }
 
             // 重命名按钮

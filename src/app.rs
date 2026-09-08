@@ -260,7 +260,9 @@ impl WxiApp {
             let _ = self.handle.ui_tx.send(UiEvent::Navigate(Page::Log));
         }
         let nav = ctx.input(|i| {
-            if i.key_pressed(egui::Key::Num1) {
+            if !i.modifiers.ctrl {
+                None
+            } else if i.key_pressed(egui::Key::Num1) {
                 Some(Page::Connect)
             } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Settings)
