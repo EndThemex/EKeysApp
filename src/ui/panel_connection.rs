@@ -114,6 +114,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
             if let Some(name) = st.selected.clone() {
                 match handle.attempt_connect(&name) {
                     Ok(()) => {
+                        // 会话内已建立过连接：抑制底部自动连接块，避免之后
+                        // 主动断开时它当帧又把连接拉起来（断不开 = 卡死）。
+                        st.auto_connect_done = true;
                         // 连接成功 → 默认跳到设置页（沿用原有交互）
                         let _ = handle.ui_tx.send(UiEvent::Navigate(Page::Settings));
                     }
@@ -131,6 +134,10 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
             .corner_radius(egui::CornerRadius::same(6))
             .min_size(egui::vec2(96.0, 32.0));
         if ui.add_enabled(is_online, disconnect_btn).clicked() {
+            // 用户主动断开 = 明确要停在未连接状态：抑制底部自动连接块，
+            // 否则当帧它就按 last_port 重新连上（无限拉锯，UI 反复被
+            // attempt_connect 的 auto_get 阻塞数秒）。
+            st.auto_connect_done = true;
             handle.detach_link();
             handle.log_kind(crate::state::LogKind::App, "已断开");
             // 清空顶栏端口名显示
@@ -170,6 +177,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
         let mut ac = *handle.auto_connect.lock().unwrap();
         if ui.checkbox(&mut ac, "启动时自动连接上次端口").changed() {
             *handle.auto_connect.lock().unwrap() = ac;
+            // 勾选只改变"下次启动"的行为，会话内不立即发起连接：
+            // 底部自动连接块会在当帧同步 attempt_connect，auto_get 的多个
+            // 1s 超时请求会阻塞 UI 数秒（体感卡死）。标记 done 抑制它。
+            if ac && !is_online {
+                st.auto_connect_done = true;
+            }
         }
 
         // 重连中：显示取消按钮，直接停止自动重连循环。

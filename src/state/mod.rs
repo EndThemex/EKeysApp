@@ -161,11 +161,18 @@ pub struct ReconnectorHandle {
     pub last_port: Arc<Mutex<Option<String>>>,
     pub ui_tx: Sender<UiEvent>,
     pub pending_reconnect: Arc<Mutex<Option<ReconnectJob>>>,
+    /// 与 schedule_reconnect 同一约束的开关：未勾选自动连接时不兜底重连，
+    /// 否则会出现"弹了开始重连 Toast 又被 tick 取消"的混乱行为。
+    pub auto_connect: Arc<Mutex<bool>>,
 }
 
 impl ReconnectorHandle {
     /// 触发兜底重连调度：仅在 router 没机会转 Disconnected 的极端场景下使用。
     pub fn trigger(&self) {
+        // 未启用自动连接：与 schedule_reconnect 保持一致，静默放弃
+        if !*self.auto_connect.lock().unwrap() {
+            return;
+        }
         let Some(port) = self.last_port.lock().unwrap().clone() else {
             return;
         };
@@ -542,7 +549,19 @@ impl AppHandle {
 
     /// 启动后台重连循环（指数退避 1→2→4→5s，5 次后放弃）。
     /// 由 App 每帧 tick_reconnect() 驱动。
+    ///
+    /// 重要约束：**只有用户显式勾选"启动时自动连接上次端口"才允许自动重连**。
+    /// 用户主动断开（点击断开按钮）或勾选后又取消勾选，都应进入真正的"未连接"
+    /// 状态、不再被定时重连拖死。
     pub fn schedule_reconnect(&self, port_name: String) {
+        // 没开自动连接就别调度重连——这是用户手动断开后被定时任务"卡死"的根因。
+        if !*self.auto_connect.lock().unwrap() {
+            self.log_kind(
+                LogKind::App,
+                format!("跳过自动重连 {port_name}：未启用自动连接"),
+            );
+            return;
+        }
         let mut slot = self.pending_reconnect.lock().unwrap();
         // 已存在任务则不重复调度；如果旧任务的目标端口不同，则替换为新端口
         // （用户可能手动切换端口后断线）。attempt 不重置，保留退避节奏。
@@ -562,6 +581,12 @@ impl AppHandle {
 
     /// 每帧调用：处理重连状态机
     pub fn tick_reconnect(&self) {
+        // 用户中途取消"自动连接"勾选：立即清掉挂起的重连任务，
+        // 避免退避循环继续 tick 探测串口（体感"卡死"）。
+        if !*self.auto_connect.lock().unwrap() && self.pending_reconnect.lock().unwrap().is_some() {
+            self.cancel_reconnect();
+            return;
+        }
         // 先复制一份 job，避免长时间持锁（包括 attempt_connect 内部也会 lock）
         let mut slot = self.pending_reconnect.lock().unwrap();
         let Some(mut job) = slot.clone() else { return };
@@ -582,7 +607,12 @@ impl AppHandle {
 
         // 探测：仅确认设备是否回来了
         match crate::link::serial::open(&job.port_name) {
-            Ok(_port) => {
+            Ok(probe) => {
+                // 关键：探测句柄必须先释放再 attempt_connect。serialport 在
+                // Windows 上独占打开（CreateFileW share_mode=0），探测端口
+                // 不 drop 的话，attempt_connect 对同一 COM 口二次打开必然
+                // 失败，重连会烧完全部尝试次数且永远连不上。
+                drop(probe);
                 // 探测成功：直接建立完整连接。
                 // 这里不再"仅弹 Toast 让用户手动接管"，否则重连名存实亡。
                 match self.attempt_connect(&job.port_name) {
@@ -653,6 +683,7 @@ impl AppHandle {
             last_port: Arc::clone(&self.last_port),
             ui_tx: self.ui_tx.clone(),
             pending_reconnect: Arc::clone(&self.pending_reconnect),
+            auto_connect: Arc::clone(&self.auto_connect),
         }
     }
 
