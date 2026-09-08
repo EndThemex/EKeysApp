@@ -69,7 +69,7 @@ pub const F_WIFI_SSID: u8 = 2;
 pub const F_WIFI_PASSWORD: u8 = 3;
 pub const F_WORK_MODE: u8 = 4;
 pub const F_RGB_MODE: u8 = 5;
-pub const F_RGB_SINGLE_COLAR: u8 = 6;
+pub const F_RGB_SINGLE_COLOR: u8 = 6;
 pub const F_RGB_CLICK_MODE: u8 = 7;
 pub const F_RGB_BRIGHTNESS: u8 = 8;
 pub const F_TFT_THEME: u8 = 9;
@@ -296,7 +296,7 @@ pub struct DeviceSettings {
     #[serde(default)]
     pub rgb_mode: i32,
     #[serde(default)]
-    pub rgb_single_colar: i32,
+    pub rgb_single_color: i32,
     #[serde(default)]
     pub rgb_click_mode: i32,
     #[serde(default)]
@@ -376,6 +376,20 @@ impl DeviceSettings {
 
         // 亮度：5~100
         clamp_min_max!(tft_brightness, 5, 100);
+        // RGB（与固件 parseConfigSetCommand.cpp §RGB + panel_lighting UI 选项对齐）
+        // - rgb_mode：固件 RGBLightControl.h:22 RGBMode 枚举 0~7 共 8 种
+        //   （关闭/单色/彩虹/彩浪/循环/电平/火焰/脉冲）
+        // - rgb_single_color：固件 24 色调色板索引（RGBLightControl.cpp:74 `% 24` 兜底），
+        //   UI 与固件实际语义对齐为 0~23
+        // - rgb_click_mode：固件 ClickHighlight.h:34 ClickMode 枚举 0~2 共 3 种
+        //   （关闭/单色按下点亮/渐变）
+        // - rgb_brightness：UI Slider 0~100
+        // 固件侧只做 uint8_t 截断、不做范围过滤；这里给 App 端兜底，避免
+        // 越界值被静默接受后 UI 仍显示旧值造成"我改了为啥没生效"的歧义。
+        clamp_min_max!(rgb_mode, 0, 7);
+        clamp_min_max!(rgb_single_color, 0, 23);
+        clamp_min_max!(rgb_click_mode, 0, 2);
+        clamp_min_max!(rgb_brightness, 0, 100);
         // 工作模式：0=USB 1=BLE 2=2.4G
         if !(0..=2).contains(&self.work_mode) {
             self.work_mode = 0;
@@ -441,7 +455,7 @@ impl DeviceSettings {
         cmp!(F_WIFI_PASSWORD, wifi_password);
         cmp!(F_WORK_MODE, work_mode);
         cmp!(F_RGB_MODE, rgb_mode);
-        cmp!(F_RGB_SINGLE_COLAR, rgb_single_colar);
+        cmp!(F_RGB_SINGLE_COLOR, rgb_single_color);
         cmp!(F_RGB_CLICK_MODE, rgb_click_mode);
         cmp!(F_RGB_BRIGHTNESS, rgb_brightness);
         cmp!(F_TFT_THEME, tft_theme);
@@ -497,7 +511,7 @@ impl DeviceSettings {
         merge_field!(F_WIFI_PASSWORD, wifi_password);
         merge_field!(F_WORK_MODE, work_mode);
         merge_field!(F_RGB_MODE, rgb_mode);
-        merge_field!(F_RGB_SINGLE_COLAR, rgb_single_colar);
+        merge_field!(F_RGB_SINGLE_COLOR, rgb_single_color);
         merge_field!(F_RGB_CLICK_MODE, rgb_click_mode);
         merge_field!(F_RGB_BRIGHTNESS, rgb_brightness);
         merge_field!(F_TFT_THEME, tft_theme);
@@ -537,7 +551,7 @@ impl DeviceSettings {
         apply_field!(F_WIFI_PASSWORD, wifi_password);
         apply_field!(F_WORK_MODE, work_mode);
         apply_field!(F_RGB_MODE, rgb_mode);
-        apply_field!(F_RGB_SINGLE_COLAR, rgb_single_colar);
+        apply_field!(F_RGB_SINGLE_COLOR, rgb_single_color);
         apply_field!(F_RGB_CLICK_MODE, rgb_click_mode);
         apply_field!(F_RGB_BRIGHTNESS, rgb_brightness);
         apply_field!(F_TFT_THEME, tft_theme);
@@ -1086,7 +1100,9 @@ pub fn modifier_name_to_mod(name: &str) -> Option<u8> {
     if n.eq_ignore_ascii_case("Shift") || n.eq_ignore_ascii_case("Shift_L") {
         return Some(MOD_SHIFT);
     }
-    if n.eq_ignore_ascii_case("Alt") || n.eq_ignore_ascii_case("Option") || n.eq_ignore_ascii_case("Alt_L")
+    if n.eq_ignore_ascii_case("Alt")
+        || n.eq_ignore_ascii_case("Option")
+        || n.eq_ignore_ascii_case("Alt_L")
     {
         return Some(MOD_ALT);
     }
@@ -1223,7 +1239,11 @@ impl KeyAction {
 /// - 无修饰前缀、多段非修饰键 → `Chord`；
 /// - 其余无法解析 → `Function(原文)` 原样保留，避免下发时静默丢失。
 fn parse_normal_string(n: &str) -> KeyAction {
-    let segments: Vec<&str> = n.split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = n
+        .split('+')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     if segments.is_empty() {
         return KeyAction::None;
     }
@@ -1927,7 +1947,7 @@ mod tests {
             F_WIFI_PASSWORD,
             F_WORK_MODE,
             F_RGB_MODE,
-            F_RGB_SINGLE_COLAR,
+            F_RGB_SINGLE_COLOR,
             F_RGB_CLICK_MODE,
             F_RGB_BRIGHTNESS,
             F_TFT_THEME,
@@ -1968,7 +1988,7 @@ mod tests {
             wifi_password: "pw".into(),
             work_mode: 1,
             rgb_mode: 1,
-            rgb_single_colar: 1,
+            rgb_single_color: 1,
             rgb_click_mode: 1,
             rgb_brightness: 50,
             tft_theme: 1,
@@ -2016,7 +2036,7 @@ mod tests {
             wifi_password: "pw".into(),
             work_mode: 1,
             rgb_mode: 1,
-            rgb_single_colar: 1,
+            rgb_single_color: 1,
             rgb_click_mode: 1,
             rgb_brightness: 50,
             tft_theme: 1,
@@ -2087,6 +2107,13 @@ mod tests {
         s.voice_trigger_key = 99; // → 11
         s.voice_max_record_ms = 50; // → 1000
         s.voice_dev_pid = -1; // → 0
+        // RGB 钳位（与固件 RGBLightControl.h:22 / ClickHighlight.h:34 对齐）
+        s.rgb_mode = 99; // → 7
+        s.rgb_single_color = -10; // → 0
+        s.rgb_single_color = 1000; // → 23（再赋一次，覆盖前面）
+        s.rgb_click_mode = 42; // → 2
+        s.rgb_brightness = -5; // → 0
+        s.rgb_brightness = 999; // → 100（再赋一次，覆盖前面）
         s.wifi_ssid = "x".repeat(64); // → 32 字节
         s.wifi_password = "p".repeat(128); // → 64 字节
         s.voice_baidu_api_key = "k".repeat(100); // → 64 字节
@@ -2101,6 +2128,10 @@ mod tests {
         assert_eq!(s.voice_trigger_key, 11);
         assert_eq!(s.voice_max_record_ms, 1000);
         assert_eq!(s.voice_dev_pid, 0);
+        assert_eq!(s.rgb_mode, 7);
+        assert_eq!(s.rgb_single_color, 23);
+        assert_eq!(s.rgb_click_mode, 2);
+        assert_eq!(s.rgb_brightness, 100);
         assert_eq!(s.wifi_ssid.len(), 32);
         assert_eq!(s.wifi_password.len(), 64);
         assert_eq!(s.voice_baidu_api_key.len(), 64);

@@ -54,14 +54,17 @@ pub const KEYMAP_RELOAD: &str = r::ARROW_CLOCKWISE;
 pub const KEYMAP_EXPORT: &str = r::DOWNLOAD_SIMPLE;
 pub const KEYMAP_CAPTURE: &str = r::KEYBOARD;
 
-// Lighting — 用辨识度高的语义化图标，避免形状相似难分辨
+// Lighting — 与固件 RGBMode 0~7 + ClickHighlight 0~2 严格对齐
+// （RGBLightControl.h: RGB_NONE/SINGLE/RAINBOW/RAINBOWWARE/COLORCYCLE/METER/FIRE/PULSE）
+// （ClickHighlight.h: CLICK_NONE/SINGLE/WARE）
 pub const LIGHT_OFF: &str = r::POWER;
 pub const LIGHT_SOLID: &str = r::SQUARE;
-pub const LIGHT_FLOW: &str = r::WAVES;
-pub const LIGHT_BREATHE: &str = r::WAVEFORM;
-pub const LIGHT_CLICK: &str = r::CURSOR_CLICK;
 pub const LIGHT_RAINBOW: &str = r::RAINBOW;
+pub const LIGHT_WAVE: &str = r::WAVES;
+pub const LIGHT_CYCLE: &str = r::ARROWS_CLOCKWISE;
+pub const LIGHT_METER: &str = r::ACTIVITY;
+pub const LIGHT_FIRE: &str = r::FLAME;
+pub const LIGHT_PULSE: &str = r::HEARTBEAT;
 pub const LIGHT_NONE: &str = r::PROHIBIT;
-pub const LIGHT_ON: &str = r::HAND_POINTING;
-pub const LIGHT_FLASH: &str = r::FLASHLIGHT;
-pub const LIGHT_FADE: &str = r::CIRCLE_HALF;
+pub const LIGHT_CLICK: &str = r::CURSOR_CLICK;
+pub const LIGHT_WARE: &str = r::CIRCLE_HALF;

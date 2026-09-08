@@ -97,7 +97,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
 
     let avail = ui.available_size();
     // Drawer 固定 320 宽；键盘图占据剩下的空间。
-    let drawer_w = 320.0_f32.min((avail.x - 32.0).max(320.0));
+    let drawer_w = 320.0_f32.min((avail.x - 32.0).max(360.0));
     let keyboard_w = (avail.x - drawer_w - 24.0).max(360.0);
     // 键盘图高度按 3 行 × 4 列 ≈ 0.75 比例自适应（高度 = 宽度 × 3/4），
     // 再额外扣除顶部占位文字与 padding，最少 180，撑满可用高度（再减去 DiffBar 高度）

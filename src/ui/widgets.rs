@@ -209,59 +209,120 @@ pub fn show_local_settings(
 
 // ============ DiffPreviewBar ============
 
-/// 按 `mask` 从 `src` 投影出仅含被修改字段的 `DeviceSettings`，
-/// 用于构造 SET 请求体。未置位的字段保持 `Default`，避免污染固件侧解析。
+/// 按 `mask` 把 `diff` 中被修改的字段逐个写入 JSON 对象（键名用协议字段名）。
 ///
-/// 注意：i32 默认 0、String 默认 ""、bool 默认 false —— 固件端 `parseConfigSetCommand`
-/// 收到这种字段通常会丢弃（参见协议文档 §5.3）。但为了让"合法 0 / 空串"也能
-/// 正确下发，我们在投影时**直接用 src 的值**，不做"是否非默认"的二次过滤：
-/// mask 已经准确表达了"用户改了哪些字段"。
-fn select_masked(src: &DeviceSettings, mask: FieldMask) -> DeviceSettings {
-    let mut out = DeviceSettings::default();
-    // 直接逐字段拷贝被 mask 选中的项；不选的字段保持 default。
-    macro_rules! copy_if {
-        ($bit:expr, $f:ident) => {
+/// 必须手动逐字段构建，**不能**序列化整个 `DeviceSettings`：
+/// `serde_json::json!({"config": &settings})` 会把未修改字段以 `Default`
+/// 值（0 / 空串）全部输出；固件按"字段是否出现在 `data.config`"判定增量
+/// （协议 §5.2），这些默认值会被当成显式配置写回设备 ——
+/// tft_brightness=0 被钳到 5（背光变最小）、WiFi SSID 被清空、
+/// 音量 / 灯效模式被重置等。
+///
+/// `active_profile_name` / `active_profile_has_custom_icon` 是固件→App 的
+/// 展示字段，0x08 不下发（固件 parseConfigSetCommand 也不处理）。
+/// 新增协议字段时在此追加一项，与 `diff()` / `merge_push()` / `apply()` 同步。
+fn build_config_payload(diff: &DeviceSettings, mask: FieldMask) -> serde_json::Value {
+    let mut cfg = serde_json::Map::new();
+    macro_rules! put_if {
+        ($bit:expr, $name:literal, $f:ident) => {
             if mask.test($bit) {
-                out.$f = src.$f.clone();
+                cfg.insert($name.to_string(), serde_json::json!(diff.$f));
             }
         };
     }
-    copy_if!(crate::protocol::F_WIFI_SWITCH, wifi_switch);
-    copy_if!(crate::protocol::F_CONNECT_HOST, connect_host);
-    copy_if!(crate::protocol::F_WIFI_SSID, wifi_ssid);
-    copy_if!(crate::protocol::F_WIFI_PASSWORD, wifi_password);
-    copy_if!(crate::protocol::F_WORK_MODE, work_mode);
-    copy_if!(crate::protocol::F_RGB_MODE, rgb_mode);
-    copy_if!(crate::protocol::F_RGB_SINGLE_COLAR, rgb_single_colar);
-    copy_if!(crate::protocol::F_RGB_CLICK_MODE, rgb_click_mode);
-    copy_if!(crate::protocol::F_RGB_BRIGHTNESS, rgb_brightness);
-    copy_if!(crate::protocol::F_TFT_THEME, tft_theme);
-    copy_if!(crate::protocol::F_TFT_BRIGHTNESS, tft_brightness);
-    copy_if!(crate::protocol::F_DEVICE_VOLUME, device_volume);
-    copy_if!(crate::protocol::F_AUDIO_ENABLE, audio_enable);
-    copy_if!(crate::protocol::F_POWER_MODE, power_mode);
-    copy_if!(crate::protocol::F_VOICE_ENABLE, voice_enable);
-    copy_if!(crate::protocol::F_VOICE_TRIGGER_KEY, voice_trigger_key);
-    copy_if!(crate::protocol::F_VOICE_MAX_RECORD_MS, voice_max_record_ms);
-    copy_if!(crate::protocol::F_VOICE_AUTO_ENTER, voice_auto_enter);
-    copy_if!(crate::protocol::F_VOICE_DEV_PID, voice_dev_pid);
-    copy_if!(crate::protocol::F_VOICE_CUID, voice_cuid);
-    copy_if!(crate::protocol::F_VOICE_BAIDU_API_KEY, voice_baidu_api_key);
-    copy_if!(
+    put_if!(crate::protocol::F_WIFI_SWITCH, "wifi_switch", wifi_switch);
+    put_if!(
+        crate::protocol::F_CONNECT_HOST,
+        "connect_host",
+        connect_host
+    );
+    put_if!(crate::protocol::F_WIFI_SSID, "wifi_ssid", wifi_ssid);
+    put_if!(
+        crate::protocol::F_WIFI_PASSWORD,
+        "wifi_password",
+        wifi_password
+    );
+    put_if!(crate::protocol::F_WORK_MODE, "work_mode", work_mode);
+    put_if!(crate::protocol::F_RGB_MODE, "rgb_mode", rgb_mode);
+    put_if!(
+        crate::protocol::F_RGB_SINGLE_COLOR,
+        "rgb_single_color",
+        rgb_single_color
+    );
+    put_if!(
+        crate::protocol::F_RGB_CLICK_MODE,
+        "rgb_click_mode",
+        rgb_click_mode
+    );
+    put_if!(
+        crate::protocol::F_RGB_BRIGHTNESS,
+        "rgb_brightness",
+        rgb_brightness
+    );
+    put_if!(crate::protocol::F_TFT_THEME, "tft_theme", tft_theme);
+    put_if!(
+        crate::protocol::F_TFT_BRIGHTNESS,
+        "tft_brightness",
+        tft_brightness
+    );
+    put_if!(
+        crate::protocol::F_DEVICE_VOLUME,
+        "device_volume",
+        device_volume
+    );
+    put_if!(
+        crate::protocol::F_AUDIO_ENABLE,
+        "audio_enable",
+        audio_enable
+    );
+    put_if!(crate::protocol::F_POWER_MODE, "power_mode", power_mode);
+    put_if!(
+        crate::protocol::F_VOICE_ENABLE,
+        "voice_enable",
+        voice_enable
+    );
+    put_if!(
+        crate::protocol::F_VOICE_TRIGGER_KEY,
+        "voice_trigger_key",
+        voice_trigger_key
+    );
+    put_if!(
+        crate::protocol::F_VOICE_MAX_RECORD_MS,
+        "voice_max_record_ms",
+        voice_max_record_ms
+    );
+    put_if!(
+        crate::protocol::F_VOICE_AUTO_ENTER,
+        "voice_auto_enter",
+        voice_auto_enter
+    );
+    put_if!(
+        crate::protocol::F_VOICE_DEV_PID,
+        "voice_dev_pid",
+        voice_dev_pid
+    );
+    put_if!(crate::protocol::F_VOICE_CUID, "voice_cuid", voice_cuid);
+    put_if!(
+        crate::protocol::F_VOICE_BAIDU_API_KEY,
+        "voice_baidu_api_key",
+        voice_baidu_api_key
+    );
+    put_if!(
         crate::protocol::F_VOICE_BAIDU_SECRET_KEY,
+        "voice_baidu_secret_key",
         voice_baidu_secret_key
     );
-    copy_if!(crate::protocol::F_PC_STATUS_MASK, pc_status_mask);
-    copy_if!(
+    put_if!(
+        crate::protocol::F_PC_STATUS_MASK,
+        "pc_status_mask",
+        pc_status_mask
+    );
+    put_if!(
         crate::protocol::F_ACTIVE_KEYMAP_PROFILE,
+        "active_keymap_profile",
         active_keymap_profile
     );
-    copy_if!(crate::protocol::F_ACTIVE_PROFILE_NAME, active_profile_name);
-    copy_if!(
-        crate::protocol::F_ACTIVE_PROFILE_HAS_CUSTOM_ICON,
-        active_profile_has_custom_icon
-    );
-    out
+    serde_json::Value::Object(cfg)
 }
 
 /// 把 diff 通过 0x08 下发；成功后让 settings 刷新
@@ -271,9 +332,9 @@ fn select_masked(src: &DeviceSettings, mask: FieldMask) -> DeviceSettings {
 /// 因此这里**不发 `mask`** —— 内部 `FieldMask` 仅用于 App 端的 diff 判定。
 pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
     use crate::protocol::CMD_CONFIG_SET;
-    // 仅把 mask 置位的字段挑出来，避免发送空 diff 时把全字段白送给固件。
-    let payload_diff = select_masked(diff, mask);
-    let payload = serde_json::json!({ "config": &payload_diff });
+    // 仅把 mask 置位的字段写进 data.config（见 build_config_payload 的注释：
+    // 整体序列化会把未修改字段以 Default 值发出，被固件当显式配置写回）。
+    let payload = serde_json::json!({ "config": build_config_payload(diff, mask) });
     let _ = handle.with_link(|lm| {
         match lm.request(
             CMD_CONFIG_SET,
@@ -364,6 +425,18 @@ pub fn show_diff_bar(
                             }
                             if mask.test(crate::protocol::F_POWER_MODE) {
                                 ui.label(format!("power_mode={}", diff.power_mode));
+                            }
+                            if mask.test(crate::protocol::F_RGB_MODE) {
+                                ui.label(format!("rgb_mode={}", diff.rgb_mode));
+                            }
+                            if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
+                                ui.label(format!("rgb_single_color={}", diff.rgb_single_color));
+                            }
+                            if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
+                                ui.label(format!("rgb_click_mode={}", diff.rgb_click_mode));
+                            }
+                            if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
+                                ui.label(format!("rgb_brightness={}", diff.rgb_brightness));
                             }
                         });
                     });
