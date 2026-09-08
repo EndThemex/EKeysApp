@@ -21,7 +21,9 @@ pub fn run_shared(
 ) {
     log.push(LogKind::App, "reader 线程启动".to_string());
     let mut buf = [0u8; 512];
-    let mut line = String::with_capacity(256);
+    // 按字节缓冲，整行收齐后再统一 UTF-8 解码：逐字节 `b as char` 会把
+    // UTF-8 多字节序列拆成 Latin-1 字符，固件中文日志变成 "ä»å¤©" 乱码。
+    let mut line: Vec<u8> = Vec::with_capacity(256);
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -48,10 +50,12 @@ pub fn run_shared(
             Ok(n) => {
                 for &b in &buf[..n] {
                     if b == b'\n' {
-                        handle_line(&mut line, &tx, &log);
+                        let s = String::from_utf8_lossy(&line).into_owned();
+                        handle_line(&s, &tx, &log);
+                        line.clear();
                     } else if b != b'\r' {
                         // 协议 §1：剥离 \r
-                        line.push(b as char);
+                        line.push(b);
                     }
                 }
             }
@@ -82,10 +86,9 @@ pub fn run_shared(
     }
 }
 
-fn handle_line(line: &mut String, tx: &Sender<LinkEvent>, log: &SharedLog) {
+fn handle_line(line: &str, tx: &Sender<LinkEvent>, log: &SharedLog) {
     let s = line.trim();
     if s.is_empty() {
-        line.clear();
         return;
     }
     match protocol::try_parse_line(s) {
@@ -106,7 +109,6 @@ fn handle_line(line: &mut String, tx: &Sender<LinkEvent>, log: &SharedLog) {
             let _ = tx.send(LinkEvent::LogLine(format!("[PARSE_ERR] {s} ({e})")));
         }
     }
-    line.clear();
 }
 
 /// 周期（用于 read timeout）
