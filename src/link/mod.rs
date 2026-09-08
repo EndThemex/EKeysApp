@@ -132,7 +132,7 @@ impl LinkManager {
             reader::run_shared(
                 port_for_reader,
                 tx_for_reader.clone(),
-                stop_for_reader,
+                stop_for_reader.clone(),
                 log_for_reader,
             );
             let _ = tx_for_reader.send(LinkEvent::State(ConnectionState::Disconnected));
@@ -141,9 +141,13 @@ impl LinkManager {
             // 注意：必须在 on_reader_exit 之前 drop 这个 sender —— 否则 router
             // 会等不到 close 信号一直挂着，close() 的 join 永远不会返回。
             drop(tx_for_reader);
-            // reader 异常退出 → 调用 on_reader_exit 回调（由 AppHandle 注入）
-            // 作为 router 也挂了的兜底，正常路径不依赖它。
-            on_reader_exit_th();
+            // 主动断开时 stop 已被 close() 置位，user 主动断开不应该被当"异常断开"
+            // 处理（也就不会触发 "检测到 xxx 异常断开" 的兜底重连 Toast）；
+            // 只有 reader 因为串口掉线 / 设备复位等异常原因退出时，stop 仍为 false，
+            // 此时才调用 on_reader_exit 触发兜底重连。
+            if !stop_for_reader.load(Ordering::Relaxed) {
+                on_reader_exit_th();
+            }
         });
 
         // writer：共享 port
@@ -344,11 +348,17 @@ impl LinkManager {
     /// 关闭
     ///
     /// 顺序：
-    /// 1. heartbeat 停 → 不再发心跳帧
+    /// 1. 置 stop flag
     /// 2. writer 收到 Shutdown → 不再处理请求
-    /// 3. reader 看到 stop flag → 退出 read 循环 → 发 Disconnected → drop event_tx
-    /// 4. router 收到 Disconnected → 清空 pending → 收到 event_rx 的 Err → 自然退出
-    /// 5. join router（前面三步必须先完成才能让 router 退出）
+    /// 3. heartbeat 停 → 不再发心跳帧
+    /// 4. reader 看到 stop flag → 退出 read 循环 → 发 Disconnected → drop 自己的 event_tx clone
+    /// 5. **drop LinkManager 持有的 events_tx**（关键）：
+    ///    内部事件通道的最后一个发送端是 LinkManager.events_tx，reader/heartbeat
+    ///    退出后 channel 还靠它活。close() 在 join router 之前必须显式 drop 掉
+    ///    这个 sender，否则 router 的 `event_rx.recv()` 永远收不到 Err、router
+    ///    永不退出、`_router.join()` 死锁，整个 UI 卡死。
+    /// 6. join router（channel 关闭后 router 自然退出）
+    /// 7. join reader / writer / heartbeat 的兜底（多数情况下它们已先于 router 退出）
     ///
     /// 注意：close() 必须在 writer 完全停止之后才能 join reader，否则 reader
     /// 在 writer 还活着时持锁退出可能跟 writer 的 lock() 冲突（虽然这里是
@@ -356,6 +366,14 @@ impl LinkManager {
     pub fn close(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.write_tx.send(WriterMsg::Shutdown);
+
+        // 关键修复：在 join router 之前 drop 掉 events_tx（最后一个内部通道发送端）。
+        // 否则 reader/heartbeat 退出后 channel 还活着，router 的 recv() 永不返回 Err，
+        // _router.join() 永久阻塞 → UI 线程在 detach_link() 里卡死。
+        // events_tx 本身在 LinkManager 里是 Option<Sender<_>>，替换掉就能立即释放；
+        // 旧 sender 在表达式结束时 drop，channel 关闭。
+        self.events_tx = std::sync::mpsc::channel().0;
+
         if let Some(h) = self._heartbeat.take() {
             let _ = h.join();
         }
