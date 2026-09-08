@@ -2,6 +2,7 @@
 
 use eframe::egui;
 
+use crate::link::serial::WCH_VID;
 use crate::link::{LinkManager, PortInfo};
 use crate::state::{AppHandle, Page, UiEvent};
 
@@ -50,7 +51,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                         .selected_text(display)
                         .show_ui(ui, |cb| {
                             for p in &st.ports {
-                                let label = if let Some(prod) = &p.product {
+                                // CH340 系列桥接端口：列表里直接标注不支持
+                                // （连接时 attempt_connect 也会拒绝并弹 Toast）
+                                let label = if p.vid == Some(WCH_VID) {
+                                    format!("{} (CH340 不支持)", p.name)
+                                } else if let Some(prod) = &p.product {
                                     format!("{} ({})", p.name, prod)
                                 } else {
                                     p.name.clone()
@@ -89,6 +94,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                             }
                             if let Some(s) = &info.serial_number {
                                 ui.label(format!("序列号: {s}"));
+                            }
+                            if info.vid == Some(WCH_VID) {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "⚠ WCH USB 转串口芯片（CH340 系列），不支持连接，请使用设备原生 USB CDC 口",
+                                    )
+                                    .color(ui.visuals().warn_fg_color),
+                                );
                             }
                         } else {
                             ui.label("(端口信息不可用)");
@@ -216,6 +229,18 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
         if let Some(p) = last_port {
             st.auto_connect_done = true;
             st.selected = Some(p.clone());
+            // CH340 等 WCH 桥接端口：与手动连接同一策略，拒绝连接并提示。
+            if let Some((vid, pid)) = crate::link::serial::is_wch_bridge(&p) {
+                handle.log_kind(
+                    crate::state::LogKind::App,
+                    format!("跳过自动连接 {p}：WCH USB 转串口芯片（{vid:04X}:{pid:04X}）"),
+                );
+                let _ = handle.ui_tx.send(UiEvent::Toast(
+                    crate::state::ToastKind::Warning,
+                    format!("跳过自动连接：{p} 为 CH340 系列芯片，请改用设备原生 USB CDC 端口"),
+                ));
+                return;
+            }
             // 自动连接路径不发 Navigate，避免抢 UI；错误也只记日志，
             // 由后续手动连接 / 重连任务继续兜底。
             if let Err(e) = handle.attempt_connect(&p) {

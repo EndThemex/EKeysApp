@@ -339,7 +339,7 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
         match lm.request(
             CMD_CONFIG_SET,
             Some(payload),
-            std::time::Duration::from_millis(1000),
+            std::time::Duration::from_millis(3000),
         ) {
             Ok(resp) => {
                 if resp.status() == Some(1) {

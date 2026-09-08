@@ -514,6 +514,15 @@ impl AppHandle {
     /// 成功会附带：写入 `last_port`、顶栏 `CurrentPort`、成功 Toast；
     /// 失败仅返回错误，调用方决定是否推 Toast / 是否调度重连。
     pub fn attempt_connect(&self, name: &str) -> Result<(), String> {
+        // 连接策略：设备必须使用原生 USB CDC。CH340 等 WCH 桥接芯片往返延迟大
+        // （见 serial::is_wch_bridge 注释），检测到即拒绝；错误由调用方弹 Toast。
+        if let Some((vid, pid)) = crate::link::serial::is_wch_bridge(name) {
+            let msg = format!(
+                "{name} 为 WCH USB 转串口芯片（{vid:04X}:{pid:04X}，CH340 系列），不支持连接，请改用设备原生 USB CDC 端口"
+            );
+            self.log_kind(LogKind::App, format!("连接失败: {msg}"));
+            return Err(msg);
+        }
         // 把 ReconnectorHandle 包成 reader 退出回调。router 转发 State(Disconnected)
         // 是主路径；这里只在 router 也挂了时兜底触发重连。
         let recon = self.reconnector();
@@ -604,6 +613,27 @@ impl AppHandle {
         // 否则 attempt_connect 内部若再 lock 同一把锁会死锁。
         *slot = None;
         drop(slot);
+
+        // CH340 等 WCH 桥接端口：attempt_connect 必然拒绝，重试没有意义，
+        // 直接停止自动重连并提示，避免退避循环反复探测。
+        if let Some((vid, pid)) = crate::link::serial::is_wch_bridge(&job.port_name) {
+            self.cancel_reconnect();
+            self.log_kind(
+                LogKind::App,
+                format!(
+                    "停止自动重连 {}：WCH USB 转串口芯片（{vid:04X}:{pid:04X}），请改用设备原生 USB CDC 端口",
+                    job.port_name
+                ),
+            );
+            let _ = self.ui_tx.send(UiEvent::Toast(
+                ToastKind::Warning,
+                format!(
+                    "已停止自动重连：{} 为 CH340 系列芯片，请改用设备原生 USB CDC 端口",
+                    job.port_name
+                ),
+            ));
+            return;
+        }
 
         // 探测：仅确认设备是否回来了
         match crate::link::serial::open(&job.port_name) {

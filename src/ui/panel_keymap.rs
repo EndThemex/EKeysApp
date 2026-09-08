@@ -140,7 +140,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
             let data = serde_json::to_value(&req).ok();
             let mut success = false;
             let _ = handle.with_link(|lm| {
-                match lm.request(CMD_KEYMAP_SET, data, Duration::from_millis(1500)) {
+                match lm.request(CMD_KEYMAP_SET, data, Duration::from_millis(3000)) {
                     Ok(frame) => {
                         if frame.status() == Some(0) {
                             success = true;

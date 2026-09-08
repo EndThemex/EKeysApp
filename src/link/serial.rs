@@ -6,6 +6,25 @@ use serialport::{SerialPortInfo, SerialPortType};
 /// ESP32-S3 USB CDC VID
 pub const ESP32_S3_VID: u16 = 0x303A;
 
+/// WCH（沁恒）USB 转串口桥 VID：CH340/CH340C/CH340K/CH341/CH343/CH910x 系列。
+/// 桥接芯片每个往返带 10~40ms 驱动批量缓冲延迟，协议的多轮请求-响应（连接
+/// 初始化 / 心跳 / 配置下发）会被显著放大，表现为连接期间 UI 卡顿与超时误报。
+/// App 对此类端口拒绝连接并提示改用设备原生 USB CDC。
+pub const WCH_VID: u16 = 0x1A86;
+
+/// 检测端口是否为 WCH USB 转串口桥（非原生 CDC）。命中返回 (vid, pid)；
+/// 端口已拔出 / 非 USB 端口 / 其它厂商 / 枚举失败 → None（放行，按原流程处理）。
+pub fn is_wch_bridge(name: &str) -> Option<(u16, u16)> {
+    let ports = serialport::available_ports().ok()?;
+    ports
+        .into_iter()
+        .find(|p| p.port_name == name)
+        .and_then(|p| match p.port_type {
+            SerialPortType::UsbPort(info) if info.vid == WCH_VID => Some((info.vid, info.pid)),
+            _ => None,
+        })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PortInfo {
     pub name: String,
