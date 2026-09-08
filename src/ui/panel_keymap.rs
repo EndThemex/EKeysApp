@@ -20,8 +20,8 @@ use crate::protocol::{
 use crate::state::AppHandle;
 
 const ROW_COUNT: usize = 3;
-/// 1u = 48 像素（与渲染区高度计算保持一致）
-const UNIT_PX: f32 = 44.0;
+/// 1u 基础像素宽度（键盘图整体尺寸缩放系数）
+const UNIT_PX: f32 = 34.0;
 const KEY_GAP: f32 = 4.0;
 const ROW_GAP: f32 = 4.0;
 /// 1.25u / 1.5u 等非整数宽度按键的圆角微调
@@ -42,7 +42,7 @@ pub struct KeymapPanelState {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
-    ui.heading("键映射");
+    ui.heading("键盘");
     ui.label(
         egui::RichText::new("对接 CMD_KEYMAP_GET / SET：重新加载从设备拉取，下发写入当前 Profile")
             .weak()
@@ -96,8 +96,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
     let diff = draft.diff_bindings(&snapshot);
 
     let avail = ui.available_size();
-    // Drawer 固定 280 宽；键盘图占据剩下的空间。
-    let drawer_w = 280.0_f32.min((avail.x - 32.0).max(220.0));
+    // Drawer 固定 320 宽；键盘图占据剩下的空间。
+    let drawer_w = 320.0_f32.min((avail.x - 32.0).max(320.0));
     let keyboard_w = (avail.x - drawer_w - 24.0).max(360.0);
     // 键盘图高度按 3 行 × 4 列 ≈ 0.75 比例自适应（高度 = 宽度 × 3/4），
     // 再额外扣除顶部占位文字与 padding，最少 180，撑满可用高度（再减去 DiffBar 高度）

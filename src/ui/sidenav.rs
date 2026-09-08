@@ -30,7 +30,7 @@ const ITEMS: &[NavItem] = &[
     },
     NavItem {
         page: Page::Keymap,
-        label: "键映射",
+        label: "键盘",
         icon: crate::ui::icons::NAV_KEYMAP,
         enabled: true,
         hint: Some("按键盘自定义按键功能 (Ctrl+3)"),

@@ -415,7 +415,8 @@ pub fn _kind_marker() -> LogKind {
 /// 统一的"settings 类"面板脚手架：clone snapshot/draft → 调回调填表 →
 /// 计算 diff → 渲染 DiffPreviewBar → 把变更写回 draft。
 ///
-/// `panel_body` 在 `ScrollArea::vertical` 内执行，就地修改 `draft`。
+/// `panel_body` 直接在传入的 `Ui` 内执行（外层 `CentralPanel` 已统一提供
+/// 垂直滚动，这里不再嵌套 `ScrollArea`，避免出现两个滚动条）。
 /// 写回始终发生（即使没改），因为 tab 切换时也要把当前显示状态
 /// 同步到草稿，避免下次进入面板看到过期数据。
 ///
@@ -428,9 +429,7 @@ pub fn settings_panel_scaffold(
     let snapshot = handle.settings.lock().unwrap().clone();
     let mut draft = handle.draft.lock().unwrap().clone();
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        panel_body(ui, &snapshot, &mut draft);
-    });
+    panel_body(ui, &snapshot, &mut draft);
 
     let (diff, mask) = draft.diff(&snapshot);
     let has_diff = !mask.is_empty();
