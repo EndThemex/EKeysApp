@@ -100,6 +100,28 @@ pub fn paint_icon_text_in(
     total_w
 }
 
+/// 在 `anchor` 处绘制单个图标：x 为图标左缘，y 为图标的视觉中心线。
+/// 垂直方向按 **光学中心对齐**（基于 galley 的 `mesh_bounds`），返回图标宽度。
+///
+/// 用于图标与真实文本控件（如可选中 [`egui::Label`]）混排：先布局文本控件拿到
+/// 其行 `Rect`，再把图标的视觉中心对齐到该行的竖直中线。
+pub fn paint_icon_at(
+    ui: &mut egui::Ui,
+    anchor: egui::Pos2,
+    icon: &str,
+    color: egui::Color32,
+    size: f32,
+) -> f32 {
+    let galley = ui
+        .painter()
+        .layout(icon.to_string(), icon_font_id(size), color, f32::INFINITY);
+    let width = galley.rect.width();
+    let top = anchor.y - galley_mesh_center_y(&galley);
+    ui.painter()
+        .galley(egui::pos2(anchor.x, top), galley.into(), color);
+    width
+}
+
 /// galley 内部字形紧致包围盒（mesh_bounds）的竖直中心（galley 本地坐标）。
 /// 空文本等 mesh_bounds 为空时退化为 rect 中心。
 fn galley_mesh_center_y(g: &egui::Galley) -> f32 {

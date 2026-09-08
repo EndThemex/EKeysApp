@@ -22,6 +22,10 @@ pub struct LogPanelState {
     pub show_app: bool,
     pub level: LevelFilter,
     pub search: String,
+    /// 跟随最新日志（粘底自动滚动）。用户滚离底部后自动解除，滚回底部自动恢复。
+    pub follow: bool,
+    /// 一次性请求：滚动到最新日志（点击“跳转最新”按钮时置位）。
+    pub jump_to_latest: bool,
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
@@ -113,11 +117,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
     );
     ui.add_space(4.0);
 
-    egui::ScrollArea::vertical()
+    // 时间正序渲染（旧 → 新，最新在底部）：新日志追加在内容末尾，
+    // 用户上滚查看历史时视口不会被新日志推动。
+    let out = egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
-        .stick_to_bottom(true)
+        .stick_to_bottom(st.follow)
         .show(ui, |ui| {
-            for e in entries.iter().rev() {
+            for e in entries.iter() {
                 if !kind_visible(st, e.kind) {
                     continue;
                 }
@@ -143,37 +149,83 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     LogKind::App => crate::ui::icons::LOG_APP,
                 };
                 let ts = format_timestamp(e.ts_ms);
-                // 图标用 Phosphor 字体，文本用 Proportional，二者分两个 galley 拼接。
-                let resp = ui.allocate_response(
-                    egui::vec2(ui.available_width(), 18.0),
-                    egui::Sense::hover(),
-                );
-                // 单行：图标 + 文本（时间戳 + 内容）
-                crate::ui::fonts::paint_icon_text_in(
-                    ui,
-                    resp.rect,
-                    arrow,
-                    &format!(" {}  {}", ts, e.text),
-                    12.0,
-                    color,
-                    4.0,
-                );
-                // 单行右键复制
-                resp.context_menu(|ui| {
-                    if ui.button("复制此行").clicked() {
-                        ui.ctx().copy_text(format!("{}  {}", ts, e.text));
-                        let _ = handle
-                            .ui_tx
-                            .send(UiEvent::Toast(ToastKind::Success, "已复制".to_string()));
-                        ui.close();
-                    }
-                    if ui.button("复制消息内容").clicked() {
-                        ui.ctx().copy_text(e.text.clone());
-                        ui.close();
-                    }
+                let text = format!("{}  {}", ts, e.text);
+
+                let row = ui.horizontal(|ui| {
+                    // 图标占位：高度 0，行高由文本决定；egui 在行内垂直居中。
+                    let slot = ui.allocate_exact_size(egui::vec2(12.0, 0.0), egui::Sense::hover());
+                    // 文本用可选中 Label，支持鼠标拖选/复制。
+                    let text_resp = ui.add(
+                        egui::Label::new(egui::RichText::new(&text).size(12.0).color(color))
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                    // 图标按光学中心对齐到文本行竖直中线。
+                    crate::ui::fonts::paint_icon_at(
+                        ui,
+                        egui::pos2(slot.0.left(), text_resp.rect.center().y),
+                        arrow,
+                        color,
+                        12.0,
+                    );
                 });
+                // 整行右键复制
+                let row_id = egui::Id::new(("log_row", e.ts_ms, e.text.as_str()));
+                ui.interact(row.response.rect, row_id, egui::Sense::hover())
+                    .context_menu(|ui| {
+                        if ui.button("复制此行").clicked() {
+                            ui.ctx().copy_text(text.clone());
+                            let _ = handle
+                                .ui_tx
+                                .send(UiEvent::Toast(ToastKind::Success, "已复制".to_string()));
+                            ui.close();
+                        }
+                        if ui.button("复制消息内容").clicked() {
+                            ui.ctx().copy_text(e.text.clone());
+                            ui.close();
+                        }
+                    });
+            }
+
+            // 跳转最新：把内容末尾滚到视口底部；到底后 egui 会自动恢复粘底跟随。
+            if st.jump_to_latest {
+                ui.scroll_to_cursor(Some(egui::Align::Max));
+                st.jump_to_latest = false;
             }
         });
+
+    // 跟随状态收敛：
+    // - 位于底部（offset == max）→ 保持/恢复跟随；
+    // - 用户滚离底部 → 解除跟随，新日志不再推动视口。
+    let diff = out.content_size.y - out.inner_rect.height() - out.state.offset.y;
+    let at_bottom = diff <= 0.5;
+    st.follow = at_bottom;
+
+    // “跳转最新”悬浮按钮：用户滚离底部时显示在日志区右下角。
+    // 悬浮在 ScrollArea 内容之上属于无法用常规布局表达的定位，故使用精确 Rect。
+    if !st.follow {
+        let label = "跳转最新";
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label.to_owned(), font, egui::Color32::WHITE);
+        let pad = ui.spacing().button_padding;
+        let size = egui::vec2(
+            galley.rect.width() + pad.x * 2.0,
+            galley.rect.height() + pad.y * 2.0,
+        );
+        let margin = 12.0;
+        let rect = egui::Rect::from_min_size(
+            out.inner_rect.right_bottom() - egui::vec2(size.x + margin, size.y + margin),
+            size,
+        );
+        let btn = egui::Button::new(egui::RichText::new(label).strong())
+            .fill(crate::ui::ACCENT)
+            .corner_radius(egui::CornerRadius::same(6));
+        if ui.put(rect, btn).clicked() {
+            st.jump_to_latest = true;
+        }
+    }
 }
 
 fn kind_visible(st: &LogPanelState, k: LogKind) -> bool {

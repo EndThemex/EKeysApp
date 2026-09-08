@@ -46,6 +46,8 @@ impl WxiApp {
             show_app: true,
             level: panel_log::LevelFilter::All,
             search: String::new(),
+            follow: true,
+            jump_to_latest: false,
         };
         Self {
             handle,
