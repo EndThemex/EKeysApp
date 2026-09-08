@@ -206,8 +206,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
     });
 
     // 自动连接（仅当 Disconnected + 有 last_port + auto_connect=true + 还未尝试过）
+    //
+    // 关键：必须先把 last_port 取出并释放锁，再进入分支。if let 的 scrutinee
+    // 临时 MutexGuard 会存活到整个 then 块结束，若在块内调用 attempt_connect
+    // （其成功路径会再次锁 last_port），同线程对 std Mutex 二次加锁 → 永久
+    // 死锁：UI 冻结、窗口不出现（启动自动连接正是这条路径）。
+    let last_port = handle.last_port.lock().unwrap().clone();
     if !is_online && !st.auto_connect_done && *handle.auto_connect.lock().unwrap() {
-        if let Some(p) = handle.last_port.lock().unwrap().clone() {
+        if let Some(p) = last_port {
             st.auto_connect_done = true;
             st.selected = Some(p.clone());
             // 自动连接路径不发 Navigate，避免抢 UI；错误也只记日志，

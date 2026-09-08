@@ -156,7 +156,11 @@ impl WxiApp {
                     && self.handle.link.lock().unwrap().is_some()
                 {
                     self.handle.detach_link();
-                    if let Some(port) = self.handle.last_port.lock().unwrap().clone() {
+                    // 先取出端口释放锁再调度：if let 的 scrutinee 临时 MutexGuard
+                    // 会存活到块尾，schedule_reconnect 内部再锁其它互斥体时
+                    // 极易形成同类自死锁（参照 panel_connection 的教训）。
+                    let last_port = self.handle.last_port.lock().unwrap().clone();
+                    if let Some(port) = last_port {
                         self.handle.schedule_reconnect(port);
                     }
                 }
