@@ -12,8 +12,8 @@ use crate::link::LinkEvent;
 use crate::protocol::{CMD_HEARTBEAT, Frame};
 use crate::state::LogKind;
 use crate::util::log::SharedLog;
-/// 心跳间隔（可由 UI 配置；阶段 04 先硬编码 1.5s）
-pub const HEARTBEAT_INTERVAL_MS: u64 = 1500;
+/// 心跳间隔
+pub const HEARTBEAT_INTERVAL_MS: u64 = 2000;
 /// 允许的最大无响应时间：3 个周期
 pub const HEARTBEAT_TIMEOUT_MULTIPLIER: u32 = 3;
 /// 心跳日志聚合窗口。每帧心跳仍照常发，但只在累计达到该阈值时记一条
