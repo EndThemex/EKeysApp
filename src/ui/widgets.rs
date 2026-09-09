@@ -23,7 +23,8 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
         return;
     }
     egui::Area::new(egui::Id::new("toasts"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+        // 状态栏高度约 22-24px，再留 8px 间距，避免 Toast 挡住状态栏
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -36.0])
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 for t in toasts.iter() {
@@ -55,7 +56,7 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
                             bottom: 8,
                         })
                         .show(ui, |ui| {
-                            ui.set_max_width(360.0);
+                            ui.set_max_width(240.0);
                             // 图标用 Phosphor 字体、文本用 Proportional，避免 icon
                             // 字符被 Proportional 字体“吃掉”。
                             let resp = ui.allocate_response(
