@@ -1,6 +1,6 @@
 //! P5 WiFi 页面：WiFi 配置。
 //!
-//! 字段：wifi_switch / connect_host / wifi_ssid / wifi_password / wifi_* 阶段 06 生效
+//! 字段：wifi_switch / connect_host / wifi_ssid / wifi_password / wifi_*
 //! 协议 §4.1：ssid ≤32 字节，password ≤64 字节（过长自动截断在固件侧处理）
 
 use eframe::egui;
@@ -13,7 +13,7 @@ pub struct WifiPanelState;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
     ui.heading("WiFi");
-    ui.label("阶段 06 生效：WiFi 配置（修改后下次重启生效）");
+    ui.label("WiFi 配置（修改后下次重启生效）");
     ui.add_space(4.0);
 
     settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {

@@ -2,7 +2,7 @@
 //!
 //! 字段：voice_enable / voice_trigger_key / voice_max_record_ms / voice_auto_enter /
 //!       voice_cuid / voice_tencent_secret_id / voice_tencent_secret_key
-//! 阶段 06 生效；阶段 08 由百度短语音迁移为腾讯云一句话识别（SentenceRecognition）
+//! 阶段 08 由百度短语音迁移为腾讯云一句话识别（SentenceRecognition）
 
 use eframe::egui;
 
@@ -27,7 +27,14 @@ fn preview_mask(s: &str) -> String {
         return "*".repeat(len);
     }
     let prefix: String = s.chars().take(4).collect();
-    let suffix: String = s.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let suffix: String = s
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let mid = if len > 40 { "…" } else { "***" };
     format!("{prefix}{mid}{suffix}")
 }
@@ -100,7 +107,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             } else {
                 snapshot.voice_tencent_secret_id.clone()
             };
-            let id_draft_modified = draft.voice_tencent_secret_id != snapshot.voice_tencent_secret_id;
+            let id_draft_modified =
+                draft.voice_tencent_secret_id != snapshot.voice_tencent_secret_id;
             let mut id_displayed = if id_draft_modified {
                 id_real.clone()
             } else {

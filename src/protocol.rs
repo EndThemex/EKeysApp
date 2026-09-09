@@ -280,7 +280,6 @@ fn truncate_bytes(s: &mut String, max_bytes: usize) -> bool {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceSettings {
-    // WiFi（阶段 06 生效）
     #[serde(default)]
     pub wifi_switch: i32,
     #[serde(default)]
@@ -312,7 +311,6 @@ pub struct DeviceSettings {
     #[serde(default)]
     pub power_mode: i32,
 
-    // Voice（阶段 06 生效；阶段 08 迁移为腾讯云一句话识别）
     #[serde(default)]
     pub voice_enable: i32,
     #[serde(default)]
