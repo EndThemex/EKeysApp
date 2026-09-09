@@ -65,7 +65,6 @@ pub enum UiEvent {
     Navigate(Page),
     OpenLocalSettings,
     ConfirmYes(UiConfirmKind),
-    ConfirmNo(UiConfirmKind),
     /// 当前连接端口变化（顶栏显示 + 切换页面时保持显示）
     CurrentPort(String),
 }
@@ -107,8 +106,6 @@ pub struct AppHandle {
     pub ui_tx: Sender<UiEvent>,
     pub ui_rx: Receiver<UiEvent>,
     pub link: Mutex<Option<LinkManager>>,
-    /// Settings 待下发的 diff
-    pub pending_diff: Arc<Mutex<DeviceSettings>>,
     /// 上次连接的端口名（用于"启动自动连接"）
     pub last_port: Arc<Mutex<Option<String>>>,
     /// 自动连接开关
@@ -225,7 +222,6 @@ impl AppHandle {
             ui_tx,
             ui_rx,
             link: Mutex::new(None),
-            pending_diff: Arc::new(Mutex::new(DeviceSettings::default())),
             last_port: Arc::new(Mutex::new(None)),
             auto_connect: Arc::new(Mutex::new(false)),
             pending_reconnect: Arc::new(Mutex::new(None)),
@@ -715,11 +711,6 @@ impl AppHandle {
             pending_reconnect: Arc::clone(&self.pending_reconnect),
             auto_connect: Arc::clone(&self.auto_connect),
         }
-    }
-
-    /// 推一条应用日志
-    pub fn log_app(&self, text: impl Into<String>) {
-        self.log.push(LogKind::App, text);
     }
 
     /// 便捷访问当前语言设置（避免每次 clone Arc）

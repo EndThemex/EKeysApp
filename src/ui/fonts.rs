@@ -13,7 +13,7 @@
 //! 正确做法是把图标部分用 `icon_font_id` 渲染、普通文本用 Proportional 渲染，两
 //! 段作为独立的 galley 拼到一行。本文件提供以下 helper：
 //!
-//! - [`icon_rich`] / [`icon_only`] — 仅渲染一个图标字符（用于 icon-only 按钮）。
+//! - [`icon_rich`] — 仅渲染一个图标字符（用于 icon-only 按钮）。
 //! - [`paint_icon_text_in`] — 在给定 `Rect` 内绘制“图标 + 文本”。
 //! - [`IconTextButton`] — 一个 `egui::Widget`，行为和 `ui.button(format!(...))`
 //!   一致，但内部用两个 galley 混排，等价于把 `ui.button(...)` 改造成支持
@@ -45,11 +45,6 @@ pub fn icon_font_id(size: f32) -> egui::FontId {
 /// ```
 pub fn icon_rich(icon: &str, size: f32) -> egui::RichText {
     egui::RichText::new(icon).font(icon_font_id(size))
-}
-
-/// 便捷：`ui.add(egui::Button::new(icon_rich(icon, size)))` 的薄封装，返回 `Response`。
-pub fn icon_only(ui: &mut egui::Ui, icon: &str, size: f32) -> egui::Response {
-    ui.add(egui::Button::new(icon_rich(icon, size)))
 }
 
 /// 在 `rect` 内绘制“图标 + 空格 + 文本”，并以 `color` 上色。
@@ -156,11 +151,9 @@ pub struct IconTextButton {
     size: f32,
     gap: f32,
     fill: Option<egui::Color32>,
-    stroke: Option<egui::Stroke>,
     fg: Option<egui::Color32>,
     min_size: egui::Vec2,
     corner_radius: Option<egui::CornerRadius>,
-    frame: bool,
     selected: bool,
 }
 
@@ -172,11 +165,9 @@ impl IconTextButton {
             size,
             gap: 6.0,
             fill: None,
-            stroke: None,
             fg: None,
             min_size: egui::Vec2::ZERO,
             corner_radius: None,
-            frame: true,
             selected: false,
         }
     }
@@ -190,12 +181,6 @@ impl IconTextButton {
     /// 按钮背景色，`None` 表示跟随 `Visuals::widgets.inactive.bg_fill`。
     pub fn fill(mut self, fill: egui::Color32) -> Self {
         self.fill = Some(fill);
-        self
-    }
-
-    /// 按钮边框。`None` 表示跟随 `Visuals`。
-    pub fn stroke(mut self, stroke: egui::Stroke) -> Self {
-        self.stroke = Some(stroke);
         self
     }
 
@@ -217,12 +202,6 @@ impl IconTextButton {
         self
     }
 
-    /// 是否绘制默认按钮边框/背景。`false` 时退化为纯可点击矩形。
-    pub fn frame(mut self, frame: bool) -> Self {
-        self.frame = frame;
-        self
-    }
-
     /// `true` 时使用主题的 selection 配色（语义同 `Button::selectable`）。
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
@@ -238,11 +217,9 @@ impl egui::Widget for IconTextButton {
             size,
             gap,
             fill,
-            stroke,
             fg,
             min_size,
             corner_radius,
-            frame,
             selected,
         } = self;
 
@@ -297,16 +274,14 @@ impl egui::Widget for IconTextButton {
             } else {
                 (
                     fill.unwrap_or(visuals.bg_fill),
-                    stroke.unwrap_or(visuals.bg_stroke),
+                    visuals.bg_stroke,
                     fg.unwrap_or_else(|| visuals.text_color()),
                 )
             };
 
-            if frame {
-                ui.painter().rect_filled(rect, rounding, bg);
-                ui.painter()
-                    .rect_stroke(rect, rounding, bg_stroke, egui::StrokeKind::Middle);
-            }
+            ui.painter().rect_filled(rect, rounding, bg);
+            ui.painter()
+                .rect_stroke(rect, rounding, bg_stroke, egui::StrokeKind::Middle);
 
             // 内容绘制区
             let inner_rect = rect.shrink2(pad);

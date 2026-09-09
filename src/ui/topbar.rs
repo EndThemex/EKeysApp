@@ -11,18 +11,16 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
     let color = match &state {
         ConnectionState::Online => colors::STATUS_GREEN,
         ConnectionState::Connecting | ConnectionState::Reconnecting => colors::STATUS_YELLOW,
-        ConnectionState::Error(_) => colors::STATUS_RED,
         ConnectionState::Disconnected => colors::STATUS_GREY,
     };
     let label = match &state {
         ConnectionState::Online => "在线",
         ConnectionState::Connecting => "连接中",
         ConnectionState::Reconnecting => "重连中",
-        ConnectionState::Error(e) => &*format!("错误：{e}"),
         ConnectionState::Disconnected => "未连接",
     };
 
-    egui::menu::bar(ui, |ui| {
+    egui::MenuBar::new().ui(ui, |ui| {
         // 状态胶囊：圆点 + 状态文字，底色随状态着色
         egui::Frame::new()
             .fill(color.gamma_multiply(0.22))

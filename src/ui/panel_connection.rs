@@ -10,7 +10,6 @@ use crate::state::{AppHandle, Page, UiEvent};
 pub struct ConnectPanelState {
     pub ports: Vec<PortInfo>,
     pub selected: Option<String>,
-    pub scanning: bool,
     /// 自动连接是否已尝试过（避免每次刷新都触发）
     pub auto_connect_done: bool,
 }
@@ -169,18 +168,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                 | crate::link::ConnectionState::Reconnecting => {
                     (crate::ui::colors::STATUS_YELLOW, "连接中…")
                 }
-                crate::link::ConnectionState::Error(_) => {
-                    (crate::ui::colors::STATUS_RED, "连接错误")
-                }
                 crate::link::ConnectionState::Disconnected => {
                     (crate::ui::colors::STATUS_GREY, "未连接")
                 }
             };
             crate::ui::status_dot(ui, color);
             ui.strong(text);
-            if let crate::link::ConnectionState::Error(e) = &state {
-                ui.label(egui::RichText::new(e.clone()).weak());
-            }
         });
 
         ui.add_space(8.0);

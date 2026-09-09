@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::protocol::{self, DeviceSettings, Frame, HeartbeatResp};
+use crate::protocol::{self, Frame, HeartbeatResp};
 use crate::state::LogKind;
 use crate::util::log::SharedLog;
 use heartbeat::{HeartbeatHandle, WriterMsg};
@@ -39,7 +39,6 @@ pub enum ConnectionState {
     Connecting,
     Online,
     Reconnecting,
-    Error(String),
 }
 
 impl ConnectionState {
@@ -76,7 +75,6 @@ type Counters = (Arc<AtomicU64>, Arc<AtomicU64>, Arc<Mutex<Option<Instant>>>);
 pub struct LinkManager {
     /// 共享日志缓冲；request() 失败时也会在这里推 App 日志。
     log: SharedLog,
-    port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     /// UI 侧事件接收端（由 router 线程投递）；`poll_events` 每帧拉取
     ui_rx_slot: Option<Receiver<LinkEvent>>,
     /// 内部事件通道发送端（reader / heartbeat → router）
@@ -87,16 +85,10 @@ pub struct LinkManager {
     hb: HeartbeatHandle,
     stop: Arc<AtomicBool>,
     port_name: String,
-    /// reader 线程退出兜底回调：reader 异常退出 → router 也挂了的最后一道保险，
-    /// 通知 AppHandle 调度重连。正常路径上由 router 转发的 State(Disconnected)
-    /// 已经能完成这件事，这个回调只是双保险。
-    on_reader_exit: OnReaderExit,
     _reader: Option<JoinHandle<()>>,
     _writer: Option<JoinHandle<()>>,
     _router: Option<JoinHandle<()>>,
     _heartbeat: Option<JoinHandle<()>>,
-    /// Tx/Rx 计数 + uptime 起点（与 AppHandle 共享）。close() 时 take 走。
-    counters: Option<Counters>,
 }
 
 impl LinkManager {
@@ -133,7 +125,7 @@ impl LinkManager {
         let stop = Arc::new(AtomicBool::new(false));
         let state: Arc<Mutex<ConnectionState>> = Arc::new(Mutex::new(ConnectionState::Online));
 
-        let (tx_counter, rx_counter, uptime_start) = counters;
+        let (tx_counter, rx_counter, _uptime_start) = counters;
 
         let port: Arc<Mutex<Box<dyn serialport::SerialPort>>> = Arc::new(Mutex::new(port));
 
@@ -345,7 +337,6 @@ impl LinkManager {
 
         Ok(Self {
             log,
-            port,
             ui_rx_slot: Some(ui_rx),
             events_tx: event_tx,
             write_tx,
@@ -354,16 +345,10 @@ impl LinkManager {
             hb,
             stop,
             port_name: name,
-            on_reader_exit,
             _reader: Some(reader),
             _writer: Some(writer),
             _router: Some(router),
             _heartbeat: None,
-            counters: Some((
-                Arc::clone(&tx_counter),
-                Arc::clone(&rx_counter),
-                uptime_start,
-            )),
         })
     }
 
@@ -421,11 +406,6 @@ impl LinkManager {
             let _ = h.join();
         }
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
-    }
-
-    /// 当前状态
-    pub fn state(&self) -> ConnectionState {
-        self.state.lock().unwrap().clone()
     }
 
     /// 当前连接的端口名
@@ -499,7 +479,3 @@ impl LinkManager {
         SEQ.fetch_add(1, Ordering::Relaxed)
     }
 }
-
-// 占位：让 DeviceSettings 被引用（避免未用警告；同时给 future 扩展保留位置）
-#[allow(dead_code)]
-fn _ensure_used(_: DeviceSettings) {}

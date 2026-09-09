@@ -237,10 +237,6 @@ impl WxiApp {
                         self.confirm_open = true;
                     }
                 },
-                UiEvent::ConfirmNo(_) => {
-                    self.confirm_open = false;
-                    self.confirm_kind = None;
-                }
                 UiEvent::OpenLocalSettings => {
                     self.local_settings_open = true;
                 }
@@ -415,7 +411,7 @@ impl eframe::App for WxiApp {
         }
 
         show_toasts(ctx, &mut self.toasts);
-        let size = ctx.input(|i| i.screen_rect().size());
+        let size = ctx.input(|i| i.content_rect().size());
         self.last_inner_size = [size.x, size.y];
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }

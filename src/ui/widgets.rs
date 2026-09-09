@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::protocol::{DeviceSettings, FieldMask};
-use crate::state::{AppHandle, LogKind, ToastKind, UiEvent};
+use crate::state::{AppHandle, ToastKind, UiEvent};
 
 // ============ Toast ============
 
@@ -372,7 +372,7 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
 }
 
 pub fn show_diff_bar(
-    handle: &AppHandle,
+    _handle: &AppHandle,
     ui: &mut egui::Ui,
     diff: &DeviceSettings,
     mask: FieldMask,
@@ -487,20 +487,6 @@ fn secret_field_names(mask: FieldMask) -> Vec<&'static str> {
         names.push("SecretKey");
     }
     names
-}
-
-// ============ 简易 FieldEditor 辅助 ============
-
-/// 字段变更事件（面板 → AppHandle）
-#[derive(Debug, Clone)]
-pub enum FieldChange {
-    Set(DeviceSettings),
-}
-
-/// 占位：导出 LogKind 以便 panel_log 引用
-#[allow(dead_code)]
-pub fn _kind_marker() -> LogKind {
-    LogKind::App
 }
 
 // ============ Settings Panel 通用脚手架 ============

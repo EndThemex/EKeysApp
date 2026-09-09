@@ -31,7 +31,6 @@ pub mod colors {
     pub const STATUS_GREY: Color32 = Color32::from_rgb(160, 165, 175);
     pub const STATUS_YELLOW: Color32 = Color32::from_rgb(240, 210, 90);
     pub const STATUS_GREEN: Color32 = Color32::from_rgb(100, 215, 100);
-    pub const STATUS_RED: Color32 = Color32::from_rgb(235, 90, 90);
 }
 
 /// 渲染一个状态灯圆点

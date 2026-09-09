@@ -3,6 +3,10 @@
 //! 纯函数模块，不允许任何 IO。所有 JSON 编解码都在这里完成，
 //! 便于单测。详细字段定义见 `docs/desktop-app-protocol.md`。
 
+// 协议常量 / 请求体 / 响应体集中定义在本模块，即使当前 App 端尚未实现
+// 所有命令的收发链路，也要保留完整协议面。新增或下线命令时同步维护本模块。
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -175,8 +179,6 @@ pub const fn is_response_like(cmd: u8) -> bool {
 pub enum ProtocolError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("unknown command: {0}")]
-    UnknownCommand(u8),
 }
 
 // ---------- Frame ----------
@@ -665,13 +667,6 @@ pub struct FirmwareKeyEntry {
     pub function: String,
 }
 
-/// `0x05 CMD_KEYMAP_GET` 响应（位于 `data.keymap`）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct KeymapGetResp {
-    #[serde(default)]
-    pub keymap: Vec<FirmwareKeyEntry>,
-}
-
 /// `0x06 CMD_KEYMAP_SET` 请求。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeymapSetReq {
@@ -690,14 +685,6 @@ pub struct FirmwareInfo {
     pub build_time: String,
 }
 
-/// `0x0B` OTA 触发请求。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FirmwareOtaReq {
-    pub url: String,
-    /// MD5 十六进制字符串，长度 32
-    pub checksum: String,
-}
-
 // ---------- 0x10 Profile State（异类响应） ----------
 //
 // ⚠️ 例外：响应帧 `cmd = 0x10`（不是 `0x90`），不带 `status`，body 在**顶层**
@@ -713,12 +700,6 @@ pub struct ProfileState {
 }
 
 /// 帧 wrapper：`ProfileState` 在固件 JSON 顶层 `profile_state` 字段里。
-#[derive(Debug, Deserialize)]
-struct ProfileStateFrame {
-    #[serde(default)]
-    profile_state: Option<ProfileState>,
-}
-
 impl<'de> serde::Deserialize<'de> for ProfileState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -787,15 +768,6 @@ pub struct ProfileIconSetReq {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileIconSetPayload {
     pub profile_icon: ProfileIconSetReq,
-}
-
-/// `0x11` 响应（位于 `data`，注意与固件 profile 状态可能略有差异）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProfileIconSetResp {
-    pub profile: u8,
-    pub profile_number: u8,
-    pub has_custom_icon: bool,
-    pub profile_name: String,
 }
 
 // ---------- 0x0C 语音文本（推送） ----------
@@ -868,62 +840,6 @@ pub struct PcStatus {
     pub network_down_kbps: Option<f32>,
 }
 
-/// `0x0D` 请求体。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PcStatusReq {
-    #[serde(default)]
-    pub pc_status: PcStatus,
-}
-
-/// `0x0D` 也支持配置 PC 状态显示掩码：`{ "type": "config", "mask": u32 }`。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PcStatusConfigReq {
-    /// 字面量 `"config"`，用于在固件侧区分数据 / 配置两种用途。
-    #[serde(default = "default_pc_config_type")]
-    pub r#type: String,
-    pub mask: u32,
-}
-
-fn default_pc_config_type() -> String {
-    "config".into()
-}
-
-// ---------- 0x0E 音乐状态（App → 固件） ----------
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MusicStatus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connected: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_playing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_paused: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_prev: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_next: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artist: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub player: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lyric_current: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lyric_next: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MusicStatusReq {
-    #[serde(default)]
-    pub music_status: MusicStatus,
-}
-
 // ---------- 0x0F 音乐控制（固件 → App） ----------
 
 /// 音乐控制动作（`0x0F` 推送或响应）。
@@ -987,20 +903,10 @@ pub struct HeartbeatResp {
 
 // ---------- 解析辅助 ----------
 
-/// 从 `Frame::data` 取 Owned 类型；data 为 None 时返回 Default。
-pub fn data_or_default<T: Default + serde::de::DeserializeOwned>(
-    f: &Frame,
-) -> Result<T, ProtocolError> {
-    match &f.data {
-        Some(v) => serde_json::from_value(v.clone()).map_err(ProtocolError::from),
-        None => Ok(T::default()),
-    }
-}
-
 /// 把一整行 JSON（包括异类响应字段）解析为目标类型。
 ///
 /// 用于 `0x10` Profile State / `0x0C` Voice Text 这类 body 在**帧顶层**的命令：
-/// 它们的字段不在 `Frame::data` 里，因此不能用 `data_or_default`。
+/// 它们的字段不在 `Frame::data` 里。
 pub fn parse_top_level<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
     serde_json::from_str::<T>(line.trim()).map_err(ProtocolError::from)
 }
@@ -1265,9 +1171,8 @@ fn parse_normal_string(n: &str) -> KeyAction {
             };
         }
         // 修饰前缀 + 单末段
-        if let Some(m) = modifier_name_to_mod(seg) {
+        if modifier_name_to_mod(seg).is_some() {
             // "Ctrl+Shift" 全修饰：同按两个修饰键
-            mods |= m;
             return KeyAction::Chord(
                 segments[..idx + 1]
                     .iter()
@@ -1601,57 +1506,6 @@ impl KeymapData {
 
     pub fn profile_mut(&mut self, idx: u8) -> Option<&mut KeymapProfile> {
         self.profiles.iter_mut().find(|p| p.index == idx)
-    }
-
-    /// 与 Settings::merge_push 对齐：草稿优先，未修改字段用新值刷新。
-    pub fn merge_push(
-        new_snapshot: &KeymapData,
-        old_snapshot: &KeymapData,
-        draft: &mut KeymapData,
-    ) {
-        // 1. active_profile：草稿与旧一致才用新值
-        if draft.active_profile == old_snapshot.active_profile {
-            draft.active_profile = new_snapshot.active_profile;
-        }
-        // 2. bindings：仅当 profile 结构存在时合并。
-        //    先把所有需要"未改"→ 用推送值替换的项收集出来，再统一写入，
-        //    避免在 `iter_mut` 中再次借用 `draft`。
-        let mut to_overwrite: Vec<(
-            u8,
-            std::collections::HashMap<crate::protocol::KeyRef, KeyAction>,
-        )> = Vec::new();
-        for profile in draft.profiles.iter() {
-            let Some(old_p) = old_snapshot.profile(profile.index) else {
-                continue;
-            };
-            let Some(new_p) = new_snapshot.profile(profile.index) else {
-                continue;
-            };
-            let mut overlay = std::collections::HashMap::new();
-            for (k, v) in &new_p.bindings {
-                let prev_in_old = old_p.bindings.get(k);
-                let prev_in_draft = profile.bindings.get(k);
-                // 草稿与旧一致（包含"两边都没有"）→ 用推送值
-                let draft_unmodified = match (prev_in_old, prev_in_draft) {
-                    (Some(o), Some(d)) => o == d,
-                    (None, None) => true,
-                    _ => false,
-                };
-                if draft_unmodified {
-                    overlay.insert(*k, v.clone());
-                }
-            }
-            if !overlay.is_empty() {
-                to_overwrite.push((profile.index, overlay));
-            }
-        }
-        for (idx, overlay) in to_overwrite {
-            if let Some(p) = draft.profile_mut(idx) {
-                for (k, v) in overlay {
-                    p.bindings.insert(k, v);
-                }
-            }
-        }
     }
 }
 
