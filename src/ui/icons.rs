@@ -42,6 +42,9 @@ pub const TAB_DISPLAY: &str = r::MONITOR;
 pub const TAB_KEYBOARD: &str = r::KEYBOARD;
 pub const TAB_AUDIO: &str = r::SPEAKER_HIGH;
 pub const TAB_POWER: &str = r::LIGHTNING;
+/// Settings 页 → PC 状态 tab（与 TAB_DISPLAY 同用桌面意象，但用 tower
+/// 避免和"显示"（显示器）撞视觉）。
+pub const TAB_PC: &str = r::DESKTOP_TOWER;
 pub const CUSTOM_ICON: &str = r::IMAGE;
 
 // Keymap

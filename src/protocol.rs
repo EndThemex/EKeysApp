@@ -816,7 +816,10 @@ impl Serialize for VoiceTextPush {
 // ---------- 0x0D PC 状态（App → 固件） ----------
 
 /// `0x0D CMD_PC_STATUS` 请求：`pc_status` 顶层位于 `data`。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// 字段均为 `Option<…>`，序列化时通过 `skip_serializing_if = "Option::is_none"`
+/// 自动跳过未填字段；采集器未实现某项时保持 `None` 即可。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PcStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps_lock: Option<bool>,

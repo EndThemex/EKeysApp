@@ -13,6 +13,9 @@ pub enum SettingsTab {
     Keyboard,
     Audio,
     Power,
+    /// PC 状态 tab：主机侧行为配置（推送开关 + 实时采集快照展示）。
+    /// 不参与 `DeviceSettings` 的 diff / 下发，写入 `local_config` 持久化。
+    PcStatus,
 }
 
 impl SettingsTab {
@@ -22,6 +25,7 @@ impl SettingsTab {
             SettingsTab::Keyboard => "键盘",
             SettingsTab::Audio => "音频",
             SettingsTab::Power => "电源",
+            SettingsTab::PcStatus => "PC 状态",
         }
     }
 
@@ -31,6 +35,7 @@ impl SettingsTab {
             SettingsTab::Keyboard => crate::ui::icons::TAB_KEYBOARD,
             SettingsTab::Audio => crate::ui::icons::TAB_AUDIO,
             SettingsTab::Power => crate::ui::icons::TAB_POWER,
+            SettingsTab::PcStatus => crate::ui::icons::TAB_PC,
         }
     }
 }
@@ -42,6 +47,11 @@ pub struct SettingsPanelState {
     pub pending_confirm: Option<UiConfirmKind>,
     /// Profile 图标：PNG 路径输入框内容（0x11 上传用）
     pub icon_path: String,
+    /// PC 状态 tab 上次刷新实时快照的时刻。每 1s 才重新采集一次，
+    /// 避免每帧都 `GetAsyncKeyState` 拖慢 UI。
+    pub pc_status_snapshot_at: Option<std::time::Instant>,
+    /// PC 状态 tab 当前展示的快照缓存（None 表示尚未采集）
+    pub pc_status_snapshot: Option<crate::protocol::PcStatus>,
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
@@ -83,6 +93,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
             SettingsTab::Keyboard,
             SettingsTab::Audio,
             SettingsTab::Power,
+            SettingsTab::PcStatus,
         ] {
             let selected = st.tab == t;
             // IconTextButton 自动按 Phosphor/Proportional 分字体渲染，
@@ -112,6 +123,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
         SettingsTab::Keyboard => keyboard_tab(ui, snap, draft, st, handle),
         SettingsTab::Audio => audio_tab(ui, snap, draft),
         SettingsTab::Power => power_tab(ui, snap, draft),
+        SettingsTab::PcStatus => pc_status_tab(ui, snap, st, handle),
     });
 }
 
@@ -137,7 +149,10 @@ fn display_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetti
         ui.add_space(6.0);
 
         ui.label("屏幕背光（5~100）");
-        let mut brightness = draft.tft_brightness.max(snap.tft_brightness).clamp(5, 100);
+        // 与 tft_theme 同策略：slider 始终展示设备真实值 (snap)，
+        // 仅在用户拖动时才写入 draft；用 max(draft, snap) 会在断连重连后
+        // 把残留的旧 draft 顶回去，造成"APP 显示与设备不一致"的错觉。
+        let mut brightness = snap.tft_brightness.clamp(5, 100);
         let r = ui.add(egui::Slider::new(&mut brightness, 5..=100).show_value(true));
         if r.changed() {
             draft.tft_brightness = brightness;
@@ -248,9 +263,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     use crate::protocol::{CMD_PROFILE_ICON_SET, ProfileIconSetPayload, ProfileIconSetReq};
     use std::time::Duration;
     let toast = |k: crate::state::ToastKind, t: String| {
-        let _ = handle
-            .ui_tx
-            .send(crate::state::UiEvent::Toast(k, t));
+        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(k, t));
     };
 
     let bytes = match std::fs::read(&path) {
@@ -262,15 +275,15 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     };
     // PNG 签名校验
     if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        toast(crate::state::ToastKind::Error, "文件不是有效 PNG".to_string());
+        toast(
+            crate::state::ToastKind::Error,
+            "文件不是有效 PNG".to_string(),
+        );
         return;
     }
     // image 解码校验（固件不做尺寸校验，App 自行保证）
     if let Err(e) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
-        toast(
-            crate::state::ToastKind::Error,
-            format!("PNG 解码失败: {e}"),
-        );
+        toast(crate::state::ToastKind::Error, format!("PNG 解码失败: {e}"));
         return;
     }
     // 2048 字节单帧上限：Base64 膨胀 4/3，留出帧头余量
@@ -293,26 +306,31 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
         toast(crate::state::ToastKind::Error, "请求序列化失败".to_string());
         return;
     };
-    let _ = handle.with_link(|lm| match lm.request(CMD_PROFILE_ICON_SET, Some(data), Duration::from_millis(2000))
-    {
-        Ok(frame) => {
-            if frame.status() == Some(0) {
-                // 更新本地快照的图标标记（响应 data 里也有，简化直接置位）
-                let mut snap = handle.settings.lock().unwrap();
-                snap.active_profile_has_custom_icon = true;
-                let mut d = handle.draft.lock().unwrap();
-                d.active_profile_has_custom_icon = true;
-                toast(
-                    crate::state::ToastKind::Success,
-                    format!("Profile {profile} 图标已上传"),
-                );
-                st.icon_path.clear();
-            } else {
-                let msg = frame.error.unwrap_or_else(|| "固件拒绝图标".to_string());
-                toast(crate::state::ToastKind::Error, format!("上传失败: {msg}"));
+    let _ = handle.with_link(|lm| {
+        match lm.request(
+            CMD_PROFILE_ICON_SET,
+            Some(data),
+            Duration::from_millis(2000),
+        ) {
+            Ok(frame) => {
+                if frame.status() == Some(0) {
+                    // 更新本地快照的图标标记（响应 data 里也有，简化直接置位）
+                    let mut snap = handle.settings.lock().unwrap();
+                    snap.active_profile_has_custom_icon = true;
+                    let mut d = handle.draft.lock().unwrap();
+                    d.active_profile_has_custom_icon = true;
+                    toast(
+                        crate::state::ToastKind::Success,
+                        format!("Profile {profile} 图标已上传"),
+                    );
+                    st.icon_path.clear();
+                } else {
+                    let msg = frame.error.unwrap_or_else(|| "固件拒绝图标".to_string());
+                    toast(crate::state::ToastKind::Error, format!("上传失败: {msg}"));
+                }
             }
+            Err(e) => toast(crate::state::ToastKind::Error, format!("上传超时: {e}")),
         }
-        Err(e) => toast(crate::state::ToastKind::Error, format!("上传超时: {e}")),
     });
 }
 
@@ -321,9 +339,7 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
     use crate::protocol::{CMD_PROFILE_ICON_SET, ProfileIconSetPayload, ProfileIconSetReq};
     use std::time::Duration;
     let toast = |k: crate::state::ToastKind, t: String| {
-        let _ = handle
-            .ui_tx
-            .send(crate::state::UiEvent::Toast(k, t));
+        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(k, t));
     };
     let req = ProfileIconSetPayload {
         profile_icon: ProfileIconSetReq {
@@ -336,24 +352,29 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
         toast(crate::state::ToastKind::Error, "请求序列化失败".to_string());
         return;
     };
-    let _ = handle.with_link(|lm| match lm.request(CMD_PROFILE_ICON_SET, Some(data), Duration::from_millis(2000))
-    {
-        Ok(frame) => {
-            if frame.status() == Some(0) {
-                let mut snap = handle.settings.lock().unwrap();
-                snap.active_profile_has_custom_icon = false;
-                let mut d = handle.draft.lock().unwrap();
-                d.active_profile_has_custom_icon = false;
-                toast(
-                    crate::state::ToastKind::Success,
-                    format!("Profile {profile} 图标已清除"),
-                );
-            } else {
-                let msg = frame.error.unwrap_or_else(|| "固件拒绝清除".to_string());
-                toast(crate::state::ToastKind::Error, format!("清除失败: {msg}"));
+    let _ = handle.with_link(|lm| {
+        match lm.request(
+            CMD_PROFILE_ICON_SET,
+            Some(data),
+            Duration::from_millis(2000),
+        ) {
+            Ok(frame) => {
+                if frame.status() == Some(0) {
+                    let mut snap = handle.settings.lock().unwrap();
+                    snap.active_profile_has_custom_icon = false;
+                    let mut d = handle.draft.lock().unwrap();
+                    d.active_profile_has_custom_icon = false;
+                    toast(
+                        crate::state::ToastKind::Success,
+                        format!("Profile {profile} 图标已清除"),
+                    );
+                } else {
+                    let msg = frame.error.unwrap_or_else(|| "固件拒绝清除".to_string());
+                    toast(crate::state::ToastKind::Error, format!("清除失败: {msg}"));
+                }
             }
+            Err(e) => toast(crate::state::ToastKind::Error, format!("清除超时: {e}")),
         }
-        Err(e) => toast(crate::state::ToastKind::Error, format!("清除超时: {e}")),
     });
 }
 
@@ -394,6 +415,133 @@ fn power_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetting
             draft.power_mode = pm;
         }
     });
+}
+
+/// PC 状态 tab：
+/// 1) 启用开关：默认关闭；勾选后 `tick_pc_status_push` 会周期性推送 PC 状态。
+/// 2) 实时快照展示：每 1s 重新采集一次 `pc_status::snapshot()`（限速避免
+///    每帧都触发 `GetAsyncKeyState`，开销与采集内容成正比）。
+///
+/// 注意：本 tab 不改 `DeviceSettings` draft——它是主机侧行为开关，
+/// 改动写入 `LocalConfig` 持久化。`settings_panel_scaffold` 仍会画 diff bar，
+/// 但因为本 tab 不动 draft，diff 始终为空、bar 自然不显示。
+fn pc_status_tab(
+    ui: &mut egui::Ui,
+    _snap: &DeviceSettings,
+    st: &mut SettingsPanelState,
+    handle: &AppHandle,
+) {
+    use crate::protocol::PcStatus;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    ui.group(|ui| {
+        ui.strong("PC 状态推送");
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(
+                "启用后，App 周期向设备推送当前主机的 Caps/Num/Scroll Lock 与网络状态，\
+                 设备可据此刷新主屏指示灯。默认关闭。",
+            )
+            .weak(),
+        );
+        ui.add_space(4.0);
+
+        // 1) 启用开关
+        let mut enabled = handle.pc_status_push_enabled.load(Ordering::Relaxed);
+        let online = handle.state.lock().unwrap().is_online();
+        if ui
+            .checkbox(&mut enabled, "启用 PC 状态向设备推送")
+            .on_hover_text(
+                "切换后立即生效；启用时仅在「在线」状态下发送（1s 周期）；退出 App 时自动保存。",
+            )
+            .changed()
+        {
+            handle
+                .pc_status_push_enabled
+                .store(enabled, Ordering::Relaxed);
+            // 同步写一份到 LocalConfig，UI 关闭/重启不必等 on_exit 也能保留
+            // （极端场景下进程被杀时也不会丢）。
+            handle.local_config.lock().unwrap().pc_status_push = enabled;
+            let _ = handle.ui_tx.send(UiEvent::Toast(
+                crate::state::ToastKind::Info,
+                if enabled {
+                    "已启用 PC 状态推送".to_string()
+                } else {
+                    "已停止 PC 状态推送".to_string()
+                },
+            ));
+        }
+
+        ui.add_space(4.0);
+        let status_text = match (enabled, online) {
+            (false, _) => "未启用",
+            (true, false) => "等待设备连接…",
+            (true, true) => "运行中（1s/次）",
+        };
+        ui.label(format!("当前状态：{status_text}"));
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // 2) 实时快照展示（节流 1s，避免每帧都 GetAsyncKeyState）
+        ui.strong("实时快照");
+        ui.add_space(2.0);
+        let due = st
+            .pc_status_snapshot_at
+            .map(|t| t.elapsed() >= Duration::from_secs(1))
+            .unwrap_or(true);
+        if due {
+            st.pc_status_snapshot = Some(crate::pc_status::snapshot());
+            st.pc_status_snapshot_at = Some(Instant::now());
+        }
+        let Some(snap): Option<PcStatus> = st.pc_status_snapshot.clone() else {
+            ui.label("(尚未采集)");
+            return;
+        };
+        egui::Grid::new("pc-status-grid")
+            .num_columns(2)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Caps Lock");
+                ui.label(lock_label(snap.caps_lock));
+                ui.end_row();
+                ui.label("Num Lock");
+                ui.label(lock_label(snap.num_lock));
+                ui.end_row();
+                ui.label("Scroll Lock");
+                ui.label(lock_label(snap.scroll_lock));
+                ui.end_row();
+                ui.label("网络连通");
+                ui.label(network_label(snap.network_connected));
+                ui.end_row();
+            });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "快照仅用于本地展示；启用推送后，相同数据会按 1s 周期通过 0x0D 推送到设备。",
+            )
+            .weak()
+            .size(11.0),
+        );
+    });
+}
+
+fn lock_label(v: Option<bool>) -> String {
+    match v {
+        Some(true) => "已开启".into(),
+        Some(false) => "未开启".into(),
+        None => "(未采集)".into(),
+    }
+}
+
+fn network_label(v: Option<bool>) -> String {
+    match v {
+        Some(true) => "已连接".into(),
+        Some(false) => "未连接".into(),
+        None => "(未采集)".into(),
+    }
 }
 
 fn work_mode_label(m: i32) -> String {

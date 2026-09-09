@@ -12,10 +12,15 @@ use crate::link::LinkEvent;
 use crate::protocol::{CMD_HEARTBEAT, Frame};
 use crate::state::LogKind;
 use crate::util::log::SharedLog;
-/// 心跳间隔（可由 UI 配置；阶段 04 先硬编码 1s）
-pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
+/// 心跳间隔（可由 UI 配置；阶段 04 先硬编码 1.5s）
+pub const HEARTBEAT_INTERVAL_MS: u64 = 1500;
 /// 允许的最大无响应时间：3 个周期
 pub const HEARTBEAT_TIMEOUT_MULTIPLIER: u32 = 3;
+/// 心跳日志聚合窗口。每帧心跳仍照常发，但只在累计达到该阈值时记一条
+/// 汇总日志（"心跳 Tx×60 …"），避免长连接场景下每秒两条心跳日志把
+/// 共享缓冲挤满（5000 条 ring buffer 在 1Hz 心跳下 ~42 分钟就被心跳
+/// 刷光，用户真正关心的连接/协议事件反而被淘汰）。
+pub const HEARTBEAT_LOG_BATCH: u32 = 60;
 /// 宽限期：从**收到首次心跳 ack** 起算的稳定窗口（4 s）。
 ///
 /// 协议 §2.1：USB CDC 打开端口会触发设备短暂复位（约 1~2s）。原实现把宽限期
@@ -26,7 +31,7 @@ pub const HEARTBEAT_TIMEOUT_MULTIPLIER: u32 = 3;
 /// 时 App 永远停在 Connecting/Online 假象里。
 pub const HEARTBEAT_BOOT_GRACE_MS: u64 = 4000;
 /// 启动后最长等待首次 ack 的时间；超过即强制判定为 Reconnecting。
-pub const HEARTBEAT_BOOT_ABSOLUTE_MAX_MS: u64 = 30_000;
+pub const HEARTBEAT_BOOT_ABSOLUTE_MAX_MS: u64 = 6_000;
 
 #[derive(Clone)]
 pub struct HeartbeatHandle {
@@ -81,16 +86,18 @@ pub fn spawn(
         let absolute_max = Duration::from_millis(HEARTBEAT_BOOT_ABSOLUTE_MAX_MS);
         let started = Instant::now();
         let mut seq: u32 = 1;
+        // 自上次写心跳 Tx 汇总日志以来累计发送的心跳帧数。
+        // 达到 HEARTBEAT_LOG_BATCH 时合并成一条 "心跳 Tx×N (last seq=X)"，
+        // 避免每帧一条 Tx 风暴；需要逐帧抓包时把阈值临时改 1 即可。
+        // `#[allow(unused_assignments)]`：变量实际在循环内被读（format!），
+        // 但 borrow checker 跨 while 闭包看不到使用点，标记消除误报。
+        #[allow(unused_assignments)]
+        let mut tx_batch: u32 = 0;
 
         // 闭包：发一个心跳帧；writer 退出时返回 false 让外层线程退出。
         // 把发送逻辑抽出是为了让退避循环也能继续探测（而不是纯 sleep）。
         let send_one = |s: u32| -> bool {
             let frame = Frame::request(CMD_HEARTBEAT, s, None);
-            // 心跳专属 Tx 日志：写入完整 JSON 行（与实际下发的字节一致），
-            // 便于日志面板直接复制抓包。
-            if let Ok(line) = serde_json::to_string(&frame) {
-                log.push(LogKind::Tx, format!("Tx → {line}"));
-            }
             write_tx.send(WriterMsg::Frame(frame)).is_ok()
         };
 
@@ -100,9 +107,29 @@ pub fn spawn(
             }
             // 发送心跳
             if !send_one(seq) {
-                return; // writer 已退出
+                // writer 已退出前先 flush 一次汇总，避免最后一段心跳 Tx 没记录
+                // （这条只在异常路径下出现，常见情况下 writer 退出意味着连接
+                //  断开，外层 detach_link 已经写过 "已断开" 日志）
+                if tx_batch > 0 {
+                    log.push(
+                        LogKind::Tx,
+                        format!("心跳 Tx×{tx_batch} (last seq={})", seq.wrapping_sub(1)),
+                    );
+                }
+                return;
             }
             seq = seq.wrapping_add(1);
+            tx_batch = tx_batch.saturating_add(1);
+            // 达到聚合窗口：把累计 N 帧合并成一条 Tx 汇总日志。
+            // 写完后立刻把上次已 ack 的 seq 范围一并带上，便于面板里看
+            // "最近一次心跳 seq"，不需要再展开逐条日志。
+            if tx_batch >= HEARTBEAT_LOG_BATCH {
+                log.push(
+                    LogKind::Tx,
+                    format!("心跳 Tx×{tx_batch} (last seq={})", seq.wrapping_sub(1)),
+                );
+                tx_batch = 0;
+            }
 
             // 等待一个周期
             thread::sleep(interval);
@@ -133,14 +160,31 @@ pub fn spawn(
                 );
                 // 退避：每个周期继续发心跳探测，直到收到一次 ack。
                 // 旧实现只在循环里 sleep，等不到 ack 就一直卡在 Reconnecting。
+                #[allow(unused_assignments)]
                 while handle.last_ack_age() > timeout {
                     if stop_flag.load(Ordering::Relaxed) {
                         return;
                     }
                     if !send_one(seq) {
+                        // writer 退出：先把尚未 flush 的心跳 Tx 批次写出来
+                        if tx_batch > 0 {
+                            log.push(
+                                LogKind::Tx,
+                                format!("心跳 Tx×{tx_batch} (last seq={})", seq.wrapping_sub(1)),
+                            );
+                            tx_batch = 0;
+                        }
                         return; // writer 已退出
                     }
                     seq = seq.wrapping_add(1);
+                    tx_batch = tx_batch.saturating_add(1);
+                    if tx_batch >= HEARTBEAT_LOG_BATCH {
+                        log.push(
+                            LogKind::Tx,
+                            format!("心跳 Tx×{tx_batch} (last seq={})", seq.wrapping_sub(1)),
+                        );
+                        tx_batch = 0;
+                    }
                     thread::sleep(interval);
                 }
                 let _ = link_tx.send(LinkEvent::State(crate::link::ConnectionState::Online));

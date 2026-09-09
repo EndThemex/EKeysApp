@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use crate::protocol::{self, Frame, HeartbeatResp};
 use crate::state::LogKind;
 use crate::util::log::SharedLog;
-use heartbeat::{HeartbeatHandle, WriterMsg};
+use heartbeat::{HEARTBEAT_LOG_BATCH, HeartbeatHandle, WriterMsg};
 pub use serial::PortInfo;
 
 /// 连接状态机
@@ -226,6 +226,17 @@ impl LinkManager {
         let rx_counter_r = Arc::clone(&rx_counter);
         let router = thread::spawn(move || {
             log_for_router.push(LogKind::App, "router 线程启动".to_string());
+            // 心跳 Rx 聚合窗口：与 heartbeat.rs 的 HEARTBEAT_LOG_BATCH 同步使用。
+            // 仅在累计 N 次心跳 ack 后写一条汇总日志，避免每秒一条心跳 Rx
+            // 噪声；需要逐帧抓包时临时改阈值为 1 即可。
+            // 额外保留 last_ack_at_ms 字段以便聚合时附"最近一次 ack 距今多久"。
+            // `#[allow(unused_assignments)]`：rx_batch / last_ts 实际在
+            // 循环内被读（format!），但 borrow checker 跨 while 闭包看不到
+            // 使用点，标记消除误报。
+            #[allow(unused_assignments)]
+            let mut hb_rx_batch: u32 = 0;
+            #[allow(unused_assignments)]
+            let mut hb_rx_last_ts: Option<String> = None;
             loop {
                 match event_rx.recv() {
                     Ok(LinkEvent::Frame(f)) => {
@@ -234,30 +245,40 @@ impl LinkManager {
                         // 心跳响应 → mark_ack
                         if f.cmd == protocol::response_cmd(protocol::CMD_HEARTBEAT) {
                             hb_for_router.mark_ack(f.seq as u64);
-                            // 心跳专属 Rx 日志：解析完整 data（timestamp + device），
-                            // 便于面板直接判断设备是否重启 / 数据是否齐全。
-                            match f.data.as_ref().and_then(|v| {
-                                serde_json::from_value::<HeartbeatResp>(v.clone()).ok()
-                            }) {
-                                Some(hb) => {
-                                    log_for_router.push(
-                                        LogKind::Rx,
-                                        format!(
-                                            "Rx ← cmd=0x{:02X} seq={} data={{\"timestamp\":{},\"device\":\"{}\"}}",
-                                            f.cmd, f.seq, hb.timestamp, hb.device
-                                        ),
-                                    );
-                                }
-                                None => {
-                                    log_for_router.push(
-                                        LogKind::Rx,
-                                        format!(
-                                            "Rx ← cmd=0x{:02X} seq={} (heartbeat, data parse failed: {:?})",
-                                            f.cmd, f.seq, f.data
-                                        ),
-                                    );
-                                }
+                            hb_rx_batch = hb_rx_batch.saturating_add(1);
+                            // 解析 timestamp（仅用来在汇总日志里附"最近一次 ack 时间"，
+                            // 失败就退化为 None，长时间连不上时由 heartbeat.rs 的
+                            // "心跳超时" 兜底日志体现）。
+                            hb_rx_last_ts = f
+                                .data
+                                .as_ref()
+                                .and_then(|v| {
+                                    serde_json::from_value::<HeartbeatResp>(v.clone()).ok()
+                                })
+                                .map(|hb| hb.timestamp.to_string());
+                            // 达到聚合窗口：把累计 N 次心跳 ack 合并成一条 Rx 汇总日志。
+                            // 与 heartbeat.rs 的 Tx 汇总语义对齐（HEARTBEAT_LOG_BATCH 帧）。
+                            // 每个 batch 的首帧单独写一条 App 日志，便于
+                            // 排查设备刚启动 / 固件时间字段异常等异常路径。
+                            if hb_rx_batch == 1 {
+                                log_for_router.push(
+                                    LogKind::App,
+                                    format!("心跳 Rx 新批次 首帧 seq={}", f.seq),
+                                );
                             }
+                            if hb_rx_batch >= HEARTBEAT_LOG_BATCH {
+                                let ts_part = hb_rx_last_ts
+                                    .as_deref()
+                                    .map(|s| format!(" device_ts={s}"))
+                                    .unwrap_or_default();
+                                log_for_router.push(
+                                    LogKind::Rx,
+                                    format!("心跳 Rx×{hb_rx_batch} (last seq={}){ts_part}", f.seq),
+                                );
+                                hb_rx_batch = 0;
+                            }
+                            // 后续按完整 data 记录 Rx 日志的旧路径已合并到上面的
+                            // 聚合逻辑，避免重复。
                         }
 
                         // 异类命令识别（body 在帧顶层，非 `data`）：

@@ -4,7 +4,8 @@ use eframe::egui;
 
 use crate::link::LinkEvent;
 use crate::protocol::{
-    CMD_CONFIG_GET, CMD_PROFILE_STATE, DeviceSettings, ProfileState, response_cmd, top_level,
+    CMD_CONFIG_GET, CMD_PC_STATUS, CMD_PROFILE_STATE, DeviceSettings, ProfileState, response_cmd,
+    top_level,
 };
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
@@ -90,23 +91,38 @@ impl WxiApp {
                 if crate::protocol::is_top_level_cmd(f.cmd) {
                     self.handle_top_level_frame(f);
                 } else if f.is_push() {
-                    // 设备主动推送的全量配置快照（0x87 seq=0）
-                    match f.data.as_ref() {
-                        Some(data) => {
-                            match serde_json::from_value::<DeviceSettings>(data.clone()) {
-                                Ok(mut new_snap) => {
-                                    self.handle.apply_settings_snapshot(&mut new_snap);
-                                    self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
-                                }
-                                Err(e) => {
-                                    self.handle
-                                        .log_kind(LogKind::App, format!("推送快照解析失败: {e}"));
+                    // seq=0 的响应帧统称"推送"，但只有 0x87（CONFIG_GET 的响应 cmd）
+                    // 才是全量配置快照。其它 cmd（如 0x8D PC 状态回执——App 发
+                    // 0x0D 用 seq=0，固件回显 seq=0）的 data 里没有 config 字段，
+                    // 若也走 DeviceSettings 解析，serde 会把所有缺省字段填成
+                    // Default，把刚从 0x07 拿到的正确快照覆盖成默认值
+                    //（表现为：开启 PC 状态推送后，连接后背光滑块错误显示 5）。
+                    if f.cmd == response_cmd(CMD_CONFIG_GET) {
+                        match f.data.as_ref() {
+                            Some(data) => {
+                                match serde_json::from_value::<DeviceSettings>(data.clone()) {
+                                    Ok(mut new_snap) => {
+                                        self.handle.apply_settings_snapshot(&mut new_snap);
+                                        self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
+                                    }
+                                    Err(e) => {
+                                        self.handle.log_kind(
+                                            LogKind::App,
+                                            format!("推送快照解析失败: {e}"),
+                                        );
+                                    }
                                 }
                             }
+                            None => {
+                                self.handle.log_kind(LogKind::App, "推送快照缺 data 字段");
+                            }
                         }
-                        None => {
-                            self.handle.log_kind(LogKind::App, "推送快照缺 data 字段");
-                        }
+                    } else if f.cmd == response_cmd(CMD_PC_STATUS) {
+                        // PC 状态推送回执（0x8D seq=0）：无需处理；静默避免
+                        // 每次推送都刷一条日志。
+                    } else {
+                        self.handle
+                            .log_kind(LogKind::Rx, format!("PUSH ← cmd=0x{:02X}（未处理）", f.cmd));
                     }
                 } else {
                     if f.status() == Some(0) {
@@ -300,6 +316,12 @@ impl eframe::App for WxiApp {
             window_size: Some(self.last_inner_size),
             language: lc.language,
             theme: lc.theme,
+            // 主机侧 PC 状态推送开关：与 local_config 同步写入磁盘，
+            // 下次启动由 main.rs 读回。
+            pc_status_push: self
+                .handle
+                .pc_status_push_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
         };
         crate::config::save(&cfg);
     }
@@ -309,6 +331,9 @@ impl eframe::App for WxiApp {
         self.drain_ui_events();
         // 重连状态机：每帧驱动；time-to-next-try 之前直接 return
         self.handle.tick_reconnect();
+        // PC 状态周期推送：Online 时每 1s 通过 0x0D 推给设备一次。
+        // tick 内部自带节流，未到节拍时直接 return，CPU 开销可忽略。
+        self.handle.tick_pc_status_push();
         self.handle_shortcuts(ctx);
 
         // chrome（顶栏/侧栏/底栏）统一底色，与内容区形成清晰分区

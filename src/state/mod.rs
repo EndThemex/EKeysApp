@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::config::{Language, LocalConfig, Theme};
 use crate::link::{ConnectionState, LinkManager};
 use crate::protocol::{
-    DeviceInfo, DeviceSettings, FieldMask, FirmwareKeyEntry, KeyAction, KeyRef, KeymapData,
+    DeviceInfo, DeviceSettings, FieldMask, FirmwareKeyEntry, Frame, KeyAction, KeyRef, KeymapData,
     ProfileState,
 };
 use crate::util::log::SharedLog;
@@ -140,7 +140,30 @@ pub struct AppHandle {
     /// 用 `Mutex<Option<Instant>>` 是为了断开后能可靠判 None（避免 `Instant::now() - 0`
     /// 出现在断线状态下的 UI 中）。
     pub uptime_start: Arc<Mutex<Option<Instant>>>,
+    /// PC 状态周期推送的上次发送时刻（用于节流）。每帧 tick 读取；首次进入
+    /// 时由 `tick_pc_status_push` 立即补发一次，确保 UI 上线后第一秒设备
+    /// 就能看到 Lock 状态指示灯。
+    /// 断开连接时由 `detach_link` 清零。
+    pub last_pc_status_sent_at: Arc<Mutex<Option<Instant>>>,
+    /// 上一次成功推送给设备的 PC 状态快照。
+    /// 用于做 diff-based 推送：仅当本次采集与上次有"显著差异"时才发帧。
+    /// `None` 表示尚未发过首拍，强制发送一次让设备建立基线。
+    /// 断开连接时由 `detach_link` 清零，重连后第一帧会重发基线。
+    pub last_pc_status_sent: Arc<Mutex<Option<crate::protocol::PcStatus>>>,
+    /// 是否启用 PC 状态向设备的周期推送（`0x0D CMD_PC_STATUS`）。
+    /// 与设备 `DeviceSettings` 解耦——这是主机侧行为开关。
+    /// 默认关闭（避免用户不清楚时主动暴露 Lock / 网络状态到固件），
+    /// 由 Settings 页 → PC 状态 tab 切换；退出时由 `on_exit` 持久化到
+    /// `LocalConfig::pc_status_push`，启动时由 `main.rs` 注入。
+    pub pc_status_push_enabled: Arc<AtomicBool>,
 }
+
+/// PC 状态周期性推送间隔。1 秒一拍，与心跳同节拍，确保固件 Lock 灯指示
+/// 与系统实际状态最多有 1s 延迟；UI 拖动时不会产生肉眼可感的卡顿。
+pub const PC_STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// 浮点字段（CPU% / 内存%）"显著变化"阈值。差值 ≤ 该值视为抖动、不推送。
+/// 0.5% 对应 OS 资源管理器刷新粒度，足以避免每秒都重发相同数据。
+pub const PC_STATUS_FLOAT_EPS: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct ReconnectJob {
@@ -236,6 +259,11 @@ impl AppHandle {
             tx_count: Arc::new(AtomicU64::new(0)),
             rx_count: Arc::new(AtomicU64::new(0)),
             uptime_start: Arc::new(Mutex::new(None)),
+            last_pc_status_sent_at: Arc::new(Mutex::new(None)),
+            last_pc_status_sent: Arc::new(Mutex::new(None)),
+            // 默认关闭：避免用户不察觉时主动暴露 Lock / 网络状态到固件。
+            // Settings → PC 状态 tab 可勾选打开。
+            pc_status_push_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -489,6 +517,12 @@ impl AppHandle {
         self.tx_count.store(0, Ordering::Relaxed);
         self.rx_count.store(0, Ordering::Relaxed);
         *self.uptime_start.lock().unwrap() = None;
+        // PC 状态推送节流基线清零：重连后第一帧立即补发一次，
+        // 避免设备侧 Lock 灯在断开期间错位显示老状态。
+        *self.last_pc_status_sent_at.lock().unwrap() = None;
+        // diff 基线也清零：断开期间 PC 状态可能改变（用户切了输入法、
+        // 网络断了），重连后必须重发最新快照而非与"几秒前的旧值"对比。
+        *self.last_pc_status_sent.lock().unwrap() = None;
         // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
         *self.pending_reconnect.lock().unwrap() = None;
         if let Some(p) = prev_port {
@@ -726,6 +760,262 @@ impl AppHandle {
     /// 推一条 Tx/Rx/Firmware 日志
     pub fn log_kind(&self, kind: LogKind, text: impl Into<String>) {
         self.log.push(kind, text);
+    }
+
+    /// 立即向设备推送一次 PC 状态（`0x0D CMD_PC_STATUS`，单向不等待响应）。
+    ///
+    /// 协议 `docs/protocol-usage.md` §9：body 包在 `data.pc_status` 里；序列化
+    /// 时 `PcStatus` 内 `None` 字段自动跳过，所以扩展后只发非 None 的字段。
+    ///
+    /// 返回：
+    /// - `Ok(())`：成功入队 writer 线程（不等设备 ack，单向）
+    /// - `Err("未连接")`：当前无 LinkManager
+    /// - `Err(reason)`：序列化失败等
+    ///
+    /// 不在调用处弹 Toast：本方法主要用于周期性推送（每帧调用），UI 噪声敏感；
+    /// 失败仅写 App 日志，由底栏 / 日志面板自然反馈。
+    pub fn send_pc_status(&self, snap: &crate::protocol::PcStatus) -> Result<(), String> {
+        let data = serde_json::to_value(serde_json::json!({ "pc_status": snap }))
+            .map_err(|e| format!("PC 状态序列化失败: {e}"))?;
+        self.with_link(|lm| {
+            // 0x0D 用 seq=0 表示"主动推送"，不挂在 pending map 上，避免 router
+            // 误把设备 ACK 当成"未配对响应"上报给 UI（固件当前不返 ACK，
+            // 但即便返了 seq=0 也不会被 is_push 误判——详见 protocol.rs）。
+            // 这里走 lm.send() 直接入队 writer，绕过 request 的 seq 自增。
+            let frame = Frame::request(crate::protocol::CMD_PC_STATUS, 0, Some(data));
+            lm.send(frame);
+        })
+        .ok_or_else(|| "未连接".to_string())
+    }
+
+    /// 判断两份 PcStatus 是否"显著差异"——用于 diff-based 推送。
+    ///
+    /// 比较语义：
+    /// - `Option<bool>` 字段：值不等即变化（None ↔ Some 任意一边也算）。
+    /// - `Option<f32>` 字段：差值 > [`PC_STATUS_FLOAT_EPS`] 才算变化；
+    ///   抖动 ≤ 阈值视为相等（避免每秒重发相同数据）。
+    /// - 字段两侧都 `None` 时不算变化（保持协议侧 `skip_serializing_if` 一致）。
+    ///
+    /// 字段全集与 `protocol::PcStatus` 保持一致；新增字段时同步追加。
+    pub fn pc_status_has_changed(
+        old: &crate::protocol::PcStatus,
+        new: &crate::protocol::PcStatus,
+    ) -> bool {
+        // bool 字段：值不等 → 变化
+        if old.caps_lock != new.caps_lock {
+            return true;
+        }
+        if old.num_lock != new.num_lock {
+            return true;
+        }
+        if old.scroll_lock != new.scroll_lock {
+            return true;
+        }
+        if old.network_connected != new.network_connected {
+            return true;
+        }
+        // f32 字段：用阈值比较
+        if pc_status_float_changed(old.cpu_usage_percent, new.cpu_usage_percent) {
+            return true;
+        }
+        if pc_status_float_changed(old.memory_usage_percent, new.memory_usage_percent) {
+            return true;
+        }
+        // 暂未采集的扩展字段（cpu_temp_c / disk_io_percent / network_*_kbps）：
+        // 两侧通常都是 None，相等即不变；将来真接上采集后此函数需要再追加。
+        false
+    }
+
+    /// 每帧调用一次：检查是否到了 PC 状态推送节拍；到了就采集 + diff + 发送。
+    ///
+    /// 节流策略：
+    /// - 首次进入（`last_pc_status_sent == None`）→ 强制发一次基线；
+    /// - 后续每 `PC_STATUS_PUSH_INTERVAL` 检查一次；只有"显著变化"才发；
+    /// - 断开后 `detach_link` 把两个基线都清零，重连后第一帧会再补发基线。
+    ///
+    /// 与心跳独立：本方法**不依赖**心跳 ack —— 即使设备暂时不应答 PC 状态
+    /// 推送，链路层仍然保持稳定。
+    pub fn tick_pc_status_push(&self) {
+        // 用户开关：未启用时不采集、不发送，避免无意义的 GetAsyncKeyState
+        // 调用与日志噪声。`pc_status_push_enabled` 默认 false（见
+        // `AppHandle::new`），由 Settings → PC 状态 tab 切换。
+        if !self.pc_status_push_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        // 仅在 Online 时推送；其它状态（Connecting/Reconnecting/Disconnected）
+        // 下不浪费带宽，writer 也会因 link=Some 但未 Online 仍能写入——这里
+        // 显式按 state 过滤避免无意义帧。
+        let online = matches!(
+            *self.state.lock().unwrap(),
+            crate::link::ConnectionState::Online
+        );
+        if !online {
+            return;
+        }
+        // 节流：1s 节拍
+        let last_at = self.last_pc_status_sent_at.lock().unwrap();
+        let due = last_at
+            .map(|t| t.elapsed() >= PC_STATUS_PUSH_INTERVAL)
+            .unwrap_or(true);
+        drop(last_at);
+        if !due {
+            return;
+        }
+
+        // 采集
+        let new_snap = crate::pc_status::snapshot();
+
+        // diff：与上次推送对比
+        let last_snap = self.last_pc_status_sent.lock().unwrap().clone();
+        let changed = match &last_snap {
+            None => true, // 首拍：必须发基线
+            Some(prev) => Self::pc_status_has_changed(prev, &new_snap),
+        };
+        if !changed {
+            // 即使不发送也要刷新节流时刻，否则下一拍立刻又会重做采集 +
+            // 比较；下一拍会再次因 elapsed>=INTERVAL 而进入到这里。
+            // 这里**不**更新 last_at（保持原有节流节奏），让下一拍正常
+            // 1s 后再尝试——避免抖动场景下"持续判无变化 → 永远不发但持续采集"。
+            return;
+        }
+
+        // 发送（不持任何锁，避免嵌套互斥）
+        match self.send_pc_status(&new_snap) {
+            Ok(()) => {
+                *self.last_pc_status_sent.lock().unwrap() = Some(new_snap);
+                *self.last_pc_status_sent_at.lock().unwrap() = Some(Instant::now());
+            }
+            Err(e) => {
+                // 失败只记 App 日志，不弹 Toast；下一拍再尝试。
+                self.log_kind(LogKind::App, format!("PC 状态推送失败: {e}"));
+            }
+        }
+    }
+}
+
+/// f32 字段差异判定：
+/// - 任一侧为 `None`：视为变化（与 `Some → Some` 完全相等才视为不变一致）。
+/// - 两侧都 `Some` 且差值 ≤ eps：视为相等。
+/// - 其余：视为变化。
+fn pc_status_float_changed(old: Option<f32>, new: Option<f32>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(a), Some(b)) => (a - b).abs() > PC_STATUS_FLOAT_EPS,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::PcStatus;
+
+    fn snap(
+        caps: bool,
+        num: bool,
+        scroll: bool,
+        net: bool,
+        cpu: Option<f32>,
+        mem: Option<f32>,
+    ) -> PcStatus {
+        PcStatus {
+            caps_lock: Some(caps),
+            num_lock: Some(num),
+            scroll_lock: Some(scroll),
+            network_connected: Some(net),
+            cpu_usage_percent: cpu,
+            memory_usage_percent: mem,
+            cpu_temp_c: None,
+            disk_io_percent: None,
+            network_up_kbps: None,
+            network_down_kbps: None,
+        }
+    }
+
+    /// 完全相同 → 不算变化
+    #[test]
+    fn pc_status_identical_no_change() {
+        let a = snap(true, false, false, true, Some(50.0), Some(60.0));
+        let b = snap(true, false, false, true, Some(50.0), Some(60.0));
+        assert!(!AppHandle::pc_status_has_changed(&a, &b));
+    }
+
+    /// 浮点抖动（差值 ≤ 0.5） → 不算变化
+    #[test]
+    fn pc_status_float_jitter_no_change() {
+        let a = snap(false, false, false, true, Some(50.0), Some(60.0));
+        let b = snap(false, false, false, true, Some(50.3), Some(60.4));
+        assert!(!AppHandle::pc_status_has_changed(&a, &b));
+    }
+
+    /// 浮点超出阈值 → 算变化
+    #[test]
+    fn pc_status_float_exceeds_eps_change() {
+        let a = snap(false, false, false, true, Some(50.0), Some(60.0));
+        let b = snap(false, false, false, true, Some(50.6), Some(60.0));
+        assert!(AppHandle::pc_status_has_changed(&a, &b));
+        let c = snap(false, false, false, true, Some(50.0), Some(60.6));
+        assert!(AppHandle::pc_status_has_changed(&a, &c));
+    }
+
+    /// 浮点 None ↔ Some → 算变化
+    #[test]
+    fn pc_status_float_none_to_some_change() {
+        let a = snap(false, false, false, true, None, None);
+        let b = snap(false, false, false, true, Some(1.0), None);
+        assert!(AppHandle::pc_status_has_changed(&a, &b));
+        let c = snap(false, false, false, true, None, Some(1.0));
+        assert!(AppHandle::pc_status_has_changed(&a, &c));
+    }
+
+    /// bool 字段翻转 → 算变化
+    #[test]
+    fn pc_status_bool_change() {
+        let a = snap(true, false, false, true, Some(50.0), Some(60.0));
+        // caps: true→false
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(false, false, false, true, Some(50.0), Some(60.0))
+        ));
+        // num: false→true
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(true, true, false, true, Some(50.0), Some(60.0))
+        ));
+        // scroll: false→true
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(true, false, true, true, Some(50.0), Some(60.0))
+        ));
+        // net: true→false
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(true, false, false, false, Some(50.0), Some(60.0))
+        ));
+    }
+
+    /// bool 字段 None ↔ Some → 算变化
+    #[test]
+    fn pc_status_bool_none_to_some_change() {
+        let mut a = PcStatus::default();
+        a.cpu_usage_percent = Some(1.0);
+        a.memory_usage_percent = Some(1.0);
+        let mut b = a.clone();
+        b.caps_lock = Some(true);
+        assert!(AppHandle::pc_status_has_changed(&a, &b));
+        b.caps_lock = None;
+        assert!(!AppHandle::pc_status_has_changed(&a, &b));
+    }
+
+    /// 辅助函数直接覆盖 None/None / None/Some / Some/Some 全部分支。
+    #[test]
+    fn float_changed_branches() {
+        assert!(!pc_status_float_changed(None, None));
+        assert!(pc_status_float_changed(None, Some(0.0)));
+        assert!(pc_status_float_changed(Some(0.0), None));
+        assert!(!pc_status_float_changed(Some(50.0), Some(50.0)));
+        assert!(!pc_status_float_changed(Some(50.0), Some(50.4)));
+        assert!(pc_status_float_changed(Some(50.0), Some(50.6)));
     }
 }
 

@@ -5,6 +5,7 @@
 mod app;
 mod config;
 mod link;
+mod pc_status;
 mod protocol;
 mod state;
 mod ui;
@@ -51,6 +52,10 @@ fn main() -> eframe::Result {
     *handle.last_port.lock().unwrap() = cfg.last_port.clone();
     *handle.auto_connect.lock().unwrap() = cfg.auto_connect;
     *handle.local_config.lock().unwrap() = cfg.clone();
+    // PC 状态推送开关：默认关闭；持久化字段，跨启动保留用户选择。
+    handle
+        .pc_status_push_enabled
+        .store(cfg.pc_status_push, std::sync::atomic::Ordering::Relaxed);
 
     let mut options = eframe::NativeOptions::default();
     if let Some([w, h]) = cfg.window_size {

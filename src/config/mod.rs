@@ -47,6 +47,11 @@ pub struct LocalConfig {
     pub language: Language,
     #[serde(default)]
     pub theme: Theme,
+    /// 是否启用 PC 状态向设备的周期推送（0x0D CMD_PC_STATUS）。
+    /// 主机侧行为开关，与设备 `DeviceSettings` 解耦；默认关闭，避免用户
+    /// 不清楚时主动暴露 Lock / 网络状态到固件。
+    #[serde(default)]
+    pub pc_status_push: bool,
 }
 
 fn config_path() -> Option<PathBuf> {
