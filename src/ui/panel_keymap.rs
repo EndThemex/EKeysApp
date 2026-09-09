@@ -26,6 +26,8 @@ const KEY_GAP: f32 = 4.0;
 const ROW_GAP: f32 = 4.0;
 /// 1.25u / 1.5u 等非整数宽度按键的圆角微调
 const KEY_RADIUS: f32 = 5.0;
+/// 左侧外壳最大宽度（含左右 14px 内边距），超过后不再随窗口放大
+const MAX_LEFT_W: f32 = 560.0;
 
 #[derive(Default)]
 pub struct KeymapPanelState {
@@ -96,19 +98,70 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
     let diff = draft.diff_bindings(&snapshot);
 
     let avail = ui.available_size();
-    // Drawer 固定 320 宽；键盘图占据剩下的空间。
+    // Drawer 固定 320 宽；左侧（屏幕 + 键盘）占据剩下的空间。
     let drawer_w = 320.0_f32.min((avail.x - 32.0).max(360.0));
-    let keyboard_w = (avail.x - drawer_w - 24.0).max(360.0);
-    // 键盘图高度按 3 行 × 4 列 ≈ 0.75 比例自适应（高度 = 宽度 × 3/4），
-    // 再额外扣除顶部占位文字与 padding，最少 180，撑满可用高度（再减去 DiffBar 高度）
-    let keyboard_h = (keyboard_w * 0.36).clamp(180.0, (avail.y - 80.0).max(220.0));
+    // 左侧外壳宽度受可用空间 + MAX_LEFT_W 双约束，避免窗口过大时无限放大。
+    let left_w = ((avail.x - drawer_w - 24.0).max(360.0)).min(MAX_LEFT_W);
+    // 外壳左右各 14px 内边距，实际可用内容宽度 = left_w - 28。
+    // 屏幕按 428:124 等比缩放至该内容宽度。
+    let screen_w = left_w - 28.0;
+    let screen_h = (screen_w * (124.0 / 428.0)).round();
+    // 键盘外壳高度按实际键数据精确计算：3 行键 + 行间距 + 上下 padding + 顶部文字位。
+    // u_px 由"单行 units 最大值"推导，使 1u 键宽 = 高（正方形），
+    // 外壳高度随之紧贴实际键区，底部不留空白。
+    let key_padding = 10.0;
+    let top_text_h = 14.0;
+    let kb_inner_w = screen_w - key_padding * 2.0;
+    let max_row_units: f32 = draft
+        .profile(draft.active_profile)
+        .or_else(|| draft.profiles.first())
+        .and_then(|p| p.layers.iter().find(|l| l.index == 0))
+        .map(|layer| {
+            let mut mx = 0.0_f32;
+            for r in 0..ROW_COUNT {
+                let sum: f32 = layer
+                    .slots
+                    .iter()
+                    .filter(|s| s.row as usize == r)
+                    .map(|s| s.width_units)
+                    .sum();
+                if sum > mx {
+                    mx = sum;
+                }
+            }
+            mx
+        })
+        .unwrap_or(4.0);
+    let u_px = if max_row_units > 0.0 {
+        (kb_inner_w / max_row_units).max(8.0)
+    } else {
+        32.0
+    };
+    let keyboard_h = key_padding * 2.0 + top_text_h + ROW_COUNT as f32 * u_px;
+    let left_h = screen_h + 10.0 + keyboard_h + 28.0;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
 
-        // 左：键盘图（固定高度矩形，下面留出 Drawer 完整空间）
-        ui.allocate_ui(Vec2::new(keyboard_w, keyboard_h), |ui| {
-            draw_keyboard(handle, ui, &draft, &snapshot);
+        // 左：屏幕占位 + 键盘图（统一外壳框起来作为整机外观）
+        ui.allocate_ui(Vec2::new(left_w, left_h), |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(0x14, 0x17, 0x1E))
+                .stroke(Stroke::new(1.5, Color32::from_rgb(0x32, 0x38, 0x44)))
+                .corner_radius(egui::CornerRadius::same(14))
+                .inner_margin(egui::Margin {
+                    left: 14,
+                    right: 14,
+                    top: 14,
+                    bottom: 14,
+                })
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 10.0;
+                        draw_screen(ui, screen_w, screen_h);
+                        draw_keyboard(handle, ui, &draft, &snapshot);
+                    });
+                });
         });
 
         // 右：功能分配 Drawer —— 给定宽度 + **撑满剩余高度**，内容超出滚动
@@ -344,6 +397,50 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
 
 // -------- 键盘图 + 键位 --------
 
+/// 设备屏幕占位：428 × 124 等比缩放，仅外形展示，不做功能。
+fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
+    let (rect, _resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // 屏幕外壳（深色边框 + 玻璃质感渐变）。注意：rect_stroke 在 Middle
+    // 模式下描边会向两侧各延 0.5px，可能被父容器裁掉；这里把 bezel 整体
+    // 向内缩 1px，并把描边改成 Inside，保证右/下边线完整可见。
+    let bezel = rect.shrink(1.0);
+    let screen = bezel.shrink(2.0);
+    painter.rect_filled(bezel, 8.0, Color32::from_rgb(0x10, 0x12, 0x18));
+    painter.rect_stroke(
+        bezel,
+        8.0,
+        Stroke::new(1.0, Color32::from_rgb(0x3A, 0x40, 0x4C)),
+        StrokeKind::Inside,
+    );
+    painter.rect_filled(screen, 6.0, Color32::from_rgb(0x0A, 0x12, 0x1E));
+
+    // 屏幕内左上角小指示 + 右下角比例标签
+    painter.text(
+        screen.left_top() + Vec2::new(8.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        "屏幕布局占位",
+        egui::FontId::proportional(11.0),
+        Color32::from_rgb(0x70, 0x88, 0xA8),
+    );
+    painter.text(
+        screen.right_bottom() + Vec2::new(-8.0, -6.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "428 × 124",
+        egui::FontId::proportional(10.0),
+        Color32::from_rgb(0x55, 0x60, 0x78),
+    );
+    // 中心提示文字
+    painter.text(
+        screen.center(),
+        egui::Align2::CENTER_CENTER,
+        "（待接入屏幕布局）",
+        egui::FontId::proportional(12.0),
+        Color32::from_gray(110),
+    );
+}
+
 fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snapshot: &KeymapData) {
     let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
@@ -395,9 +492,20 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
     }
 
     let padding = 10.0;
+    let top_text_h = 14.0; // 顶部"键盘外观图（待接入图片）"占位文字高度
     let inner_w = rect.width() - padding * 2.0;
-    let inner_h = rect.height() - padding * 2.0 - 14.0; // 留 14px 给顶部占位文字
-    let row_h = inner_h / ROW_COUNT as f32;
+
+    // 取所有行中 units 总和的最大值作为 u_px 的宽度基准；
+    // 这样 1u 按键去掉 KEY_GAP/ROW_GAP 之后宽 = 高 = 正方形。
+    let max_units: f32 = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.width_units).sum::<f32>())
+        .fold(0.0_f32, f32::max);
+    let u_px = if max_units > 0.0 {
+        (inner_w / max_units).max(8.0)
+    } else {
+        0.0
+    };
 
     let selected = handle.selected_key.lock().unwrap().clone();
 
@@ -405,13 +513,9 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
         if row.is_empty() {
             continue;
         }
-        // 计算每行的总 units，按比例分配 inner_w
-        let total_units: f32 = row.iter().map(|s| s.width_units).sum();
-        let avail_w = inner_w;
-        let u_px = avail_w / total_units;
-        let key_h = (row_h - ROW_GAP).max(20.0);
+        let key_h = (u_px - ROW_GAP).max(8.0);
 
-        let y = rect.top() + padding + 14.0 + r_idx as f32 * row_h;
+        let y = rect.top() + padding + top_text_h + r_idx as f32 * u_px;
         let mut x = rect.left() + padding;
 
         for slot in row {
