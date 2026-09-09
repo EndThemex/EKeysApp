@@ -61,8 +61,10 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
     // 在线但尚未成功读到 0x07 全量快照 → 提示用户当前展示的不是设备真实配置
     if handle.state.lock().unwrap().is_online() && !handle.is_config_loaded() {
         ui.label(
-            egui::RichText::new("正在读取设备配置…（若长时间无变化，请查看日志或点顶栏“刷新”）")
-                .weak(),
+            egui::RichText::new(
+                "正在读取设备配置…（若长时间无变化，请查看日志或点击顶栏「刷新」）",
+            )
+            .weak(),
         );
         ui.add_space(4.0);
     }
@@ -131,14 +133,10 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
 
 fn display_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label("TFT 主题");
+        ui.label("屏幕主题");
         let mut theme = draft.tft_theme.max(snap.tft_theme);
         egui::ComboBox::from_id_salt("tft-theme")
-            .selected_text(if theme == 0 {
-                "深色".into()
-            } else {
-                format!("主题 {theme}")
-            })
+            .selected_text(if theme == 0 { "深色" } else { "浅色" })
             .show_ui(ui, |cb| {
                 cb.selectable_value(&mut theme, 0, "深色");
                 cb.selectable_value(&mut theme, 1, "浅色");
@@ -148,11 +146,18 @@ fn display_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetti
         }
         ui.add_space(6.0);
 
-        ui.label("屏幕背光（5~100）");
-        // 与 tft_theme 同策略：slider 始终展示设备真实值 (snap)，
-        // 仅在用户拖动时才写入 draft；用 max(draft, snap) 会在断连重连后
-        // 把残留的旧 draft 顶回去，造成"APP 显示与设备不一致"的错觉。
-        let mut brightness = snap.tft_brightness.clamp(5, 100);
+        ui.label("屏幕背光（范围 5~100）");
+        // slider 优先展示 draft：存在待下发的亮度变更时显示草稿值，
+        // 否则每帧从 snap 取值会在松手后把滑块"顶回"设备旧值，
+        // 看起来像被自动覆盖（draft 实际一直持有新值，只是没展示）。
+        // draft 与 snap 一致时才显示设备真实值，断连重连后由
+        // merge_push 同步 draft，不会残留旧值。
+        let mut brightness = if draft.tft_brightness != snap.tft_brightness {
+            draft.tft_brightness
+        } else {
+            snap.tft_brightness
+        }
+        .clamp(5, 100);
         let r = ui.add(egui::Slider::new(&mut brightness, 5..=100).show_value(true));
         if r.changed() {
             draft.tft_brightness = brightness;
@@ -168,7 +173,7 @@ fn keyboard_tab(
     handle: &AppHandle,
 ) {
     ui.group(|ui| {
-        ui.label("工作模式");
+        ui.label("连接方式");
         let mut mode = if draft.work_mode != 0 || snap.work_mode != 0 {
             draft.work_mode
         } else {
@@ -177,9 +182,9 @@ fn keyboard_tab(
         egui::ComboBox::from_id_salt("work-mode")
             .selected_text(work_mode_label(mode))
             .show_ui(ui, |cb| {
-                cb.selectable_value(&mut mode, 0, "USB");
-                cb.selectable_value(&mut mode, 1, "BLE");
-                cb.selectable_value(&mut mode, 2, "2.4G");
+                cb.selectable_value(&mut mode, 0, "USB 有线");
+                cb.selectable_value(&mut mode, 1, "蓝牙");
+                cb.selectable_value(&mut mode, 2, "2.4G 无线");
             });
         if mode != snap.work_mode {
             // 危险操作 → 走 confirm
@@ -194,9 +199,9 @@ fn keyboard_tab(
         }
         ui.add_space(6.0);
 
-        ui.label("当前 Profile");
+        ui.label("当前按键配置");
         ui.label(if snap.active_profile_name.is_empty() {
-            "(未知)"
+            "（未知）"
         } else {
             &snap.active_profile_name
         });
@@ -216,7 +221,7 @@ fn keyboard_tab(
         }
         ui.add_space(6.0);
 
-        ui.label("切换 Profile (0~7)");
+        ui.label("切换按键配置（共 8 组）");
         let mut p = if draft.active_keymap_profile != 0 || snap.active_keymap_profile != 0 {
             draft.active_keymap_profile
         } else {
@@ -237,11 +242,11 @@ fn keyboard_tab(
         ui.add_space(4.0);
 
         // Profile 图标：0x11 CMD_PROFILE_ICON_SET 上传 / 清除
-        ui.label("Profile 图标（PNG，建议 ≤ 48×48，单帧 ≤ 2048 字节）");
+        ui.label("按键配置图标（建议 PNG，≤ 48×48，文件 ≤ 2 KB）");
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut st.icon_path)
-                    .hint_text("PNG 文件路径")
+                    .hint_text("选择 PNG 图片文件…")
                     .desired_width(260.0),
             );
             let uploading = !st.icon_path.trim().is_empty();
@@ -269,7 +274,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
-            toast(crate::state::ToastKind::Error, format!("读取文件失败: {e}"));
+            toast(crate::state::ToastKind::Error, format!("读取文件失败：{e}"));
             return;
         }
     };
@@ -277,13 +282,16 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         toast(
             crate::state::ToastKind::Error,
-            "文件不是有效 PNG".to_string(),
+            "所选文件不是有效的 PNG 图片".to_string(),
         );
         return;
     }
     // image 解码校验（固件不做尺寸校验，App 自行保证）
     if let Err(e) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
-        toast(crate::state::ToastKind::Error, format!("PNG 解码失败: {e}"));
+        toast(
+            crate::state::ToastKind::Error,
+            format!("无法解析 PNG 图片：{e}"),
+        );
         return;
     }
     // 2048 字节单帧上限：Base64 膨胀 4/3，留出帧头余量
@@ -291,7 +299,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     if b64.len() > 1400 {
         toast(
             crate::state::ToastKind::Error,
-            format!("图片过大（Base64 {} 字节），请压缩到 48×48 以下", b64.len()),
+            format!("图片过大（编码后 {} 字节），请压缩到 48×48 以下", b64.len()),
         );
         return;
     }
@@ -303,7 +311,10 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
         },
     };
     let Some(data) = serde_json::to_value(&req).ok() else {
-        toast(crate::state::ToastKind::Error, "请求序列化失败".to_string());
+        toast(
+            crate::state::ToastKind::Error,
+            "请求数据生成失败".to_string(),
+        );
         return;
     };
     let _ = handle.with_link(|lm| {
@@ -321,15 +332,17 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
                     d.active_profile_has_custom_icon = true;
                     toast(
                         crate::state::ToastKind::Success,
-                        format!("Profile {profile} 图标已上传"),
+                        format!("配置 {profile} 的图标已更新"),
                     );
                     st.icon_path.clear();
                 } else {
-                    let msg = frame.error.unwrap_or_else(|| "固件拒绝图标".to_string());
-                    toast(crate::state::ToastKind::Error, format!("上传失败: {msg}"));
+                    let msg = frame
+                        .error
+                        .unwrap_or_else(|| "设备未接受新图标".to_string());
+                    toast(crate::state::ToastKind::Error, format!("上传失败：{msg}"));
                 }
             }
-            Err(e) => toast(crate::state::ToastKind::Error, format!("上传超时: {e}")),
+            Err(e) => toast(crate::state::ToastKind::Error, format!("上传超时：{e}")),
         }
     });
 }
@@ -349,7 +362,10 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
         },
     };
     let Some(data) = serde_json::to_value(&req).ok() else {
-        toast(crate::state::ToastKind::Error, "请求序列化失败".to_string());
+        toast(
+            crate::state::ToastKind::Error,
+            "请求数据生成失败".to_string(),
+        );
         return;
     };
     let _ = handle.with_link(|lm| {
@@ -366,21 +382,23 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
                     d.active_profile_has_custom_icon = false;
                     toast(
                         crate::state::ToastKind::Success,
-                        format!("Profile {profile} 图标已清除"),
+                        format!("配置 {profile} 的图标已清除"),
                     );
                 } else {
-                    let msg = frame.error.unwrap_or_else(|| "固件拒绝清除".to_string());
-                    toast(crate::state::ToastKind::Error, format!("清除失败: {msg}"));
+                    let msg = frame
+                        .error
+                        .unwrap_or_else(|| "设备未接受清除请求".to_string());
+                    toast(crate::state::ToastKind::Error, format!("清除失败：{msg}"));
                 }
             }
-            Err(e) => toast(crate::state::ToastKind::Error, format!("清除超时: {e}")),
+            Err(e) => toast(crate::state::ToastKind::Error, format!("清除超时：{e}")),
         }
     });
 }
 
 fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label("音量 (0~100)");
+        ui.label("音量（范围 0~100）");
         let mut v = draft.device_volume.max(snap.device_volume).clamp(0, 100);
         if ui
             .add(egui::Slider::new(&mut v, 0..=100).show_value(true))
@@ -389,13 +407,13 @@ fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetting
             draft.device_volume = v;
         }
         ui.add_space(6.0);
-        ui.label("启用音频");
+        ui.label("音频开关");
         let mut enable = if draft.audio_enable != 0 || snap.audio_enable != 0 {
             draft.audio_enable != 0
         } else {
             snap.audio_enable != 0
         };
-        if ui.checkbox(&mut enable, "启用").changed() {
+        if ui.checkbox(&mut enable, "启用音频输出").changed() {
             draft.audio_enable = if enable { 1 } else { 0 };
         }
     });
@@ -403,13 +421,13 @@ fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetting
 
 fn power_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label("电源模式");
+        ui.label("节能策略");
         let mut pm = draft.power_mode.max(snap.power_mode);
         egui::ComboBox::from_id_salt("power-mode")
-            .selected_text(format!("模式 {pm}"))
+            .selected_text(power_mode_label(pm))
             .show_ui(ui, |cb| {
-                cb.selectable_value(&mut pm, 0, "模式 0");
-                cb.selectable_value(&mut pm, 1, "模式 1");
+                cb.selectable_value(&mut pm, 0, "性能优先");
+                cb.selectable_value(&mut pm, 1, "省电优先");
             });
         if pm != snap.power_mode {
             draft.power_mode = pm;
@@ -436,12 +454,12 @@ fn pc_status_tab(
     use std::time::{Duration, Instant};
 
     ui.group(|ui| {
-        ui.strong("PC 状态推送");
+        ui.strong("主机状态推送");
         ui.add_space(2.0);
         ui.label(
             egui::RichText::new(
-                "启用后，App 周期向设备推送当前主机的 Caps/Num/Scroll Lock 与网络状态，\
-                 设备可据此刷新主屏指示灯。默认关闭。",
+                "启用后，应用会定时把大写锁定、数字锁定、滚动锁定与网络连通状态推送给设备，\
+                 设备屏幕上的指示灯即可随之刷新。默认关闭，避免无意间共享主机状态。",
             )
             .weak(),
         );
@@ -451,9 +469,9 @@ fn pc_status_tab(
         let mut enabled = handle.pc_status_push_enabled.load(Ordering::Relaxed);
         let online = handle.state.lock().unwrap().is_online();
         if ui
-            .checkbox(&mut enabled, "启用 PC 状态向设备推送")
+            .checkbox(&mut enabled, "向设备同步主机状态")
             .on_hover_text(
-                "切换后立即生效；启用时仅在「在线」状态下发送（1s 周期）；退出 App 时自动保存。",
+                "勾选后立即生效；启用时只在「在线」状态下发送，频率约每秒一次；退出应用时会自动记住选择。",
             )
             .changed()
         {
@@ -466,9 +484,9 @@ fn pc_status_tab(
             let _ = handle.ui_tx.send(UiEvent::Toast(
                 crate::state::ToastKind::Info,
                 if enabled {
-                    "已启用 PC 状态推送".to_string()
+                    "已开始向设备推送主机状态".to_string()
                 } else {
-                    "已停止 PC 状态推送".to_string()
+                    "已停止向设备推送主机状态".to_string()
                 },
             ));
         }
@@ -477,7 +495,7 @@ fn pc_status_tab(
         let status_text = match (enabled, online) {
             (false, _) => "未启用",
             (true, false) => "等待设备连接…",
-            (true, true) => "运行中（1s/次）",
+            (true, true) => "正在推送（每秒一次）",
         };
         ui.label(format!("当前状态：{status_text}"));
 
@@ -486,7 +504,7 @@ fn pc_status_tab(
         ui.add_space(4.0);
 
         // 2) 实时快照展示（节流 1s，避免每帧都 GetAsyncKeyState）
-        ui.strong("实时快照");
+        ui.strong("主机实时状态");
         ui.add_space(2.0);
         let due = st
             .pc_status_snapshot_at
@@ -497,20 +515,20 @@ fn pc_status_tab(
             st.pc_status_snapshot_at = Some(Instant::now());
         }
         let Some(snap): Option<PcStatus> = st.pc_status_snapshot.clone() else {
-            ui.label("(尚未采集)");
+            ui.label("（尚未采集）");
             return;
         };
         egui::Grid::new("pc-status-grid")
             .num_columns(2)
             .spacing([10.0, 4.0])
             .show(ui, |ui| {
-                ui.label("Caps Lock");
+                ui.label("大写锁定 Caps");
                 ui.label(lock_label(snap.caps_lock));
                 ui.end_row();
-                ui.label("Num Lock");
+                ui.label("数字锁定 Num");
                 ui.label(lock_label(snap.num_lock));
                 ui.end_row();
-                ui.label("Scroll Lock");
+                ui.label("滚动锁定 Scroll");
                 ui.label(lock_label(snap.scroll_lock));
                 ui.end_row();
                 ui.label("网络连通");
@@ -520,7 +538,7 @@ fn pc_status_tab(
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "快照仅用于本地展示；启用推送后，相同数据会按 1s 周期通过 0x0D 推送到设备。",
+                "此处仅展示当前主机状态；启用推送后，相同数据每秒同步给设备一次。",
             )
             .weak()
             .size(11.0),
@@ -532,7 +550,7 @@ fn lock_label(v: Option<bool>) -> String {
     match v {
         Some(true) => "已开启".into(),
         Some(false) => "未开启".into(),
-        None => "(未采集)".into(),
+        None => "（未采集）".into(),
     }
 }
 
@@ -540,15 +558,23 @@ fn network_label(v: Option<bool>) -> String {
     match v {
         Some(true) => "已连接".into(),
         Some(false) => "未连接".into(),
-        None => "(未采集)".into(),
+        None => "（未采集）".into(),
     }
 }
 
 fn work_mode_label(m: i32) -> String {
     match m {
-        0 => "USB".into(),
-        1 => "BLE".into(),
-        2 => "2.4G".into(),
-        _ => format!("未知 ({m})"),
+        0 => "USB 有线".into(),
+        1 => "蓝牙".into(),
+        2 => "2.4G 无线".into(),
+        _ => format!("未知（{m}）"),
+    }
+}
+
+fn power_mode_label(m: i32) -> String {
+    match m {
+        0 => "性能优先".into(),
+        1 => "省电优先".into(),
+        _ => format!("模式 {m}"),
     }
 }

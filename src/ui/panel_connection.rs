@@ -53,9 +53,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                                 // CH340 系列桥接端口：列表里直接标注不支持
                                 // （连接时 attempt_connect 也会拒绝并弹 Toast）
                                 let label = if p.vid == Some(WCH_VID) {
-                                    format!("{} (CH340 不支持)", p.name)
+                                    format!("{}（CH340 不支持）", p.name)
                                 } else if let Some(prod) = &p.product {
-                                    format!("{} ({})", p.name, prod)
+                                    format!("{}（{}）", p.name, prod)
                                 } else {
                                     p.name.clone()
                                 };
@@ -84,29 +84,29 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                     if let Some(name) = &st.selected {
                         if let Some(info) = st.ports.iter().find(|p| &p.name == name) {
                             ui.label(format!(
-                                "厂商 ID: {}  产品 ID: {}",
+                                "厂商 ID：{}  产品 ID：{}",
                                 info.vid.map(|v| format!("0x{v:04X}")).unwrap_or("-".into()),
                                 info.pid.map(|v| format!("0x{v:04X}")).unwrap_or("-".into())
                             ));
                             if let Some(m) = &info.manufacturer {
-                                ui.label(format!("厂商名称: {m}"));
+                                ui.label(format!("厂商名称：{m}"));
                             }
                             if let Some(s) = &info.serial_number {
-                                ui.label(format!("序列号: {s}"));
+                                ui.label(format!("序列号：{s}"));
                             }
                             if info.vid == Some(WCH_VID) {
                                 ui.label(
                                     egui::RichText::new(
-                                        "⚠ WCH USB 转串口芯片（CH340 系列），不支持连接，请使用设备原生 USB CDC 口",
+                                        "⚠ 当前为 CH340 系列 USB 转串口芯片，不支持连接，请改用设备原生 USB CDC 接口",
                                     )
                                     .color(ui.visuals().warn_fg_color),
                                 );
                             }
                         } else {
-                            ui.label("(端口信息不可用)");
+                            ui.label("（暂无法读取端口信息）");
                         }
                     } else {
-                        ui.label("(未选择端口)");
+                        ui.label("（尚未选择端口）");
                     }
                 });
                 ui.end_row();
@@ -135,7 +135,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                     Err(e) => {
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             crate::state::ToastKind::Error,
-                            format!("连接失败: {e}"),
+                            format!("连接失败：{e}"),
                         ));
                     }
                 }
@@ -198,14 +198,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
         if reconnecting && !is_online {
             ui.add_space(6.0);
             if ui
-                .button("✕ 取消重连")
-                .on_hover_text("停止当前正在进行的自动重连")
+                .button("✕ 停止自动重连")
+                .on_hover_text("立即终止当前的自动重连流程")
                 .clicked()
             {
                 handle.cancel_reconnect();
                 let _ = handle.ui_tx.send(UiEvent::Toast(
                     crate::state::ToastKind::Info,
-                    "已取消重连".into(),
+                    "已停止自动重连".into(),
                 ));
             }
         }
@@ -226,18 +226,20 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
             if let Some((vid, pid)) = crate::link::serial::is_wch_bridge(&p) {
                 handle.log_kind(
                     crate::state::LogKind::App,
-                    format!("跳过自动连接 {p}：WCH USB 转串口芯片（{vid:04X}:{pid:04X}）"),
+                    format!(
+                        "跳过自动连接 {p}：当前为 CH340 系列 USB 转串口芯片（{vid:04X}:{pid:04X}）"
+                    ),
                 );
                 let _ = handle.ui_tx.send(UiEvent::Toast(
                     crate::state::ToastKind::Warning,
-                    format!("跳过自动连接：{p} 为 CH340 系列芯片，请改用设备原生 USB CDC 端口"),
+                    format!("已跳过自动连接：{p} 为 CH340 系列芯片，请改用设备原生 USB CDC 接口"),
                 ));
                 return;
             }
             // 自动连接路径不发 Navigate，避免抢 UI；错误也只记日志，
             // 由后续手动连接 / 重连任务继续兜底。
             if let Err(e) = handle.attempt_connect(&p) {
-                handle.log_kind(crate::state::LogKind::App, format!("自动连接失败: {e}"));
+                handle.log_kind(crate::state::LogKind::App, format!("自动连接失败：{e}"));
             }
         }
     }

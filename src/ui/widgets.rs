@@ -149,7 +149,10 @@ pub fn show_local_settings(
             ui.group(|ui| {
                 ui.strong("连接");
                 let mut ac = *handle.auto_connect.lock().unwrap();
-                if ui.checkbox(&mut ac, "启动时自动连接上次端口").changed() {
+                if ui
+                    .checkbox(&mut ac, "启动时自动连接上次使用的端口")
+                    .changed()
+                {
                     *handle.auto_connect.lock().unwrap() = ac;
                 }
             });
@@ -168,7 +171,7 @@ pub fn show_local_settings(
                 if lang != handle.language() {
                     handle.local_config.lock().unwrap().language = lang;
                 }
-                ui.label("（阶段 04 仅中文生效；切换后 UI 文案尚未本地化）");
+                ui.label("（目前仅提供中文界面；切换到英文后部分文案暂未翻译）");
             });
 
             // 3) 主题
@@ -186,7 +189,7 @@ pub fn show_local_settings(
                     handle.local_config.lock().unwrap().theme = theme;
                     let _ = handle.ui_tx.send(UiEvent::Toast(
                         ToastKind::Info,
-                        "主题切换将在下次启动生效".to_string(),
+                        "主题将在下次启动应用时生效".to_string(),
                     ));
                 }
             });
@@ -195,7 +198,7 @@ pub fn show_local_settings(
             ui.add_space(4.0);
             ui.group(|ui| {
                 ui.strong("窗口");
-                ui.label("当前大小会在退出时自动保存，下次启动恢复。");
+                ui.label("当前窗口大小会在退出时自动保存，下次启动时恢复。");
             });
 
             ui.add_space(8.0);

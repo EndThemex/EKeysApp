@@ -42,9 +42,9 @@ pub struct KeymapPanelState {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
-    ui.heading("键盘");
+    ui.heading("按键映射");
     ui.label(
-        egui::RichText::new("对接 CMD_KEYMAP_GET / SET：重新加载从设备拉取，下发写入当前 Profile")
+        egui::RichText::new("为每个按键自定义触发行为：可设为普通键、组合键、文本片段或内置功能")
             .weak()
             .size(11.0),
     );
@@ -61,29 +61,29 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
             ui,
             Color32::from_rgb(0x28, 0x2C, 0x36),
             Color32::from_rgb(0x44, 0x4A, 0x55),
-            "未绑定",
+            "未设置",
         );
         legend_dot(
             ui,
             Color32::from_rgb(0x2C, 0x46, 0x7A),
             Color32::from_rgb(0x6A, 0x88, 0xC0),
-            "已应用",
+            "已同步",
         );
         legend_dot(
             ui,
             Color32::from_rgb(0xC0, 0x80, 0x20),
             Color32::from_rgb(0xFF, 0xC8, 0x60),
-            "待下发",
+            "待同步",
         );
         legend_dot(
             ui,
             Color32::from_rgb(0x4F, 0x8C, 0xFF),
             Color32::WHITE,
-            "选中",
+            "已选中",
         );
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("Δ 表示差异（右上角琥珀点）")
+            egui::RichText::new("右上角的琥珀小点表示该按键存在尚未同步的修改")
                 .weak()
                 .size(11.0),
         );
@@ -145,17 +145,19 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                         if frame.status() == Some(0) {
                             success = true;
                         } else {
-                            let msg = frame.error.unwrap_or_else(|| "固件拒绝键映射".to_string());
+                            let msg = frame
+                                .error
+                                .unwrap_or_else(|| "设备未接受新的按键映射".to_string());
                             let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                                 crate::state::ToastKind::Error,
-                                format!("下发失败: {msg}"),
+                                format!("下发失败：{msg}"),
                             ));
                         }
                     }
                     Err(e) => {
                         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                             crate::state::ToastKind::Error,
-                            format!("下发超时: {e}"),
+                            format!("下发超时：{e}"),
                         ));
                     }
                 }
@@ -170,12 +172,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                 );
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                     crate::state::ToastKind::Success,
-                    format!("已下发 {} 项键映射变更", diff.len()),
+                    format!("已同步 {} 项按键映射", diff.len()),
                 ));
             } else {
                 handle.log_kind(
                     crate::state::LogKind::App,
-                    "键映射下发未成功，保留本地草稿待重试".to_string(),
+                    "按键映射未成功下发，已保留本地草稿供重试".to_string(),
                 );
             }
         }
@@ -222,13 +224,13 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
         {
             let mut draft = handle.keymap_draft.lock().unwrap();
 
-            ui.label("配置:");
+            ui.label("配置：");
             let mut p = draft.active_profile as i32;
             // ComboBox 只显示用户命名，默认值"P{i}"在 make_demo_profile 中设置
             let current_name = draft
                 .profile(p as u8)
                 .map(|x| x.name.clone())
-                .unwrap_or_else(|| format!("P{p}"));
+                .unwrap_or_else(|| format!("配置 {p}"));
             egui::ComboBox::from_id_salt("keymap-profile")
                 .selected_text(current_name.clone())
                 .show_ui(ui, |cb| {
@@ -258,9 +260,9 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     16.0,
                 )))
                 .on_hover_text(if st.renaming_profile {
-                    "取消重命名"
+                    "放弃重命名"
                 } else {
-                    "重命名当前 Profile"
+                    "为当前配置改名"
                 })
                 .clicked()
             {
@@ -282,7 +284,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                         crate::ui::icons::KEYMAP_CONFIRM,
                         14.0,
                     )))
-                    .on_hover_text("保存重命名")
+                    .on_hover_text("保存新名称")
                     .clicked()
                     || enter
                 {
@@ -307,13 +309,13 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     Ok(n) => {
                         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                             crate::state::ToastKind::Success,
-                            format!("已从设备加载键映射（{n} 键）"),
+                            format!("已从设备同步 {n} 个按键的映射"),
                         ));
                     }
                     Err(e) => {
                         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                             crate::state::ToastKind::Error,
-                            format!("重新加载失败: {e}"),
+                            format!("重新加载失败：{e}"),
                         ));
                     }
                 }
@@ -351,7 +353,7 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
     painter.text(
         rect.left_top() + Vec2::new(10.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "键盘背景图（待接入 PNG）",
+        "键盘外观图（待接入图片）",
         egui::FontId::proportional(11.0),
         Color32::from_rgb(0x70, 0x70, 0x80),
     );
@@ -368,7 +370,7 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "没有可用的 Profile",
+            "暂无可用的按键配置",
             egui::FontId::proportional(14.0),
             Color32::from_gray(140),
         );
@@ -378,7 +380,7 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "当前 Profile 没有基础层槽位",
+            "当前配置缺少基础按键层",
             egui::FontId::proportional(14.0),
             Color32::from_gray(140),
         );
@@ -487,7 +489,7 @@ fn draw_key(
             Stroke::new(1.0, Color32::from_rgb(0xFF, 0xC8, 0x60)),
         )
     } else if binding.map(|b| b.is_set()).unwrap_or(false) {
-        // 已应用（draft 与 snapshot 一致且非空）
+        // 已同步（draft 与 snapshot 一致且非空）
         (
             Color32::from_rgb(0x2C, 0x46, 0x7A),
             Stroke::new(1.0, Color32::from_rgb(0x6A, 0x88, 0xC0)),
@@ -565,14 +567,14 @@ fn draw_key(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         let status = if is_pending { "待下发" } else { "已应用" };
         resp.clone().on_hover_text(format!(
-            "{} ({},{}) {status} binding: {b}",
-            slot.label,
-            slot.row,
-            slot.col,
+            "「{label}」第 {row} 行 第 {col} 列 · {status} · 当前行为：{behavior}",
+            label = slot.label,
+            row = slot.row,
+            col = slot.col,
             status = status,
-            b = binding
+            behavior = binding
                 .map(|b| b.label())
-                .unwrap_or_else(|| "未绑定".into())
+                .unwrap_or_else(|| "未设置".into())
         ));
     }
     if clicked {
@@ -719,14 +721,14 @@ fn draw_encoder(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         let status = if is_pending { "待下发" } else { "已应用" };
         resp.clone().on_hover_text(format!(
-            "{} ({},{}) 旋钮 {status} binding: {b}",
-            slot.label,
-            slot.row,
-            slot.col,
+            "「{label}」旋钮 第 {row} 行 第 {col} 列 · {status} · 当前行为：{behavior}",
+            label = slot.label,
+            row = slot.row,
+            col = slot.col,
             status = status,
-            b = binding
+            behavior = binding
                 .map(|b| b.label())
-                .unwrap_or_else(|| "未绑定".into())
+                .unwrap_or_else(|| "未设置".into())
         ));
     }
     if clicked {
@@ -754,7 +756,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                 .auto_shrink([false, false])
                 .max_height(ui.available_height() - 6.0)
                 .show(ui, |ui| {
-                    ui.strong("分配功能");
+                    ui.strong("按键功能");
                     ui.add_space(4.0);
                     match selected {
                         None => {
@@ -762,7 +764,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             st.draft_action = None;
                             st.selected_ref = None;
                             ui.label(
-                                egui::RichText::new("点击键盘上的任意按键，开始分配功能")
+                                egui::RichText::new("点击键盘图上的任意按键，开始设置触发行为")
                                     .weak()
                                     .size(12.0),
                             );
@@ -793,18 +795,18 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                 .map(|s| s.label.clone())
                                 .unwrap_or_else(|| format!("({}, {})", kref.row, kref.col));
 
-                            ui.label(format!("位置：({}, {})", kref.row, kref.col));
-                            ui.label(format!("键帽：{label}"));
+                            ui.label(format!("位置：第 {} 行 第 {} 列", kref.row, kref.col));
+                            ui.label(format!("按键标识：{label}"));
 
                             ui.add_space(6.0);
                             ui.separator();
                             ui.add_space(6.0);
 
                             // 当前 binding（在 draft 中的快照）
-                            ui.label(format!("当前绑定：{}", cur_binding.label()));
+                            ui.label(format!("当前行为：{}", cur_binding.label()));
 
                             ui.add_space(8.0);
-                            ui.label("动作类型：");
+                            ui.label("触发行为：");
                             // 草稿动作（用户正在编辑中的版本，每帧持久）
                             let mut draft_action =
                                 st.draft_action.clone().unwrap_or(KeyAction::None);
@@ -855,7 +857,10 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                     }
                                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                                         crate::state::ToastKind::Success,
-                                        format!("{} → {}（待下发）", label, to_save.label()),
+                                        format!(
+                                            "已为「{label}」设为 {}（待同步）",
+                                            to_save.label()
+                                        ),
                                     ));
                                 }
                                 if ui.button("清除").clicked() {
@@ -874,11 +879,9 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
 
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new(
-                                    "改动不会立即生效，需点击下方\"应用\"统一下发。",
-                                )
-                                .weak()
-                                .size(11.0),
+                                egui::RichText::new("改动需点击下方「应用」按钮才会同步到设备。")
+                                    .weak()
+                                    .size(11.0),
                             );
                         }
                     }
@@ -1060,14 +1063,14 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                     ui.label(egui::RichText::new("●").size(16.0).color(border_color));
                     ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new("正在捕获按键…")
+                            egui::RichText::new("正在记录按键…")
                                 .strong()
                                 .color(Color32::WHITE),
                         );
                         ui.label(egui::RichText::new("按 Esc 退出").weak().size(10.0));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("取消").on_hover_text("退出捕获模式").clicked() {
+                        if ui.button("取消").on_hover_text("退出按键捕获").clicked() {
                             st.capture_keyboard = false;
                         }
                     });
@@ -1099,9 +1102,9 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                             .color(crate::ui::ACCENT),
                     );
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("按任意键捕获").strong());
+                        ui.label(egui::RichText::new("记录一次按键").strong());
                         ui.label(
-                            egui::RichText::new("把键盘按下的键映射到此按键")
+                            egui::RichText::new("把键盘按下的键作为此按键的触发行为")
                                 .weak()
                                 .size(10.0),
                         );
@@ -1175,7 +1178,7 @@ fn edit_action_params(
             // Drawer 固定 280px，"Ctrl/Shift/Alt/Win" 4 个 toggle + 标签 + 主键 ComboBox
             // 横向放不下，用 horizontal_wrapped 让修饰键行自然换行。
             ui.horizontal_wrapped(|ui| {
-                ui.label("修饰键:");
+                ui.label("修饰键：");
                 for (bit, name) in [
                     (MOD_CTRL, "Ctrl"),
                     (MOD_SHIFT, "Shift"),
@@ -1189,7 +1192,7 @@ fn edit_action_params(
                 }
             });
             ui.vertical(|ui| {
-                ui.label("主键:");
+                ui.label("主键：");
                 // ComboBox 在 vertical 子层里直接拿父容器全宽，长键名（如
                 // "Arrow Left (0x50)"）不会再被横向裁断。
                 hid_key_combo(ui, "combo-key", &mut code);
@@ -1216,7 +1219,7 @@ fn edit_action_params(
                 KeyAction::Chord(_) => vec![0x04],
                 _ => vec![0x04],
             };
-            ui.label(egui::RichText::new("以下按键同时按下：").weak().size(11.0));
+            ui.label(egui::RichText::new("同时按下以下按键：").weak().size(11.0));
             let mut i = 0;
             while i < codes.len() {
                 let name = hid_key_label(codes[i])
@@ -1226,7 +1229,7 @@ fn edit_action_params(
                     ui.label(name);
                     let removable = codes.len() > 1;
                     ui.add_enabled(removable, egui::Button::new("×"))
-                        .on_disabled_hover_text("至少保留一个按键")
+                        .on_disabled_hover_text("至少需要保留一个按键")
                         .on_hover_text("移除该键")
                         .clicked()
                 });
@@ -1259,7 +1262,7 @@ fn edit_action_params(
             };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut text)
-                    .hint_text("输入按键触发的文本（ASCII）")
+                    .hint_text("按键触发时输出的文本（仅限英文与符号）")
                     .desired_width(ui.available_width()),
             );
             let non_ascii = text.chars().any(|c| c as u32 > 0x7F);
@@ -1276,14 +1279,14 @@ fn edit_action_params(
             );
             if non_ascii {
                 ui.label(
-                    egui::RichText::new("⚠ 含非 ASCII 字符，设备端可能无法输出")
+                    egui::RichText::new("⚠ 含中文或特殊符号，设备端可能无法输出")
                         .size(10.0)
                         .color(ui.visuals().warn_fg_color),
                 );
             }
             if !resp.has_focus() && text.is_empty() {
                 ui.label(
-                    egui::RichText::new("例：常用邮箱、口令、命令行片段")
+                    egui::RichText::new("例如：常用邮箱、口令、命令行片段")
                         .weak()
                         .size(10.0),
                 );
@@ -1298,7 +1301,7 @@ fn edit_action_params(
             };
             ui.label("内置功能：");
             if ui
-                .selectable_label(f == "KEY_FUNCTION_ASR", "语音识别 (ASR)")
+                .selectable_label(f == "KEY_FUNCTION_ASR", "语音识别（ASR）")
                 .clicked()
             {
                 f = "KEY_FUNCTION_ASR".to_string();
@@ -1307,14 +1310,14 @@ fn edit_action_params(
             ui.label("自定义功能串：");
             ui.add(
                 egui::TextEdit::singleline(&mut f)
-                    .hint_text("KEY_FUNCTION_ASR / Ctrl+c …")
+                    .hint_text("如：语音识别 / Ctrl+c …")
                     .desired_width(ui.available_width()),
             );
             f = f.trim().to_string();
             ui.label(
                 egui::RichText::new(
-                    "固件支持：语音识别 (ASR)、组合键串（如 Ctrl+c）、单独修饰键；\
-                     其它无法识别的串按键无效果，但会原样保留不下丢。",
+                    "设备支持：语音识别、组合键串（如 Ctrl+c）、单独修饰键；\
+                     其它未识别的串按键无效果，但会原样保留不下丢。",
                 )
                 .weak()
                 .size(10.0),
@@ -1376,7 +1379,7 @@ fn show_keymap_diff_bar(ui: &mut egui::Ui, diff: &[KeymapDiffEntry]) -> KeymapDi
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.strong(
-                    egui::RichText::new(format!("待下发 {count} 项"))
+                    egui::RichText::new(format!("{count} 项待同步到设备"))
                         .color(ui.visuals().warn_fg_color),
                 );
                 ui.separator();
@@ -1387,10 +1390,10 @@ fn show_keymap_diff_bar(ui: &mut egui::Ui, diff: &[KeymapDiffEntry]) -> KeymapDi
                             for e in diff {
                                 let label = match e {
                                     KeymapDiffEntry::ActiveProfile(i) => {
-                                        format!("profile→P{i}")
+                                        format!("切换到「配置 {i}」")
                                     }
                                     KeymapDiffEntry::Binding { key, from, to } => format!(
-                                        "({},{}) {} → {}",
+                                        "第 {} 行 第 {} 列：{} → {}",
                                         key.row,
                                         key.col,
                                         from.label(),
@@ -1402,10 +1405,10 @@ fn show_keymap_diff_bar(ui: &mut egui::Ui, diff: &[KeymapDiffEntry]) -> KeymapDi
                         });
                     });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("放弃 (Esc)").clicked() {
+                    if ui.button("放弃修改（Esc）").clicked() {
                         action = KeymapDiffAction::Discard;
                     }
-                    let apply_btn = egui::Button::new("应用 (Ctrl+Enter)")
+                    let apply_btn = egui::Button::new("同步到设备（Ctrl+Enter）")
                         .fill(crate::ui::ACCENT)
                         .corner_radius(egui::CornerRadius::same(6));
                     if ui.add_enabled(count > 0, apply_btn).clicked() {

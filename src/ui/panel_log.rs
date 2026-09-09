@@ -29,7 +29,7 @@ pub struct LogPanelState {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
-    ui.heading("日志");
+    ui.heading("运行日志");
     ui.add_space(8.0);
 
     // 工具栏卡片：两行布局
@@ -42,9 +42,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     .strong()
                     .color(ui.visuals().weak_text_color()),
             );
-            ui.checkbox(&mut st.show_tx, "协议 Tx");
-            ui.checkbox(&mut st.show_rx, "协议 Rx");
-            ui.checkbox(&mut st.show_fw, "固件日志");
+            ui.checkbox(&mut st.show_tx, "上行数据");
+            ui.checkbox(&mut st.show_rx, "下行数据");
+            ui.checkbox(&mut st.show_fw, "设备日志");
             ui.checkbox(&mut st.show_app, "应用日志");
         });
         ui.add_space(4.0);
@@ -57,24 +57,24 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
             egui::ComboBox::from_id_salt("log-level")
                 .selected_text(match st.level {
                     LevelFilter::All => "全部".to_string(),
-                    LevelFilter::Info => "Info".to_string(),
-                    LevelFilter::Warn => "Warn".to_string(),
-                    LevelFilter::Error => "Error".to_string(),
+                    LevelFilter::Info => "提示".to_string(),
+                    LevelFilter::Warn => "警告".to_string(),
+                    LevelFilter::Error => "错误".to_string(),
                 })
                 .show_ui(ui, |cb| {
                     cb.selectable_value(&mut st.level, LevelFilter::All, "全部");
-                    cb.selectable_value(&mut st.level, LevelFilter::Info, "Info");
-                    cb.selectable_value(&mut st.level, LevelFilter::Warn, "Warn");
-                    cb.selectable_value(&mut st.level, LevelFilter::Error, "Error");
+                    cb.selectable_value(&mut st.level, LevelFilter::Info, "提示");
+                    cb.selectable_value(&mut st.level, LevelFilter::Warn, "警告");
+                    cb.selectable_value(&mut st.level, LevelFilter::Error, "错误");
                 });
             ui.add(
                 egui::TextEdit::singleline(&mut st.search)
-                    .hint_text("搜索…")
+                    .hint_text("搜索日志内容…")
                     .desired_width(180.0),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(format!("{}  清空", crate::ui::icons::r::TRASH))
+                    .button(format!("{}  清空日志", crate::ui::icons::r::TRASH))
                     .clicked()
                 {
                     handle.log.clear();
@@ -89,13 +89,16 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     if text.is_empty() {
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             ToastKind::Info,
-                            "没有可复制的日志".to_string(),
+                            "当前筛选下没有可复制的日志".to_string(),
                         ));
                     } else {
                         ui.ctx().copy_text(text.clone());
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             ToastKind::Success,
-                            format!("已复制 {} 行日志", count_visible(&snapshot, st)),
+                            format!(
+                                "已复制 {count} 行日志",
+                                count = count_visible(&snapshot, st)
+                            ),
                         ));
                     }
                 }
@@ -108,9 +111,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
     let total_visible = count_visible(&entries, st);
     ui.label(
         egui::RichText::new(format!(
-            "共 {} 条（显示 {} 条）",
-            entries.len(),
-            total_visible
+            "共 {total} 条，当前筛选显示 {visible} 条",
+            total = entries.len(),
+            visible = total_visible
         ))
         .small()
         .color(ui.visuals().weak_text_color()),
@@ -173,14 +176,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                 let row_id = egui::Id::new(("log_row", e.ts_ms, e.text.as_str()));
                 ui.interact(row.response.rect, row_id, egui::Sense::hover())
                     .context_menu(|ui| {
-                        if ui.button("复制此行").clicked() {
+                        if ui.button("复制此行（含时间）").clicked() {
                             ui.ctx().copy_text(text.clone());
                             let _ = handle
                                 .ui_tx
-                                .send(UiEvent::Toast(ToastKind::Success, "已复制".to_string()));
+                                .send(UiEvent::Toast(ToastKind::Success, "已复制此行".to_string()));
                             ui.close();
                         }
-                        if ui.button("复制消息内容").clicked() {
+                        if ui.button("仅复制消息内容").clicked() {
                             ui.ctx().copy_text(e.text.clone());
                             ui.close();
                         }
@@ -204,7 +207,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
     // “跳转最新”悬浮按钮：用户滚离底部时显示在日志区右下角。
     // 悬浮在 ScrollArea 内容之上属于无法用常规布局表达的定位，故使用精确 Rect。
     if !st.follow {
-        let label = "跳转最新";
+        let label = "回到最新";
         let font = egui::TextStyle::Button.resolve(ui.style());
         let galley = ui
             .painter()
@@ -273,10 +276,10 @@ fn render_entries_text(entries: &[crate::state::LogEntry], st: &LogPanelState) -
     let mut out = String::new();
     for e in visible.iter() {
         let kind = match e.kind {
-            LogKind::Tx => "Tx",
-            LogKind::Rx => "Rx",
-            LogKind::Firmware => "FW",
-            LogKind::App => "App",
+            LogKind::Tx => "上行",
+            LogKind::Rx => "下行",
+            LogKind::Firmware => "设备",
+            LogKind::App => "应用",
         };
         out.push_str(&format!(
             "{} [{}] {}\n",
