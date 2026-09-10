@@ -653,25 +653,50 @@ pub struct DeviceInfoSetResp {
 /// 单个物理键的固件侧表示（最大 11 键）。
 ///
 /// 固件优先级：`function` > `text` > `normal` > `macro`（cmd_keymap.cpp）。
+/// `combo1_*` / `combo2_*` 为 FUN 组合层输出通道（按住 FUN 键 1/2 时该键的
+/// 触发行为），通道内优先级与单击一致（function > text > normal）。
+///
+/// 字符串字段序列化时跳过空串：固件 0x06 行缓冲上限 2048 字节（一行装下
+/// 11 键整表），字段缺失与空串语义等价（解析层 `is<const char*>` 不命中
+/// 即留空），跳过空串可把典型负载从 ~2.0KB 压到 <1KB。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct FirmwareKeyEntry {
     pub physical: u8, // 1~11
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub normal: String,
-    #[serde(rename = "macro", default)]
+    #[serde(rename = "macro", default, skip_serializing_if = "String::is_empty")]
     pub macro_: String, // C++ 字段名 macro；Rust 保留字所以改 macro_
     /// 文本注入串（ASCII ≤128；按键触发整串输出一次）
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub function: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo1_normal: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo1_text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo1_function: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo2_normal: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo2_text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo2_function: String,
 }
 
 /// `0x06 CMD_KEYMAP_SET` 请求。
+///
+/// `fun_key1` / `fun_key2` 为可选字段（`0~11`，`0` = 未配置）：仅在有改动时
+/// 携带下发，避免旧固件 / 解析缺失时把设备端配置误清为 0。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeymapSetReq {
     #[serde(default)]
     pub keymap: Vec<FirmwareKeyEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fun_key1: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fun_key2: Option<u8>,
 }
 
 // ---------- 0x0B 固件信息 / OTA ----------
@@ -1420,7 +1445,19 @@ pub struct KeyRef {
 pub struct KeymapData {
     pub active_profile: u8,
     pub profiles: Vec<KeymapProfile>,
+    /// FUN 组合键 1：触发 FUN1 组合层的物理键编号（`0~11`，`0` = 未配置）。
+    /// 编号与 0x06 keymap 的 `physical` 一致（Key 槽位按 (row,col) 升序 1~11）。
+    #[serde(default)]
+    pub fun_key1: u8,
+    /// FUN 组合键 2：触发 FUN2 组合层的物理键编号（`0~11`，`0` = 未配置）。
+    #[serde(default)]
+    pub fun_key2: u8,
 }
+
+/// 组合层（KeyRef.layer 取值）：0 = 单击，1 = FUN1 组合层，2 = FUN2 组合层。
+pub const LAYER_BASE: u8 = 0;
+pub const LAYER_FUN1: u8 = 1;
+pub const LAYER_FUN2: u8 = 2;
 
 impl Default for KeymapData {
     fn default() -> Self {
@@ -1438,6 +1475,14 @@ impl KeymapData {
         // 1. active_profile 切换
         if active != other_active {
             out.push(KeymapDiffEntry::ActiveProfile(active));
+        }
+
+        // 1.5 FUN 组合键分配
+        if self.fun_key1 != other.fun_key1 || self.fun_key2 != other.fun_key2 {
+            out.push(KeymapDiffEntry::FunKeys {
+                f1: self.fun_key1,
+                f2: self.fun_key2,
+            });
         }
 
         // 2. 当前 profile 的 bindings 差异
@@ -1476,6 +1521,42 @@ impl KeymapData {
         self.profiles.iter().find(|p| p.index == idx)
     }
 
+    /// 当前 active profile 的 Key 型槽位按 `(row, col)` 升序的物理编号列表：
+    /// 返回 `(physical 1~11, row, col, label)`。与 0x05/0x06 的 `physical`
+    /// 编号规则一致，供 FUN 键分配 UI 使用。
+    pub fn physical_key_slots(&self) -> Vec<(u8, u8, u8, String)> {
+        let Some(profile) = self.profile(self.active_profile) else {
+            return Vec::new();
+        };
+        let Some(base) = profile.layers.iter().find(|l| l.index == 0) else {
+            return Vec::new();
+        };
+        let mut slots: Vec<&KeySlot> = base
+            .slots
+            .iter()
+            .filter(|s| s.kind == SlotKind::Key)
+            .collect();
+        slots.sort_by_key(|s| (s.row, s.col));
+        slots
+            .iter()
+            .take(11)
+            .enumerate()
+            .map(|(i, s)| (i as u8 + 1, s.row, s.col, s.label.clone()))
+            .collect()
+    }
+
+    /// FUN 键编号（`1~11`）→ active profile 中对应槽位的 `(row, col)`。
+    /// `0`（未配置）或越界返回 `None`。
+    pub fn fun_key_slot(&self, n: u8) -> Option<(u8, u8)> {
+        if n == 0 {
+            return None;
+        }
+        self.physical_key_slots()
+            .into_iter()
+            .find(|(p, _, _, _)| *p == n)
+            .map(|(_, r, c, _)| (r, c))
+    }
+
     /// 应用一个 diff 列表（合并到自身）；返回是否有变化
     pub fn apply_diff(&mut self, diff: &[KeymapDiffEntry]) -> bool {
         let mut changed = false;
@@ -1484,6 +1565,13 @@ impl KeymapData {
                 KeymapDiffEntry::ActiveProfile(idx) => {
                     if self.active_profile != *idx {
                         self.active_profile = *idx;
+                        changed = true;
+                    }
+                }
+                KeymapDiffEntry::FunKeys { f1, f2 } => {
+                    if self.fun_key1 != *f1 || self.fun_key2 != *f2 {
+                        self.fun_key1 = *f1;
+                        self.fun_key2 = *f2;
                         changed = true;
                     }
                 }
@@ -1517,6 +1605,8 @@ impl KeymapData {
 pub enum KeymapDiffEntry {
     /// 切换活动 Profile
     ActiveProfile(u8),
+    /// FUN 组合键分配变更（`0` = 未配置）
+    FunKeys { f1: u8, f2: u8 },
     /// 某个槽位的绑定变更
     Binding {
         key: KeyRef,
@@ -1536,7 +1626,8 @@ impl KeymapData {
     /// - 只取 **layer 0（Base）** 的槽位（固件每 Profile 只有 11 个物理键）；
     /// - 跳过旋钮槽（`SlotKind::Encoder`，固件不支持）；
     /// - 剩余按键按 `(row, col)` 升序编号为 `physical` 1~11（与 App 4×3
-    ///   布局和固件 `kMatrixKeyCount = 11` 一致）。
+    ///   布局和固件 `kMatrixKeyCount = 11` 一致）；
+    /// - layer 1 / 2 的绑定分别写入 `combo1_*` / `combo2_*`（FUN 组合层）。
     pub fn to_firmware_entries(&self) -> Vec<FirmwareKeyEntry> {
         let Some(profile) = self.profile(self.active_profile) else {
             return Vec::new();
@@ -1555,24 +1646,38 @@ impl KeymapData {
             .take(11)
             .enumerate()
             .map(|(i, s)| {
-                let action = profile
-                    .bindings
-                    .get(&KeyRef {
-                        layer: 0,
-                        row: s.row,
-                        col: s.col,
-                    })
-                    .cloned()
-                    .unwrap_or(KeyAction::None);
-                action.to_firmware_entry(i as u8 + 1)
+                let get = |layer: u8| {
+                    profile
+                        .bindings
+                        .get(&KeyRef {
+                            layer,
+                            row: s.row,
+                            col: s.col,
+                        })
+                        .cloned()
+                        .unwrap_or(KeyAction::None)
+                };
+                let mut e = get(LAYER_BASE).to_firmware_entry(i as u8 + 1);
+                // FUN 组合层：借用 to_firmware_entry 的通道编码，拷进 combo 字段
+                let c1 = get(LAYER_FUN1).to_firmware_entry(e.physical);
+                e.combo1_normal = c1.normal;
+                e.combo1_text = c1.text;
+                e.combo1_function = c1.function;
+                let c2 = get(LAYER_FUN2).to_firmware_entry(e.physical);
+                e.combo2_normal = c2.normal;
+                e.combo2_text = c2.text;
+                e.combo2_function = c2.function;
+                e
             })
             .collect()
     }
 
-    /// 把固件 `0x05` 返回的 11 键写回当前 active profile 的 layer 0。
+    /// 把固件 `0x05` 返回的 11 键写回当前 active profile。
     ///
     /// 槽位顺序与 `to_firmware_entries` 相同（按键按 `(row, col)` 升序），
-    /// `entries` 下标 i ↔ physical i+1。返回是否有变化。
+    /// `entries` 下标 i ↔ physical i+1。单击通道写入 layer 0；
+    /// `combo1_*` / `combo2_*` 分别写入 layer 1 / 2（FUN 组合层）。
+    /// 返回是否有变化。
     pub fn apply_firmware_entries(&mut self, entries: &[FirmwareKeyEntry]) -> bool {
         let mut changed = false;
         let Some(profile) = self.profile_mut(self.active_profile) else {
@@ -1592,21 +1697,44 @@ impl KeymapData {
             let Some(&(row, col)) = slots.get(i) else {
                 break;
             };
-            let key = KeyRef { layer: 0, row, col };
-            let action = KeyAction::from_firmware_entry(e);
-            let is_set = action.is_set();
-            let prev = profile.bindings.get(&key).cloned();
-            match (&prev, is_set) {
-                (None, false) => continue,
-                (Some(p), true) if *p == action => continue,
-                _ => {}
+            // 三个通道：单击 / FUN1 组合层 / FUN2 组合层
+            let channels = [
+                (LAYER_BASE, KeyAction::from_firmware_entry(e)),
+                (
+                    LAYER_FUN1,
+                    KeyAction::from_firmware_entry(&FirmwareKeyEntry {
+                        normal: e.combo1_normal.clone(),
+                        text: e.combo1_text.clone(),
+                        function: e.combo1_function.clone(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    LAYER_FUN2,
+                    KeyAction::from_firmware_entry(&FirmwareKeyEntry {
+                        normal: e.combo2_normal.clone(),
+                        text: e.combo2_text.clone(),
+                        function: e.combo2_function.clone(),
+                        ..Default::default()
+                    }),
+                ),
+            ];
+            for (layer, action) in channels {
+                let key = KeyRef { layer, row, col };
+                let is_set = action.is_set();
+                let prev = profile.bindings.get(&key).cloned();
+                match (&prev, is_set) {
+                    (None, false) => continue,
+                    (Some(p), true) if *p == action => continue,
+                    _ => {}
+                }
+                if is_set {
+                    profile.bindings.insert(key, action);
+                } else {
+                    profile.bindings.remove(&key);
+                }
+                changed = true;
             }
-            if is_set {
-                profile.bindings.insert(key, action);
-            } else {
-                profile.bindings.remove(&key);
-            }
-            changed = true;
         }
         changed
     }
@@ -1619,6 +1747,8 @@ impl KeymapData {
         Self {
             active_profile: 0,
             profiles,
+            fun_key1: 0,
+            fun_key2: 0,
         }
     }
 
@@ -2187,6 +2317,7 @@ mod tests {
             macro_: "Ctrl+c".into(),
             text: String::new(),
             function: String::new(),
+            ..Default::default()
         };
         let s = serde_json::to_string(&e).to("s");
         assert!(s.contains("physical"));
@@ -2446,6 +2577,137 @@ mod tests {
                 col: 3
             }),
             Some(&KeyAction::Function("KEY_FUNCTION_ASR".into()))
+        );
+    }
+
+    /// FUN 组合层：combo1_*/combo2_* 字段 + fun_key1/2 的往返与 diff。
+    #[test]
+    fn fun_key_combo_roundtrip() {
+        let mut kd = KeymapData::demo_60();
+        kd.active_profile = 0;
+        kd.fun_key1 = 1; // K1 作为 FUN 键 1
+        kd.fun_key2 = 0;
+        {
+            let p = kd.profile_mut(0).unwrap();
+            // K2（row0 col1）FUN1 层 → Ctrl+c；FUN2 层 → 文本注入
+            p.bindings.insert(
+                KeyRef {
+                    layer: LAYER_FUN1,
+                    row: 0,
+                    col: 1,
+                },
+                KeyAction::Combo {
+                    mods: MOD_CTRL,
+                    code: 0x06,
+                },
+            );
+            p.bindings.insert(
+                KeyRef {
+                    layer: LAYER_FUN2,
+                    row: 0,
+                    col: 1,
+                },
+                KeyAction::Text("hi".into()),
+            );
+        }
+
+        // 编码：combo 字段写入固件条目
+        let entries = kd.to_firmware_entries();
+        assert_eq!(entries[1].combo1_normal, "Ctrl+0x06");
+        assert_eq!(entries[1].combo2_text, "hi");
+        assert_eq!(entries[0].combo1_normal, "", "未绑定的 FUN 层保持为空");
+
+        // SET 请求带 fun_key 字段
+        let req = KeymapSetReq {
+            keymap: entries.clone(),
+            fun_key1: Some(1),
+            fun_key2: Some(0),
+        };
+        let v = serde_json::to_value(&req).to("req");
+        assert_eq!(v["fun_key1"], 1);
+        assert_eq!(v["fun_key2"], 0);
+
+        // 解码：combo 字段还原为 layer 1/2 绑定
+        let mut kd2 = KeymapData::demo_60();
+        kd2.active_profile = 0;
+        kd2.fun_key1 = 0;
+        assert!(kd2.apply_firmware_entries(&entries));
+        let p = kd2.profile(0).unwrap();
+        assert_eq!(
+            p.bindings.get(&KeyRef {
+                layer: LAYER_FUN1,
+                row: 0,
+                col: 1
+            }),
+            Some(&KeyAction::Combo {
+                mods: MOD_CTRL,
+                code: 0x06
+            })
+        );
+        assert_eq!(
+            p.bindings.get(&KeyRef {
+                layer: LAYER_FUN2,
+                row: 0,
+                col: 1
+            }),
+            Some(&KeyAction::Text("hi".into()))
+        );
+
+        // diff：fun_key 分配变化生成 FunKeys 条目，apply 可回放
+        kd2.fun_key1 = 2;
+        let diff = kd2.diff_bindings(&kd);
+        assert!(
+            diff.contains(&KeymapDiffEntry::FunKeys { f1: 2, f2: 0 }),
+            "应有 FunKeys 差异: {diff:?}"
+        );
+        let mut back = kd.clone();
+        assert!(back.apply_diff(&diff));
+        assert_eq!(back.fun_key1, 2);
+
+        // fun_key 编号 → 槽位映射
+        assert_eq!(kd.fun_key_slot(1), Some((0, 0)), "K1 在 (row0, col0)");
+        assert_eq!(kd.fun_key_slot(0), None);
+        assert_eq!(kd.fun_key_slot(12), None);
+    }
+
+    /// 0x06 请求整行（含帧包装）必须短于固件行缓冲 2048 字节，
+    /// 否则 SerialProtocol 直接丢弃整行，App 侧永远收不到 ACK。
+    #[test]
+    fn keymap_set_req_under_firmware_line_limit() {
+        let mut kd = KeymapData::demo_60();
+        kd.active_profile = 0;
+        kd.fun_key1 = 1;
+        kd.fun_key2 = 2;
+        {
+            let p = kd.profile_mut(0).unwrap();
+            // 全部 11 键三通道都填上（最坏情况）
+            for l in [LAYER_BASE, LAYER_FUN1, LAYER_FUN2] {
+                for i in 0..11 {
+                    p.bindings.insert(
+                        KeyRef {
+                            layer: l,
+                            row: i / 3,
+                            col: i % 3,
+                        },
+                        KeyAction::Combo {
+                            mods: MOD_CTRL | MOD_SHIFT,
+                            code: 0x04 + (i as u16),
+                        },
+                    );
+                }
+            }
+        }
+        let req = KeymapSetReq {
+            keymap: kd.to_firmware_entries(),
+            fun_key1: Some(1),
+            fun_key2: Some(2),
+        };
+        let line = serde_json::to_string(&req).expect("serialize");
+        let full = format!("{{\"cmd\":6,\"seq\":123,\"data\":{line}}}\n");
+        assert!(
+            full.len() < 2048,
+            "0x06 整行 {} 字节，超过固件 2048 字节行缓冲",
+            full.len()
         );
     }
 

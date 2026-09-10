@@ -480,6 +480,17 @@ impl AppHandle {
             })?;
             let entries = serde_json::from_value::<Vec<FirmwareKeyEntry>>(v.clone())
                 .map_err(|e| format!("0x05 keymap 解析失败: {e}"))?;
+            // FUN 组合键分配（顶层可选字段，0 = 未配置；越界按未配置处理）
+            let fun_key1 = frame
+                .extra_value("fun_key1")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.min(11) as u8)
+                .unwrap_or(0);
+            let fun_key2 = frame
+                .extra_value("fun_key2")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.min(11) as u8)
+                .unwrap_or(0);
             let n = entries.len();
             let dev_profile = self.settings.lock().unwrap().active_keymap_profile as u8;
             {
@@ -487,6 +498,8 @@ impl AppHandle {
                 if snap.profile(dev_profile).is_some() {
                     snap.active_profile = dev_profile;
                 }
+                snap.fun_key1 = fun_key1;
+                snap.fun_key2 = fun_key2;
                 snap.apply_firmware_entries(&entries);
             }
             {
@@ -494,6 +507,8 @@ impl AppHandle {
                 if draft.profile(dev_profile).is_some() {
                     draft.active_profile = dev_profile;
                 }
+                draft.fun_key1 = fun_key1;
+                draft.fun_key2 = fun_key2;
                 draft.apply_firmware_entries(&entries);
             }
             // 选中键引用可能属于旧 Profile，直接清掉避免误导

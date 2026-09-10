@@ -119,7 +119,7 @@ pub fn paint_icon_at(
 
 /// galley 内部字形紧致包围盒（mesh_bounds）的竖直中心（galley 本地坐标）。
 /// 空文本等 mesh_bounds 为空时退化为 rect 中心。
-fn galley_mesh_center_y(g: &egui::Galley) -> f32 {
+pub(crate) fn galley_mesh_center_y(g: &egui::Galley) -> f32 {
     if g.mesh_bounds.is_positive() {
         g.mesh_bounds.center().y
     } else {
