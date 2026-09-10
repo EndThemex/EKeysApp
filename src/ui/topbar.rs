@@ -8,22 +8,37 @@ use crate::ui::colors;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>) {
     let state = handle.state.lock().unwrap().clone();
-    let color = match &state {
-        ConnectionState::Online => colors::STATUS_GREEN,
-        ConnectionState::Connecting | ConnectionState::Reconnecting => colors::STATUS_YELLOW,
-        ConnectionState::Disconnected => colors::STATUS_GREY,
-    };
-    let label = match &state {
-        ConnectionState::Online => "在线",
-        ConnectionState::Connecting => "连接中",
-        ConnectionState::Reconnecting => "重连中",
-        ConnectionState::Disconnected => "未连接",
+    // 状态色按主题取色：亮黄 / 亮绿在白底上对比不足，浅色主题用加深变体。
+    let dark = ui.visuals().dark_mode;
+    let (color, label) = match &state {
+        ConnectionState::Online => (
+            colors::themed(dark, colors::STATUS_GREEN, colors::STATUS_GREEN_L),
+            "在线",
+        ),
+        ConnectionState::Connecting | ConnectionState::Reconnecting => (
+            colors::themed(dark, colors::STATUS_YELLOW, colors::STATUS_YELLOW_L),
+            if matches!(state, ConnectionState::Reconnecting) {
+                "重连中"
+            } else {
+                "连接中"
+            },
+        ),
+        ConnectionState::Disconnected => (
+            colors::themed(dark, colors::STATUS_GREY, colors::STATUS_GREY_L),
+            "未连接",
+        ),
     };
 
     egui::MenuBar::new().ui(ui, |ui| {
-        // 状态胶囊：圆点 + 状态文字，底色随状态着色
+        // 状态胶囊：圆点 + 状态文字，底色随状态着色。
+        // 深色主题：把状态色压暗成深色底；浅色主题：把状态色向白色稀释成浅色底。
+        let chip_bg = if dark {
+            color.gamma_multiply(0.22)
+        } else {
+            colors::mix(egui::Color32::WHITE, color, 0.16)
+        };
         egui::Frame::new()
-            .fill(color.gamma_multiply(0.22))
+            .fill(chip_bg)
             .corner_radius(egui::CornerRadius::same(10))
             .inner_margin(egui::Margin {
                 left: 10,

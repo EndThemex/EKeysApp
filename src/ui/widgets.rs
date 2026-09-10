@@ -113,9 +113,10 @@ pub fn show_confirm(
             ui.label(body);
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary = egui::Button::new("继续")
-                    .fill(crate::ui::ACCENT)
-                    .corner_radius(egui::CornerRadius::same(6));
+                let primary =
+                    egui::Button::new(egui::RichText::new("继续").color(egui::Color32::WHITE))
+                        .fill(crate::ui::ACCENT)
+                        .corner_radius(egui::CornerRadius::same(6));
                 if ui.add(primary).clicked() {
                     outcome = ConfirmOutcome::Yes;
                 }
@@ -398,67 +399,73 @@ pub fn show_diff_bar(
             bottom: 8,
         })
         .show(ui, |ui| {
+            // 两行布局：标题 + 按钮固定在第一行（右对齐、不被内容挤压），
+            // 明细放在第二行自动换行。避免明细过长时把按钮挤出可视区，
+            // 导致点击"应用"时误点落到按钮位置上的明细文本，也避免撑出
+            // 父面板的横向滚动条。
             ui.horizontal(|ui| {
                 ui.strong(
                     egui::RichText::new(format!("待下发 {count} 项"))
                         .color(ui.visuals().warn_fg_color),
                 );
-                ui.separator();
-                egui::ScrollArea::horizontal()
-                    .max_width(420.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
-                            if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
-                                ui.label(format!("tft_brightness={}", diff.tft_brightness));
-                            }
-                            if mask.test(crate::protocol::F_TFT_THEME) {
-                                ui.label(format!("tft_theme={}", diff.tft_theme));
-                            }
-                            if mask.test(crate::protocol::F_WORK_MODE) {
-                                ui.label(format!("work_mode={}", diff.work_mode));
-                            }
-                            if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
-                                ui.label(format!(
-                                    "active_keymap_profile={}",
-                                    diff.active_keymap_profile
-                                ));
-                            }
-                            if mask.test(crate::protocol::F_DEVICE_VOLUME) {
-                                ui.label(format!("device_volume={}", diff.device_volume));
-                            }
-                            if mask.test(crate::protocol::F_AUDIO_ENABLE) {
-                                ui.label(format!("audio_enable={}", diff.audio_enable));
-                            }
-                            if mask.test(crate::protocol::F_POWER_MODE) {
-                                ui.label(format!("power_mode={}", diff.power_mode));
-                            }
-                            if mask.test(crate::protocol::F_RGB_MODE) {
-                                ui.label(format!("rgb_mode={}", diff.rgb_mode));
-                            }
-                            if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
-                                ui.label(format!("rgb_single_color={}", diff.rgb_single_color));
-                            }
-                            if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
-                                ui.label(format!("rgb_click_mode={}", diff.rgb_click_mode));
-                            }
-                            if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
-                                ui.label(format!("rgb_brightness={}", diff.rgb_brightness));
-                            }
-                        });
-                    });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("放弃 (Esc)").clicked() {
                         action = DiffAction::Discard;
                     }
-                    let apply_btn = egui::Button::new("应用 (Ctrl+Enter)")
-                        .fill(crate::ui::ACCENT)
-                        .corner_radius(egui::CornerRadius::same(6));
+                    let apply_btn = egui::Button::new(
+                        egui::RichText::new("应用 (Ctrl+Enter)").color(egui::Color32::WHITE),
+                    )
+                    .fill(crate::ui::ACCENT)
+                    .corner_radius(egui::CornerRadius::same(6));
                     if ui.add_enabled(can_apply, apply_btn).clicked() {
                         action = DiffAction::Apply;
                     }
                 });
             });
+            if count > 0 {
+                ui.add_space(4.0);
+                // 横向自动换行展示，不用 ScrollArea：内容永远不会超出面板宽度。
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
+                    if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
+                        ui.label(format!("tft_brightness={}", diff.tft_brightness));
+                    }
+                    if mask.test(crate::protocol::F_TFT_THEME) {
+                        ui.label(format!("tft_theme={}", diff.tft_theme));
+                    }
+                    if mask.test(crate::protocol::F_WORK_MODE) {
+                        ui.label(format!("work_mode={}", diff.work_mode));
+                    }
+                    if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
+                        ui.label(format!(
+                            "active_keymap_profile={}",
+                            diff.active_keymap_profile
+                        ));
+                    }
+                    if mask.test(crate::protocol::F_DEVICE_VOLUME) {
+                        ui.label(format!("device_volume={}", diff.device_volume));
+                    }
+                    if mask.test(crate::protocol::F_AUDIO_ENABLE) {
+                        ui.label(format!("audio_enable={}", diff.audio_enable));
+                    }
+                    if mask.test(crate::protocol::F_POWER_MODE) {
+                        ui.label(format!("power_mode={}", diff.power_mode));
+                    }
+                    if mask.test(crate::protocol::F_RGB_MODE) {
+                        ui.label(format!("rgb_mode={}", diff.rgb_mode));
+                    }
+                    if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
+                        ui.label(format!("rgb_single_color={}", diff.rgb_single_color));
+                    }
+                    if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
+                        ui.label(format!("rgb_click_mode={}", diff.rgb_click_mode));
+                    }
+                    if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
+                        ui.label(format!("rgb_brightness={}", diff.rgb_brightness));
+                    }
+                });
+            }
         });
     action
 }

@@ -118,10 +118,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
     // 操作按钮
     ui.horizontal(|ui| {
         let can_connect = !is_online && st.selected.is_some();
-        let connect_btn = egui::Button::new("● 连接")
-            .fill(crate::ui::ACCENT)
-            .corner_radius(egui::CornerRadius::same(6))
-            .min_size(egui::vec2(96.0, 32.0));
+        let connect_btn = egui::Button::new(
+            // 品牌蓝底上白字在两种主题下都可读（浅色主题默认fg是深色）
+            egui::RichText::new("● 连接").color(egui::Color32::WHITE),
+        )
+        .fill(crate::ui::ACCENT)
+        .corner_radius(egui::CornerRadius::same(6))
+        .min_size(egui::vec2(96.0, 32.0));
         if ui.add_enabled(can_connect, connect_btn).clicked() {
             if let Some(name) = st.selected.clone() {
                 match handle.attempt_connect(&name) {
@@ -162,15 +165,33 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
     // 卡片 2：状态 + 自动连接
     crate::ui::card(ui, |ui| {
         ui.horizontal(|ui| {
+            let dark = ui.visuals().dark_mode;
             let (color, text) = match &state {
-                crate::link::ConnectionState::Online => (crate::ui::colors::STATUS_GREEN, "在线"),
+                crate::link::ConnectionState::Online => (
+                    crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::STATUS_GREEN,
+                        crate::ui::colors::STATUS_GREEN_L,
+                    ),
+                    "在线",
+                ),
                 crate::link::ConnectionState::Connecting
-                | crate::link::ConnectionState::Reconnecting => {
-                    (crate::ui::colors::STATUS_YELLOW, "连接中…")
-                }
-                crate::link::ConnectionState::Disconnected => {
-                    (crate::ui::colors::STATUS_GREY, "未连接")
-                }
+                | crate::link::ConnectionState::Reconnecting => (
+                    crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::STATUS_YELLOW,
+                        crate::ui::colors::STATUS_YELLOW_L,
+                    ),
+                    "连接中…",
+                ),
+                crate::link::ConnectionState::Disconnected => (
+                    crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::STATUS_GREY,
+                        crate::ui::colors::STATUS_GREY_L,
+                    ),
+                    "未连接",
+                ),
             };
             crate::ui::status_dot(ui, color);
             ui.strong(text);

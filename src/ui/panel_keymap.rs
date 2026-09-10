@@ -133,7 +133,12 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                 legend_dot(
                     ui,
                     Color32::from_rgb(0x4F, 0x8C, 0xFF),
-                    Color32::WHITE,
+                    // 选中描边在浅色主题下改用近黑：WHITE 描边在白底上不可见。
+                    crate::ui::colors::themed(
+                        ui.visuals().dark_mode,
+                        Color32::WHITE,
+                        Color32::from_rgb(0x1A, 0x1D, 0x24),
+                    ),
                     "已选中",
                 );
                 fun_tag(ui, 1);
@@ -185,7 +190,7 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 10.0;
                                     draw_screen(ui, geom.screen_w, geom.screen_h);
-                                    draw_keyboard(handle, ui, &draft, &snapshot);
+                                    draw_keyboard(handle, ui, &draft, &snapshot, st.edit_channel);
                                     // FUN 分配条贴着键盘布局：分配动作与键帽
                                     // 视觉就近，减少与键名的对照成本。
                                     fun_assignment_bar(handle, ui);
@@ -592,6 +597,17 @@ fn fun_colors(side: u8) -> (Color32, Color32, Color32) {
     }
 }
 
+/// 彩色文字用的 FUN 强调色（随主题）：深色 UI 用亮色强调（fun_colors.1），
+/// 浅色 UI（白底卡片）用加深变体，否则亮琥珀 / 亮青文字在白底上不可读。
+fn fun_text_accent(dark: bool, side: u8) -> Color32 {
+    match (side, dark) {
+        (1, true) => fun_colors(1).1,
+        (2, true) => fun_colors(2).1,
+        (1, false) => Color32::from_rgb(0x9A, 0x62, 0x00),
+        _ => Color32::from_rgb(0x04, 0x6C, 0x7E),
+    }
+}
+
 /// FUN 角标（分配条 / Drawer / 图例共用样式）：FUN1 琥珀、FUN2 青，亮底深字。
 ///
 /// 高度取 `interact_size.y`。注意 egui 的 horizontal 布局会把
@@ -864,7 +880,13 @@ fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
     );
 }
 
-fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snapshot: &KeymapData) {
+fn draw_keyboard(
+    handle: &AppHandle,
+    ui: &mut egui::Ui,
+    draft: &KeymapData,
+    snapshot: &KeymapData,
+    edit_channel: u8,
+) {
     let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
 
@@ -941,6 +963,25 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
         .map(|(p, r, c, _)| ((r, c), p))
         .collect();
 
+    // 有效编辑通道：与 Drawer 的回落逻辑一致 —— FUN 层未分配对应 FUN 键、
+    // 或选中键本身是 FUN 键时，该通道不可编辑，选中边框回落到单击层配色。
+    let is_fun_key_sel = selected.as_ref().map(|k| {
+        phys_map
+            .get(&(k.row, k.col))
+            .copied()
+            .map(|n| {
+                (draft.fun_key1 != 0 && n == draft.fun_key1)
+                    || (draft.fun_key2 != 0 && n == draft.fun_key2)
+            })
+            .unwrap_or(false)
+    });
+    let edit_channel = match (edit_channel.min(2), is_fun_key_sel) {
+        (LAYER_FUN1, Some(true)) | (LAYER_FUN2, Some(true)) => LAYER_BASE,
+        (LAYER_FUN1, _) if draft.fun_key1 == 0 => LAYER_BASE,
+        (LAYER_FUN2, _) if draft.fun_key2 == 0 => LAYER_BASE,
+        (ch, _) => ch,
+    };
+
     for (r_idx, row) in rows.iter().enumerate() {
         if row.is_empty() {
             continue;
@@ -967,6 +1008,7 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
                     snap_bindings,
                     &selected,
                     handle,
+                    edit_channel,
                 );
             } else {
                 let fun = FunKeyInfo {
@@ -992,6 +1034,7 @@ fn draw_keyboard(handle: &AppHandle, ui: &mut egui::Ui, draft: &KeymapData, snap
                     handle,
                     fun,
                     slot_phys,
+                    edit_channel,
                 );
             }
             x += slot.width_units * u_px;
@@ -1020,6 +1063,8 @@ fn draw_key(
     fun: FunKeyInfo,
     // 该键的 physical 编号（不在 11 键内时为 None），用于右键 FUN 分配
     slot_phys: Option<u8>,
+    // Drawer 当前编辑通道（0 = 单击，1 = FUN1，2 = FUN2）：决定选中边框配色
+    edit_channel: u8,
 ) {
     let key_ref = crate::protocol::KeyRef {
         layer: 0,
@@ -1070,12 +1115,19 @@ fn draw_key(
     painter.rect_filled(rect, KEY_RADIUS, fill);
     painter.rect_stroke(rect, KEY_RADIUS, stroke, StrokeKind::Middle);
 
-    // 选中态：外圈叠加一层白色高亮框（不覆盖基础色）
+    // 选中态：外圈叠加一层高亮框（不覆盖基础色）。单击层用白色；
+    // FUN1 / FUN2 通道用对应层色（琥珀 / 青，深底上取强调色），
+    // 与键帽角标 F1 / F2 的层色一致，提示当前正在编辑哪一层。
     if is_sel {
+        let sel_color = match edit_channel {
+            LAYER_FUN1 => fun_colors(1).1,
+            LAYER_FUN2 => fun_colors(2).1,
+            _ => Color32::WHITE,
+        };
         painter.rect_stroke(
             rect.shrink(0.5),
             KEY_RADIUS,
-            Stroke::new(2.0, Color32::WHITE),
+            Stroke::new(2.0, sel_color),
             StrokeKind::Middle,
         );
     }
@@ -1246,6 +1298,8 @@ fn draw_encoder(
     snap_bindings: Option<&std::collections::HashMap<crate::protocol::KeyRef, KeyAction>>,
     selected: &Option<crate::protocol::KeyRef>,
     handle: &AppHandle,
+    // Drawer 当前编辑通道（0 = 单击，1 = FUN1，2 = FUN2）：决定选中圆环配色
+    edit_channel: u8,
 ) {
     let key_ref = crate::protocol::KeyRef {
         layer: 0,
@@ -1287,9 +1341,15 @@ fn draw_encoder(
         radius,
         Stroke::new(if is_pending { 2.0 } else { 1.0 }, ring_color),
     );
-    // 选中态：外圈额外加一圈白色高亮（半径略外移以让描边可见）
+    // 选中态：外圈额外加一圈高亮（半径略外移以让描边可见）。
+    // 配色随编辑通道：单击层白色，FUN1 / FUN2 用对应层色强调色。
     if is_sel {
-        painter.circle_stroke(r.center(), radius + 2.5, Stroke::new(2.0, Color32::WHITE));
+        let sel_color = match edit_channel {
+            LAYER_FUN1 => fun_colors(1).1,
+            LAYER_FUN2 => fun_colors(2).1,
+            _ => Color32::WHITE,
+        };
+        painter.circle_stroke(r.center(), radius + 2.5, Stroke::new(2.0, sel_color));
     }
 
     // 12 段刻度
@@ -1537,13 +1597,19 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                     (LAYER_FUN1, "FUN1"),
                                     (LAYER_FUN2, "FUN2"),
                                 ] {
-                                    // FUN 通道文字沿用各自强调色（FUN1 琥珀 / FUN2 青）
+                                    // FUN 通道文字沿用各自强调色（FUN1 琥珀 / FUN2 青），
+                                    // 浅色主题用加深变体保证白底可读。
+                                    let dark = ui.visuals().dark_mode;
                                     let text = match ch {
                                         LAYER_FUN1 => {
-                                            egui::RichText::new(name).size(12.0).color(fun_colors(1).1)
+                                            egui::RichText::new(name)
+                                                .size(12.0)
+                                                .color(fun_text_accent(dark, 1))
                                         }
                                         LAYER_FUN2 => {
-                                            egui::RichText::new(name).size(12.0).color(fun_colors(2).1)
+                                            egui::RichText::new(name)
+                                                .size(12.0)
+                                                .color(fun_text_accent(dark, 2))
                                         }
                                         _ => egui::RichText::new(name).size(12.0),
                                     };
@@ -1826,17 +1892,28 @@ fn commit_rename(handle: &AppHandle, draft: &mut KeymapData, idx: u8, name: &str
 /// "按任意键捕获" 提示条（激活 / 非激活两态），点击切换进入捕获模式。
 fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
     if st.capture_keyboard {
-        // 激活态：明显的捕获提示条
+        // 激活态：明显的捕获提示条（配色随主题：深色 = 深琥珀底 + 白字，
+        // 浅色 = 浅琥珀底 + 深琥珀字，保证 weak 提示在底色上可读）。
         let pulse = (0.5 + 0.5 * Instant::now().elapsed().as_secs_f32().sin()) as f32;
+        let dark = ui.visuals().dark_mode;
         let border_color = Color32::from_rgb(0xFF, 0xA0, 0x40).gamma_multiply(0.6 + pulse * 0.4);
-        let t = 0.15 + pulse * 0.10;
-        let a = Color32::from_rgb(0x40, 0x28, 0x10);
-        let b = Color32::from_rgb(0xFF, 0xA0, 0x40);
-        let bg_color = Color32::from_rgb(
-            (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
-            (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
-            (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
-        );
+        let bg_color = if dark {
+            let t = 0.15 + pulse * 0.10;
+            let a = Color32::from_rgb(0x40, 0x28, 0x10);
+            let b = Color32::from_rgb(0xFF, 0xA0, 0x40);
+            crate::ui::colors::mix(a, b, t)
+        } else {
+            let t = 0.25 + pulse * 0.15;
+            crate::ui::colors::mix(Color32::WHITE, Color32::from_rgb(0xFF, 0xC8, 0x80), t)
+        };
+        let (title_color, hint_color) = if dark {
+            (Color32::WHITE, Color32::from_rgb(0xD8, 0xC8, 0xA8))
+        } else {
+            (
+                Color32::from_rgb(0x5A, 0x3A, 0x05),
+                Color32::from_rgb(0x8A, 0x6A, 0x38),
+            )
+        };
         egui::Frame::new()
             .fill(bg_color)
             .stroke(Stroke::new(2.0, border_color))
@@ -1855,9 +1932,14 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                         ui.label(
                             egui::RichText::new("正在记录按键…")
                                 .strong()
-                                .color(Color32::WHITE),
+                                .color(title_color),
                         );
-                        ui.label(egui::RichText::new("按 Esc 退出").weak().size(10.0));
+                        // 显式配色：weak() 取主题弱文字色，在异色底上会失配
+                        ui.label(
+                            egui::RichText::new("按 Esc 退出")
+                                .size(10.0)
+                                .color(hint_color),
+                        );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("取消").on_hover_text("退出按键捕获").clicked() {
@@ -2187,57 +2269,63 @@ fn show_keymap_diff_bar(
             bottom: 8,
         })
         .show(ui, |ui| {
+            // 两行布局：标题 + 按钮固定在第一行（右对齐、不被内容挤压），
+            // 明细放在第二行自动换行。避免明细过长时把"同步到设备"按钮
+            // 挤出可视区，导致点击时误点落到按钮位置上的明细文本，也避免
+            // 撑出父面板的横向滚动条。
             ui.horizontal(|ui| {
                 ui.strong(
                     egui::RichText::new(format!("{count} 项待同步到设备"))
                         .color(ui.visuals().warn_fg_color),
                 );
-                ui.separator();
-                egui::ScrollArea::horizontal()
-                    .max_width(420.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for e in diff {
-                                let label = match e {
-                                    KeymapDiffEntry::ActiveProfile(i) => {
-                                        format!("切换到「配置 {i}」")
-                                    }
-                                    KeymapDiffEntry::FunKeys { f1, f2 } => format!(
-                                        "FUN 键 1 → {}，FUN 键 2 → {}",
-                                        fun_name(*f1),
-                                        fun_name(*f2)
-                                    ),
-                                    KeymapDiffEntry::Binding { key, from, to } => {
-                                        let layer_tag = match key.layer {
-                                            LAYER_FUN1 => "FUN1 组合：",
-                                            LAYER_FUN2 => "FUN2 组合：",
-                                            _ => "",
-                                        };
-                                        format!(
-                                            "{layer_tag}第 {} 行 第 {} 列：{} → {}",
-                                            key.row,
-                                            key.col,
-                                            from.label(),
-                                            to.label()
-                                        )
-                                    }
-                                };
-                                ui.label(label);
-                            }
-                        });
-                    });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("放弃修改（Esc）").clicked() {
                         action = KeymapDiffAction::Discard;
                     }
-                    let apply_btn = egui::Button::new("同步到设备（Ctrl+Enter）")
-                        .fill(crate::ui::ACCENT)
-                        .corner_radius(egui::CornerRadius::same(6));
+                    let apply_btn = egui::Button::new(
+                        egui::RichText::new("同步到设备（Ctrl+Enter）").color(egui::Color32::WHITE),
+                    )
+                    .fill(crate::ui::ACCENT)
+                    .corner_radius(egui::CornerRadius::same(6));
                     if ui.add_enabled(count > 0, apply_btn).clicked() {
                         action = KeymapDiffAction::Apply;
                     }
                 });
             });
+            if count > 0 {
+                ui.add_space(4.0);
+                // 横向自动换行展示，不用 ScrollArea：内容永远不会超出面板宽度。
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for e in diff {
+                        let label = match e {
+                            KeymapDiffEntry::ActiveProfile(i) => {
+                                format!("切换到「配置 {i}」")
+                            }
+                            KeymapDiffEntry::FunKeys { f1, f2 } => format!(
+                                "FUN 键 1 → {}，FUN 键 2 → {}",
+                                fun_name(*f1),
+                                fun_name(*f2)
+                            ),
+                            KeymapDiffEntry::Binding { key, from, to } => {
+                                let layer_tag = match key.layer {
+                                    LAYER_FUN1 => "FUN1 组合：",
+                                    LAYER_FUN2 => "FUN2 组合：",
+                                    _ => "",
+                                };
+                                format!(
+                                    "{layer_tag}第 {} 行 第 {} 列：{} → {}",
+                                    key.row,
+                                    key.col,
+                                    from.label(),
+                                    to.label()
+                                )
+                            }
+                        };
+                        ui.label(label);
+                    }
+                });
+            }
         });
     action
 }

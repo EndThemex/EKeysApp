@@ -79,10 +79,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                 {
                     handle.log.clear();
                 }
-                let copy_btn =
-                    egui::Button::new(format!("{}  复制全部", crate::ui::icons::r::COPY))
-                        .fill(crate::ui::ACCENT)
-                        .corner_radius(egui::CornerRadius::same(6));
+                let copy_btn = egui::Button::new(
+                    egui::RichText::new(format!("{}  复制全部", crate::ui::icons::r::COPY))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(crate::ui::ACCENT)
+                .corner_radius(egui::CornerRadius::same(6));
                 if ui.add(copy_btn).clicked() {
                     let snapshot = handle.log.snapshot();
                     let text = render_entries_text(&snapshot, st);
@@ -137,13 +139,40 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     continue;
                 }
 
+                // 日志配色按主题取色：原色按深底调亮，白底下不可读
+                // （FW_INFO / APP 近白，TX 低对比）。
+                let dark = ui.visuals().dark_mode;
                 let color = match e.kind {
-                    LogKind::Tx => crate::ui::colors::TX,
-                    LogKind::Rx => crate::ui::colors::RX,
-                    LogKind::Firmware if e.text.contains("[E]") => crate::ui::colors::FW_ERROR,
-                    LogKind::Firmware if e.text.contains("[W]") => crate::ui::colors::FW_WARN,
-                    LogKind::Firmware => crate::ui::colors::FW_INFO,
-                    LogKind::App => crate::ui::colors::APP,
+                    LogKind::Tx => crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::TX,
+                        crate::ui::colors::TX_L,
+                    ),
+                    LogKind::Rx => crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::RX,
+                        crate::ui::colors::RX_L,
+                    ),
+                    LogKind::Firmware if e.text.contains("[E]") => crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::FW_ERROR,
+                        crate::ui::colors::FW_ERROR_L,
+                    ),
+                    LogKind::Firmware if e.text.contains("[W]") => crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::FW_WARN,
+                        crate::ui::colors::FW_WARN_L,
+                    ),
+                    LogKind::Firmware => crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::FW_INFO,
+                        crate::ui::colors::FW_INFO_L,
+                    ),
+                    LogKind::App => crate::ui::colors::themed(
+                        dark,
+                        crate::ui::colors::APP,
+                        crate::ui::colors::APP_L,
+                    ),
                 };
                 let arrow = match e.kind {
                     LogKind::Tx => crate::ui::icons::LOG_TX,
@@ -222,9 +251,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
             out.inner_rect.right_bottom() - egui::vec2(size.x + margin, size.y + margin),
             size,
         );
-        let btn = egui::Button::new(egui::RichText::new(label).strong())
-            .fill(crate::ui::ACCENT)
-            .corner_radius(egui::CornerRadius::same(6));
+        let btn = egui::Button::new(
+            egui::RichText::new(label)
+                .strong()
+                .color(egui::Color32::WHITE),
+        )
+        .fill(crate::ui::ACCENT)
+        .corner_radius(egui::CornerRadius::same(6));
         if ui.put(rect, btn).clicked() {
             st.jump_to_latest = true;
         }
