@@ -61,7 +61,14 @@ fn main() -> eframe::Result {
     if let Some([w, h]) = cfg.window_size {
         options.viewport.inner_size = Some(Vec2::new(w, h));
     }
+    // 最小尺寸：保留原 960x600 不变；最大尺寸限制在 1600x1000，
+    // 避免 Drawer 自适应宽度后窗口被无限拉大（左侧键盘图有 MAX_LEFT_W=560
+    // 上限，过大的窗口会让 Drawer 内的内容反而显得空旷）。
     options.viewport.min_inner_size = Some(Vec2::new(960.0, 600.0));
+    options.viewport.max_inner_size = Some(Vec2::new(1600.0, 1000.0));
+    // 启动时窗口居中（基于屏幕工作区）。仅影响初始化位置，
+    // 用户后续拖动 / 最大化都会保留系统记忆。
+    options.centered = true;
     options.viewport.icon = load_icon();
 
     eframe::run_native(
