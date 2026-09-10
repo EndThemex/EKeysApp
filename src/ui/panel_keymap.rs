@@ -20,14 +20,24 @@ use crate::protocol::{
 use crate::state::AppHandle;
 
 const ROW_COUNT: usize = 3;
-/// 1u 基础像素宽度（键盘图整体尺寸缩放系数）
-const UNIT_PX: f32 = 34.0;
 const KEY_GAP: f32 = 4.0;
 const ROW_GAP: f32 = 4.0;
 /// 1.25u / 1.5u 等非整数宽度按键的圆角微调
 const KEY_RADIUS: f32 = 5.0;
 /// 左侧外壳最大宽度（含左右 14px 内边距），超过后不再随窗口放大
 const MAX_LEFT_W: f32 = 560.0;
+/// 抽屉最小宽度，低于时不再缩小（避免长键名被横向裁断）
+const MIN_DRAWER_W: f32 = 360.0;
+const MAX_DRAWER_W: f32 = 460.0;
+
+/// 主区几何参数：左侧外壳（屏幕+键盘）与右侧抽屉各占多少。
+struct KeymapGeometry {
+    drawer_w: f32,
+    left_w: f32,
+    left_h: f32,
+    screen_w: f32,
+    screen_h: f32,
+}
 
 #[derive(Default)]
 pub struct KeymapPanelState {
@@ -43,137 +53,159 @@ pub struct KeymapPanelState {
     pub profile_name_edit: String,
 }
 
-pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
-    ui.heading("按键映射");
-    ui.label(
-        egui::RichText::new("为每个按键自定义触发行为：可设为普通键、组合键、文本片段或内置功能")
-            .weak()
-            .size(11.0),
-    );
-    ui.add_space(6.0);
+/// Keymap 页面：上 / 中 / 下 三段式布局。
+///
+/// - 上（`TopBottomPanel::top`）：页面标题 + 顶部控制条 + 图例，停靠固定。
+/// - 中（`CentralPanel`）：键盘图 + 右侧 Drawer；外层保留 ScrollArea，
+///   窗口高度不足时主区可滚动。
+/// - 下（`TopBottomPanel::bottom`）：DiffPreviewBar 同步下发区，
+///   固定在全局状态栏上方，宽度变化时随窗口收放。
+pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) {
+    // 调用顺序很关键：先注册 `keymap-diff` 底部 panel，再注册 `CentralPanel`。
+    // 这样 CentralPanel 内部读取 `ui.available_height()` 时，已经能看到
+    // 底部下发区所占用的视觉矩形，`band_h` = 中间区域实际可用高度。
+    // 若顺序反过来，底部 panel 占用的高度不会被减去，Drawer 会向下溢出并
+    // 被 `keymap-diff` 顶部 padding 遮挡。
+    //
+    // 下：DiffPreviewBar 同步下发区（停靠在状态栏上方）
+    egui::TopBottomPanel::bottom("keymap-diff")
+        .frame(egui::Frame::new().inner_margin(egui::Margin {
+            left: 4,
+            right: 4,
+            top: 4,
+            bottom: 4,
+        }))
+        .show(ctx, |ui| {
+            let snapshot = handle.keymap.lock().unwrap().clone();
+            let draft = handle.keymap_draft.lock().unwrap().clone();
+            let diff = draft.diff_bindings(&snapshot);
+            let action = show_keymap_diff_bar(ui, &diff);
+            handle_keymap_diff_action(handle, action, &diff, &draft, &snapshot);
+        });
 
-    // 顶部控制条：Profile 选择 + 操作按钮
-    top_controls(handle, ui, st);
-    ui.separator();
-    ui.add_space(4.0);
-
-    // 图例
-    ui.horizontal(|ui| {
-        legend_dot(
-            ui,
-            Color32::from_rgb(0x28, 0x2C, 0x36),
-            Color32::from_rgb(0x44, 0x4A, 0x55),
-            "未设置",
-        );
-        legend_dot(
-            ui,
-            Color32::from_rgb(0x2C, 0x46, 0x7A),
-            Color32::from_rgb(0x6A, 0x88, 0xC0),
-            "已同步",
-        );
-        legend_dot(
-            ui,
-            Color32::from_rgb(0xC0, 0x80, 0x20),
-            Color32::from_rgb(0xFF, 0xC8, 0x60),
-            "待同步",
-        );
-        legend_dot(
-            ui,
-            Color32::from_rgb(0x4F, 0x8C, 0xFF),
-            Color32::WHITE,
-            "已选中",
-        );
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("右上角的琥珀小点表示该按键存在尚未同步的修改")
+    // 上：标题 + 控制条 + 图例（停靠固定）
+    egui::TopBottomPanel::top("keymap-header")
+        .frame(egui::Frame::new().inner_margin(egui::Margin {
+            left: 4,
+            right: 4,
+            top: 4,
+            bottom: 4,
+        }))
+        .show(ctx, |ui| {
+            ui.heading("按键映射");
+            ui.label(
+                egui::RichText::new(
+                    "为每个按键自定义触发行为：可设为普通键、组合键、文本片段或内置功能",
+                )
                 .weak()
                 .size(11.0),
-        );
-    });
-    ui.add_space(4.0);
+            );
+            ui.add_space(6.0);
 
-    // 主体：左侧键盘图，右侧 Drawer
-    let snapshot = handle.keymap.lock().unwrap().clone();
-    let draft = handle.keymap_draft.lock().unwrap().clone();
-    let diff = draft.diff_bindings(&snapshot);
+            // 顶部控制条：Profile 选择 + 操作按钮
+            top_controls(handle, ui, st);
+            ui.separator();
+            ui.add_space(4.0);
 
-    let avail = ui.available_size();
-    // Drawer 固定 320 宽；左侧（屏幕 + 键盘）占据剩下的空间。
-    let drawer_w = 320.0_f32.min((avail.x - 32.0).max(360.0));
-    // 左侧外壳宽度受可用空间 + MAX_LEFT_W 双约束，避免窗口过大时无限放大。
-    let left_w = ((avail.x - drawer_w - 24.0).max(360.0)).min(MAX_LEFT_W);
-    // 外壳左右各 14px 内边距，实际可用内容宽度 = left_w - 28。
-    // 屏幕按 428:124 等比缩放至该内容宽度。
-    let screen_w = left_w - 28.0;
-    let screen_h = (screen_w * (124.0 / 428.0)).round();
-    // 键盘外壳高度按实际键数据精确计算：3 行键 + 行间距 + 上下 padding + 顶部文字位。
-    // u_px 由"单行 units 最大值"推导，使 1u 键宽 = 高（正方形），
-    // 外壳高度随之紧贴实际键区，底部不留空白。
-    let key_padding = 10.0;
-    let top_text_h = 14.0;
-    let kb_inner_w = screen_w - key_padding * 2.0;
-    let max_row_units: f32 = draft
-        .profile(draft.active_profile)
-        .or_else(|| draft.profiles.first())
-        .and_then(|p| p.layers.iter().find(|l| l.index == 0))
-        .map(|layer| {
-            let mut mx = 0.0_f32;
-            for r in 0..ROW_COUNT {
-                let sum: f32 = layer
-                    .slots
-                    .iter()
-                    .filter(|s| s.row as usize == r)
-                    .map(|s| s.width_units)
-                    .sum();
-                if sum > mx {
-                    mx = sum;
-                }
-            }
-            mx
-        })
-        .unwrap_or(4.0);
-    let u_px = if max_row_units > 0.0 {
-        (kb_inner_w / max_row_units).max(8.0)
-    } else {
-        32.0
-    };
-    let keyboard_h = key_padding * 2.0 + top_text_h + ROW_COUNT as f32 * u_px;
-    let left_h = screen_h + 10.0 + keyboard_h + 28.0;
+            // 图例
+            ui.horizontal(|ui| {
+                legend_dot(
+                    ui,
+                    Color32::from_rgb(0x28, 0x2C, 0x36),
+                    Color32::from_rgb(0x44, 0x4A, 0x55),
+                    "未设置",
+                );
+                legend_dot(
+                    ui,
+                    Color32::from_rgb(0x2C, 0x46, 0x7A),
+                    Color32::from_rgb(0x6A, 0x88, 0xC0),
+                    "已同步",
+                );
+                legend_dot(
+                    ui,
+                    Color32::from_rgb(0xC0, 0x80, 0x20),
+                    Color32::from_rgb(0xFF, 0xC8, 0x60),
+                    "待同步",
+                );
+                legend_dot(
+                    ui,
+                    Color32::from_rgb(0x4F, 0x8C, 0xFF),
+                    Color32::WHITE,
+                    "已选中",
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("右上角的琥珀小点表示该按键存在尚未同步的修改")
+                        .weak()
+                        .size(11.0),
+                );
+            });
+            ui.add_space(4.0);
+        });
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
+    // 中：键盘图 + Drawer；外层 ScrollArea 保留以便窗口太矮时滚动
+    egui::CentralPanel::default().show(ctx, |ui| {
+        let snapshot = handle.keymap.lock().unwrap().clone();
+        let draft = handle.keymap_draft.lock().unwrap().clone();
+        let _diff = draft.diff_bindings(&snapshot);
 
-        // 左：屏幕占位 + 键盘图（统一外壳框起来作为整机外观）
-        ui.allocate_ui(Vec2::new(left_w, left_h), |ui| {
-            egui::Frame::new()
-                .fill(Color32::from_rgb(0x14, 0x17, 0x1E))
-                .stroke(Stroke::new(1.5, Color32::from_rgb(0x32, 0x38, 0x44)))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin {
-                    left: 14,
-                    right: 14,
-                    top: 14,
-                    bottom: 14,
-                })
-                .show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 10.0;
-                        draw_screen(ui, screen_w, screen_h);
-                        draw_keyboard(handle, ui, &draft, &snapshot);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // 水平两段：左 = 键盘外壳（按几何参数固定宽高），
+                // 右 = Drawer（占满中间区域剩余高度，与键盘外壳解耦）。
+                let geom = compute_keymap_geometry(ui.available_size(), &draft);
+                let band_h = ui.available_height();
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+
+                    // ─── 左：屏幕占位 + 键盘图 ───
+                    ui.allocate_ui(Vec2::new(geom.left_w, geom.left_h), |ui| {
+                        egui::Frame::new()
+                            .fill(Color32::from_rgb(0x14, 0x17, 0x1E))
+                            .stroke(Stroke::new(1.5, Color32::from_rgb(0x32, 0x38, 0x44)))
+                            .corner_radius(egui::CornerRadius::same(14))
+                            .inner_margin(egui::Margin {
+                                left: 14,
+                                right: 14,
+                                top: 14,
+                                bottom: 14,
+                            })
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 10.0;
+                                    draw_screen(ui, geom.screen_w, geom.screen_h);
+                                    draw_keyboard(handle, ui, &draft, &snapshot);
+                                });
+                            });
+                    });
+
+                    // ─── 右：按键功能 Drawer ───
+                    // 直接把 `band_h` 全部给 `drawer`：`drawer` 内部 `card`
+                    // Frame 的 inner_margin(top+bottom=24) 会由 egui 自动从
+                    // 分配高度中扣除，无需在外层手动再减一次。
+                    //
+                    // 底部固定 DiffPreviewBar 由独立 TopBottomPanel 占据，
+                    // 并已在本函数开头先于 CentralPanel 注册，所以
+                    // `band_h` 已经自动扣除了下发区高度。
+                    ui.allocate_ui(Vec2::new(geom.drawer_w, band_h), |ui| {
+                        drawer(ui, handle, st, &draft);
                     });
                 });
-        });
-
-        // 右：功能分配 Drawer —— 给定宽度 + **撑满剩余高度**，内容超出滚动
-        let drawer_h = (avail.y - 90.0).max(240.0);
-        ui.allocate_ui(Vec2::new(drawer_w, drawer_h), |ui| {
-            drawer(ui, handle, st, &draft);
-        });
+            });
     });
+}
 
-    // 底部：DiffPreviewBar
-    ui.add_space(8.0);
-    let action = show_keymap_diff_bar(ui, &diff);
+/// DiffPreviewBar 的 Apply / Discard 副作用处理（从 show 抽出，便于底部
+/// panel 调用，保持原 Apply / Discard 语义不变）。
+fn handle_keymap_diff_action(
+    handle: &AppHandle,
+    action: KeymapDiffAction,
+    diff: &[crate::protocol::KeymapDiffEntry],
+    draft: &crate::protocol::KeymapData,
+    snapshot: &crate::protocol::KeymapData,
+) {
     match action {
         KeymapDiffAction::Apply => {
             // 0x06 SET 写入固件**当前激活 Profile** 的 keymap：设备激活档与
@@ -218,7 +250,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
             if success {
                 // 固件 ACK 后才落本地快照，避免失败时 UI 状态与实际不符
                 let mut snap = handle.keymap.lock().unwrap();
-                snap.apply_diff(&diff);
+                snap.apply_diff(diff);
                 handle.log_kind(
                     crate::state::LogKind::Tx,
                     format!("下发键映射 → {} 项变更", diff.len()),
@@ -238,6 +270,60 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState) {
             *handle.keymap_draft.lock().unwrap() = snapshot.clone();
         }
         KeymapDiffAction::None => {}
+    }
+}
+
+/// 计算 Keymap 主区的几何尺寸：
+/// - Drawer 固定 360 宽（不再写死 320，避免长键名被裁断）；左侧按可用空间 +
+///   MAX_LEFT_W 双约束。
+/// - 屏幕按 428:124 等比缩放至内容宽度。
+/// - 键盘高度按 3 行键 + 行间距 + 上下 padding + 顶部文字位精确计算，
+///   1u 键宽 = 高（正方形），底部不留空白。
+fn compute_keymap_geometry(avail: Vec2, draft: &KeymapData) -> KeymapGeometry {
+    // 抽屉最小 360 宽，左侧外壳宽度 = 可用 - 抽屉 - 间距，上限 MAX_LEFT_W。
+    let drawer_w = (avail.x - 410.0).min(MAX_DRAWER_W);
+    let left_w = ((avail.x - drawer_w - 24.0).max(MIN_DRAWER_W)).min(MAX_LEFT_W);
+    // 外壳左右各 14px 内边距，内容宽度 = left_w - 28。
+    let screen_w = left_w - 28.0;
+    let screen_h = (screen_w * (124.0 / 428.0)).round();
+    // 键盘外壳高度：3 行键 + 行间距 + 上下 padding + 顶部文字位。
+    let key_padding = 10.0;
+    let top_text_h = 14.0;
+    let kb_inner_w = screen_w - key_padding * 2.0;
+    let max_row_units: f32 = draft
+        .profile(draft.active_profile)
+        .or_else(|| draft.profiles.first())
+        .and_then(|p| p.layers.iter().find(|l| l.index == 0))
+        .map(|layer| {
+            let mut mx = 0.0_f32;
+            for r in 0..ROW_COUNT {
+                let sum: f32 = layer
+                    .slots
+                    .iter()
+                    .filter(|s| s.row as usize == r)
+                    .map(|s| s.width_units)
+                    .sum();
+                if sum > mx {
+                    mx = sum;
+                }
+            }
+            mx
+        })
+        .unwrap_or(4.0);
+    let u_px = if max_row_units > 0.0 {
+        (kb_inner_w / max_row_units).max(8.0)
+    } else {
+        32.0
+    };
+    let keyboard_h = key_padding * 2.0 + top_text_h + ROW_COUNT as f32 * u_px;
+    // 外壳总高 = 屏幕 + 间距 + 键盘区 + 底部 padding；与原结构保持一致。
+    let left_h = screen_h + 10.0 + keyboard_h + 28.0;
+    KeymapGeometry {
+        drawer_w,
+        left_w,
+        left_h,
+        screen_w,
+        screen_h,
     }
 }
 
@@ -852,13 +938,11 @@ fn draw_encoder(
 fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draft: &KeymapData) {
     let selected = handle.selected_key.lock().unwrap().clone();
     crate::ui::card(ui, |ui| {
-        // 高度撑满父容器
-        ui.set_min_height(ui.available_height());
+        // Drawer 占满调用方分配的高度（中间区域剩余高度）；
+        // 内部 ScrollArea 在内容超出时独立滚动，与左侧键盘外壳完全解耦。
         ui.vertical(|ui| {
-            // 内容超出时滚动，避免子控件被截断
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_height(ui.available_height() - 6.0)
                 .show(ui, |ui| {
                     ui.strong("按键功能");
                     ui.add_space(4.0);
@@ -1523,6 +1607,3 @@ fn show_keymap_diff_bar(ui: &mut egui::Ui, diff: &[KeymapDiffEntry]) -> KeymapDi
         });
     action
 }
-
-#[allow(dead_code)]
-const _: Vec2 = Vec2::new(UNIT_PX, UNIT_PX);

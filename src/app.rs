@@ -374,33 +374,39 @@ impl eframe::App for WxiApp {
                 statusbar::show(&self.handle, ui);
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // 外层统一加垂直滚动：保证任何面板在窗口缩到很窄 / 很高时都不会
-            // 被截断——页面内部已经自带 ScrollArea 的（Settings/WiFi/Voice/
-            // Lighting/Log）会被两层滚动自然组合；其它面板的内容超出可视区
-            // 时直接滚动显示。
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let page = *self.handle.page.lock().unwrap();
-                    match page {
-                        Page::Connect => {
-                            panel_connection::show(&self.handle, ui, &mut self.connect_st)
+        // Keymap 页面自带 top/central/bottom 三段（同步下发区固定在状态栏上方），
+        // 必须在最外层 ctx 上注册面板，不能套在 CentralPanel + ScrollArea 里。
+        if matches!(*self.handle.page.lock().unwrap(), Page::Keymap) {
+            panel_keymap::show(ctx, &self.handle, &mut self.keymap_st);
+        } else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // 外层统一加垂直滚动：保证任何面板在窗口缩到很窄 / 很高时都不会
+                // 被截断——页面内部已经自带 ScrollArea 的（Settings/WiFi/Voice/
+                // Lighting/Log）会被两层滚动自然组合；其它面板的内容超出可视区
+                // 时直接滚动显示。
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let page = *self.handle.page.lock().unwrap();
+                        match page {
+                            Page::Connect => {
+                                panel_connection::show(&self.handle, ui, &mut self.connect_st)
+                            }
+                            Page::Settings => {
+                                panel_settings::show(&self.handle, ui, &mut self.settings_st)
+                            }
+                            Page::Keymap => unreachable!(),
+                            Page::Lighting => {
+                                panel_lighting::show(&self.handle, ui, &mut self.lighting_st)
+                            }
+                            Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
+                            Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
+                            Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
+                            Page::About => panel_about::show(&self.handle, ui),
                         }
-                        Page::Settings => {
-                            panel_settings::show(&self.handle, ui, &mut self.settings_st)
-                        }
-                        Page::Keymap => panel_keymap::show(&self.handle, ui, &mut self.keymap_st),
-                        Page::Lighting => {
-                            panel_lighting::show(&self.handle, ui, &mut self.lighting_st)
-                        }
-                        Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
-                        Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
-                        Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
-                        Page::About => panel_about::show(&self.handle, ui),
-                    }
-                });
-        });
+                    });
+            });
+        }
 
         if self.confirm_open {
             let outcome = show_confirm(
