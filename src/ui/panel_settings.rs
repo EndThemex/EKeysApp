@@ -1,6 +1,7 @@
 //! P2 Settings 页面：核心面板。
 
 use eframe::egui;
+use std::sync::Arc;
 
 use crate::protocol::DeviceSettings;
 use crate::state::{AppHandle, UiConfirmKind, UiEvent};
@@ -16,6 +17,9 @@ pub enum SettingsTab {
     /// PC 状态 tab：主机侧行为配置（推送开关 + 实时采集快照展示）。
     /// 不参与 `DeviceSettings` 的 diff / 下发，写入 `local_config` 持久化。
     PcStatus,
+    /// 固件升级 tab：选择本地 `.bin` → 本机临时 HTTP 服务 → `0x0B` 触发设备 OTA。
+    /// 同样不参与 `DeviceSettings` 的 diff / 下发。
+    Firmware,
 }
 
 impl SettingsTab {
@@ -26,6 +30,7 @@ impl SettingsTab {
             SettingsTab::Audio => "音频",
             SettingsTab::Power => "电源",
             SettingsTab::PcStatus => "PC 状态",
+            SettingsTab::Firmware => "固件升级",
         }
     }
 
@@ -36,6 +41,7 @@ impl SettingsTab {
             SettingsTab::Audio => crate::ui::icons::TAB_AUDIO,
             SettingsTab::Power => crate::ui::icons::TAB_POWER,
             SettingsTab::PcStatus => crate::ui::icons::TAB_PC,
+            SettingsTab::Firmware => crate::ui::icons::TAB_FIRMWARE,
         }
     }
 }
@@ -52,6 +58,29 @@ pub struct SettingsPanelState {
     pub pc_status_snapshot_at: Option<std::time::Instant>,
     /// PC 状态 tab 当前展示的快照缓存（None 表示尚未采集）
     pub pc_status_snapshot: Option<crate::protocol::PcStatus>,
+    // ---- 固件升级 tab ----
+    /// 已选固件文件路径（展示用）
+    pub fw_path: String,
+    /// 已读入内存的固件内容（HTTP 服务直接回这段字节）
+    pub fw_bytes: Option<Arc<Vec<u8>>>,
+    /// 固件 MD5（32 位 hex）
+    pub fw_md5: String,
+    /// 固件大小（字节）
+    pub fw_size: u64,
+    /// 本机临时固件 HTTP 服务（Some = OTA 进行中）
+    pub fw_server: Option<crate::ota::FirmwareServer>,
+    /// 固件信息查询的异步结果接收端（Some = 查询进行中，每帧轮询）
+    pub fw_query_rx:
+        Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
+    /// OTA 触发请求的异步结果接收端（Some = 等待设备确认，每帧轮询）
+    pub fw_ota_rx:
+        Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
+    /// 本次 OTA 的下载 URL（成功后状态文案展示用）
+    pub fw_url: String,
+    /// OTA 状态文案（None = 无）
+    pub fw_status: Option<String>,
+    /// 状态是否为错误（控制显示颜色）
+    pub fw_status_is_err: bool,
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
@@ -96,6 +125,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
             SettingsTab::Audio,
             SettingsTab::Power,
             SettingsTab::PcStatus,
+            SettingsTab::Firmware,
         ] {
             let selected = st.tab == t;
             // IconTextButton 自动按 Phosphor/Proportional 分字体渲染，
@@ -126,6 +156,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
         SettingsTab::Audio => audio_tab(ui, snap, draft),
         SettingsTab::Power => power_tab(ui, snap, draft),
         SettingsTab::PcStatus => pc_status_tab(ui, snap, st, handle),
+        SettingsTab::Firmware => firmware_tab(ui, st, handle),
     });
 }
 
@@ -559,6 +590,371 @@ fn network_label(v: Option<bool>) -> String {
         Some(true) => "已连接".into(),
         Some(false) => "未连接".into(),
         None => "（未采集）".into(),
+    }
+}
+
+/// 固件升级 tab：选择本地 `.bin` → 计算并展示 MD5 → 本机起临时 HTTP 服务 →
+/// `0x0B CMD_FIRMWARE_INFO` 下发 `url` + `checksum` 触发设备 OTA
+/// （固件端实现见 EKeys `src/upgrade/Upgrade.cpp`：流式下载、边下边校验 MD5，
+/// 校验失败不影响当前固件，成功自动重启）。
+///
+/// 前置条件：设备已通过 Wi-Fi 页连接到与 PC 相同的局域网（设备走 HTTP 下载）。
+fn firmware_tab(
+    ui: &mut egui::Ui,
+    st: &mut SettingsPanelState,
+    handle: &AppHandle,
+) {
+    use crate::protocol::CMD_FIRMWARE_INFO;
+    use std::time::Duration;
+    use std::sync::mpsc::TryRecvError;
+
+    let online = handle.state.lock().unwrap().is_online();
+
+    // ---- 异步结果回收（避免同步 request 阻塞 UI 线程导致窗口卡死）----
+
+    // 固件信息查询结果
+    if st.fw_query_rx.is_some() {
+        let outcome = st.fw_query_rx.as_ref().unwrap().try_recv();
+        match outcome {
+            Ok(Ok(frame)) => {
+                if let Some(v) = frame.extra_value("firmware") {
+                    match serde_json::from_value::<crate::protocol::FirmwareInfo>(v.clone())
+                    {
+                        Ok(fw) => {
+                            handle.device_info.lock().unwrap().firmware_version =
+                                fw.version.clone();
+                            handle.log_kind(
+                                crate::state::LogKind::Rx,
+                                format!(
+                                    "GET → 固件信息 v{}（{} {}）",
+                                    fw.version, fw.build_date, fw.build_time
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            handle.log_kind(
+                                crate::state::LogKind::App,
+                                format!("固件信息解析失败: {e}"),
+                            );
+                        }
+                    }
+                } else {
+                    handle.log_kind(crate::state::LogKind::App, "固件信息响应缺 firmware 字段");
+                }
+                st.fw_query_rx = None;
+            }
+            Ok(Err(e)) => {
+                handle.log_kind(
+                    crate::state::LogKind::App,
+                    format!("查询固件信息失败: {e}"),
+                );
+                st.fw_query_rx = None;
+            }
+            Err(TryRecvError::Empty) => {} // 仍在等待，下一帧继续
+            Err(TryRecvError::Disconnected) => {
+                st.fw_query_rx = None;
+            }
+        }
+    }
+
+    // OTA 触发结果（设备确认 or 拒绝）
+    if st.fw_ota_rx.is_some() {
+        let outcome = st.fw_ota_rx.as_ref().unwrap().try_recv();
+        match outcome {
+            Ok(Ok(frame)) => {
+                if frame.status() == Some(0) {
+                    st.fw_status = Some(format!(
+                        "设备已确认，正在从本机下载固件（{}）…下载并校验通过后自动重启，全程约 1~2 分钟",
+                        st.fw_url
+                    ));
+                    st.fw_status_is_err = false;
+                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                        crate::state::ToastKind::Success,
+                        "OTA 已触发，设备开始下载固件".to_string(),
+                    ));
+                    handle.log_kind(
+                        crate::state::LogKind::Tx,
+                        format!("OTA → {}", st.fw_url),
+                    );
+                } else {
+                    let msg = frame.error.unwrap_or_else(|| "设备拒绝升级".to_string());
+                    if let Some(mut srv) = st.fw_server.take() {
+                        srv.stop();
+                    }
+                    st.fw_status = Some(format!("升级失败：{msg}"));
+                    st.fw_status_is_err = true;
+                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                        crate::state::ToastKind::Error,
+                        format!("升级失败：{msg}"),
+                    ));
+                }
+                st.fw_ota_rx = None;
+            }
+            Ok(Err(e)) => {
+                if let Some(mut srv) = st.fw_server.take() {
+                    srv.stop();
+                }
+                st.fw_status = Some(format!("升级请求失败：{e}"));
+                st.fw_status_is_err = true;
+                let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                    crate::state::ToastKind::Error,
+                    format!("升级请求失败：{e}"),
+                ));
+                st.fw_ota_rx = None;
+            }
+            Err(TryRecvError::Empty) => {} // 等待设备确认中（最多 3s）
+            Err(TryRecvError::Disconnected) => {
+                st.fw_ota_rx = None;
+            }
+        }
+    }
+
+    ui.group(|ui| {
+        ui.strong("当前固件");
+        ui.add_space(2.0);
+        let info = handle.device_info.lock().unwrap();
+        egui::Grid::new("fw-info-grid")
+            .num_columns(2)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("设备名称");
+                ui.label(if info.device_name.is_empty() {
+                    "（未知）"
+                } else {
+                    &info.device_name
+                });
+                ui.end_row();
+                ui.label("固件版本");
+                ui.label(if info.firmware_version.is_empty() {
+                    "（未知）"
+                } else {
+                    &info.firmware_version
+                });
+                ui.end_row();
+            });
+        // 异步查询：请求发出后立即返回，结果由上方每帧轮询回收
+        let querying = st.fw_query_rx.is_some();
+        if ui
+            .add_enabled(
+                online && !querying,
+                egui::Button::new(if querying {
+                    "查询中…"
+                } else {
+                    "查询固件信息"
+                }),
+            )
+            .clicked()
+        {
+            st.fw_query_rx = handle.with_link(|lm| {
+                lm.request_async(CMD_FIRMWARE_INFO, None, Duration::from_millis(2000))
+            });
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.group(|ui| {
+        ui.strong("固件升级（OTA）");
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(
+                "选择固件文件后，应用会在本机临时开启一个 HTTP 服务，\
+                 设备通过 Wi-Fi 下载并自动校验 MD5。升级期间请保持设备供电、\
+                 不要断开 Wi-Fi；成功后设备会自动重启进入新固件。",
+            )
+            .weak(),
+        );
+        ui.add_space(4.0);
+
+        // 1) 选择固件文件
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut st.fw_path)
+                    .hint_text("点击「浏览…」选择 .bin 固件文件")
+                    .desired_width(280.0),
+            );
+            if ui.button("浏览…").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("固件文件", &["bin"])
+                    .pick_file()
+                {
+                    pick_firmware_file(handle, st, &path);
+                }
+            }
+        });
+        if st.fw_bytes.is_some() {
+            ui.label(format!(
+                "大小：{} 字节（{:.1} KB）",
+                st.fw_size,
+                st.fw_size as f64 / 1024.0
+            ));
+            ui.monospace(format!("MD5：{}", st.fw_md5));
+        }
+
+        ui.add_space(6.0);
+
+        // 2) 触发升级
+        let ready = online
+            && st.fw_bytes.is_some()
+            && st.fw_ota_rx.is_none()
+            && st.fw_query_rx.is_none();
+        ui.horizontal(|ui| {
+            let starting = st.fw_ota_rx.is_some();
+            if ui
+                .add_enabled(
+                    ready,
+                    egui::Button::new(if starting {
+                        "等待设备确认…"
+                    } else {
+                        "开始升级"
+                    }),
+                )
+                .on_disabled_hover_text(if !online {
+                    "设备未连接"
+                } else if st.fw_bytes.is_none() {
+                    "请先选择固件文件"
+                } else {
+                    "正在处理中"
+                })
+                .clicked()
+            {
+                start_ota(handle, st);
+            }
+            if (st.fw_server.is_some() || starting) && ui.button("取消升级").clicked() {
+                if let Some(mut srv) = st.fw_server.take() {
+                    srv.stop();
+                }
+                st.fw_ota_rx = None;
+                st.fw_status = Some("已取消：本地下载服务已关闭".into());
+                st.fw_status_is_err = false;
+            }
+        });
+
+        // 3) 状态展示
+        if let Some(status) = &st.fw_status {
+            ui.add_space(4.0);
+            let text = egui::RichText::new(status);
+            ui.label(if st.fw_status_is_err {
+                text.color(egui::Color32::from_rgb(0xE5, 0x6C, 0x5C))
+            } else {
+                text
+            });
+        }
+        if !online {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "提示：设备未连接。升级前请先在「连接」页连接设备，\
+                     并确认设备已加入与电脑相同的 Wi-Fi 网络（Wi-Fi 页可配置）。",
+                )
+                .weak()
+                .size(11.0),
+            );
+        }
+    });
+}
+
+/// 选择固件文件：读入内存 + 基础校验（ESP32 应用镜像首字节 0xE9）+ 计算 MD5。
+fn pick_firmware_file(
+    handle: &AppHandle,
+    st: &mut SettingsPanelState,
+    path: &std::path::Path,
+) {
+    let toast = |k: crate::state::ToastKind, t: String| {
+        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(k, t));
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            toast(
+                crate::state::ToastKind::Error,
+                format!("读取文件失败：{e}"),
+            );
+            return;
+        }
+    };
+    // ESP32 app image 魔数校验（esp_image_header_t magic = 0xE9）
+    if bytes.first() != Some(&0xE9) {
+        toast(
+            crate::state::ToastKind::Error,
+            "所选文件不是有效的 ESP32 固件镜像（首字节非 0xE9）".to_string(),
+        );
+        return;
+    }
+    if bytes.is_empty() {
+        toast(crate::state::ToastKind::Error, "固件文件为空".to_string());
+        return;
+    }
+    st.fw_path = path.display().to_string();
+    st.fw_size = bytes.len() as u64;
+    st.fw_md5 = crate::ota::md5_hex(&bytes);
+    st.fw_bytes = Some(Arc::new(bytes));
+    st.fw_status = None;
+    st.fw_status_is_err = false;
+    handle.log_kind(
+        crate::state::LogKind::App,
+        format!("已选择固件 {}（{} 字节）", st.fw_path, st.fw_size),
+    );
+}
+
+/// 触发 OTA：起本地 HTTP 服务 → `0x0B` 下发 URL + MD5。
+/// 请求走异步（`request_async`），结果由 `firmware_tab` 每帧轮询回收，
+/// 避免同步等待阻塞 UI 线程。设备确认后自行下载，下载完成自动重启
+/// （串口会断开，自动重连逻辑会接管重连）。
+fn start_ota(handle: &AppHandle, st: &mut SettingsPanelState) {
+    use crate::ota::{local_lan_ip, FirmwareServer};
+
+    let toast = |k: crate::state::ToastKind, t: String| {
+        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(k, t));
+    };
+    let Some(bytes) = st.fw_bytes.clone() else { return };
+
+    // 停掉上一次的服务（幂等），再起本次的
+    if let Some(mut old) = st.fw_server.take() {
+        old.stop();
+    }
+    let server = match FirmwareServer::spawn(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            toast(
+                crate::state::ToastKind::Error,
+                format!("启动本地下载服务失败：{e}"),
+            );
+            return;
+        }
+    };
+    let port = server.port;
+    let Some(ip) = local_lan_ip() else {
+        toast(
+            crate::state::ToastKind::Error,
+            "无法获取本机局域网 IP，请确认电脑已联网".to_string(),
+        );
+        return;
+    };
+    let url = format!("http://{ip}:{port}/firmware.bin");
+    st.fw_server = Some(server);
+    st.fw_url = url.clone();
+
+    let data = serde_json::json!({ "url": url, "checksum": st.fw_md5 });
+    match handle.with_link(|lm| {
+        lm.request_async(
+            crate::protocol::CMD_FIRMWARE_INFO,
+            Some(data),
+            std::time::Duration::from_millis(3000),
+        )
+    }) {
+        Some(rx) => {
+            st.fw_ota_rx = Some(rx);
+            st.fw_status = Some("已发送升级请求，等待设备确认…".into());
+            st.fw_status_is_err = false;
+        }
+        None => {
+            if let Some(mut srv) = st.fw_server.take() {
+                srv.stop();
+            }
+            st.fw_status = Some("设备未连接".into());
+            st.fw_status_is_err = true;
+            toast(crate::state::ToastKind::Error, "设备未连接".to_string());
+        }
     }
 }
 

@@ -45,6 +45,8 @@ pub const TAB_POWER: &str = r::LIGHTNING;
 /// Settings 页 → PC 状态 tab（与 TAB_DISPLAY 同用桌面意象，但用 tower
 /// 避免和"显示"（显示器）撞视觉）。
 pub const TAB_PC: &str = r::DESKTOP_TOWER;
+/// Settings 页 → 固件升级 tab（芯片意象）。
+pub const TAB_FIRMWARE: &str = r::CPU;
 pub const CUSTOM_ICON: &str = r::IMAGE;
 
 // Keymap

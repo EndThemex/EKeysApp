@@ -482,6 +482,43 @@ impl LinkManager {
         }
     }
 
+    /// 异步请求-响应：立即返回结果接收端，**不阻塞调用线程**（UI 用）。
+    ///
+    /// 与 [`Self::request`] 同一套 seq 配对逻辑，区别只是等待在后台线程进行：
+    /// UI 线程每帧 `try_recv` 轮询结果，避免同步等待期间整个窗口无响应。
+    /// 断线时 router 清空 pending map → oneshot sender drop → 立即返回
+    /// `Err("disconnected")`，与同步版语义一致。
+    pub fn request_async(
+        &self,
+        cmd: u8,
+        data: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Receiver<Result<Frame, String>> {
+        let seq = self.next_seq();
+        let (tx, rx) = channel::<Frame>();
+        self.pending.lock().unwrap().insert(seq, tx);
+        let frame = Frame::request(cmd, seq, data);
+        self.send(frame);
+
+        let pending = Arc::clone(&self.pending);
+        let (res_tx, res_rx) = channel();
+        thread::spawn(move || {
+            let result = match rx.recv_timeout(timeout) {
+                Ok(frame) => Ok(frame),
+                Err(e) => {
+                    let still_pending = pending.lock().unwrap().remove(&seq).is_some();
+                    if !still_pending {
+                        Err("disconnected".to_string())
+                    } else {
+                        Err(format!("timeout: {e}"))
+                    }
+                }
+            };
+            let _ = res_tx.send(result);
+        });
+        res_rx
+    }
+
     /// 拉一批 UI 事件（router 线程已完成 seq 配对 / 心跳 ack / 状态同步）。
     /// UI 每帧调用一次。
     pub fn poll_events(&self) -> Vec<LinkEvent> {

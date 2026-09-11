@@ -5,6 +5,7 @@
 mod app;
 mod config;
 mod link;
+mod ota;
 mod pc_status;
 mod protocol;
 mod state;

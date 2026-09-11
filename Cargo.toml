@@ -15,6 +15,9 @@ thiserror          = "2"
 dirs        = "5"
 image       = { version = "0.25", default-features = false, features = ["png", "ico"] }
 base64      = "0.22"
+# OTA：固件 MD5 校验 + 原生文件选择对话框
+md-5        = "0.10"
+rfd         = "0.15"
 # 与 serialport 4.x 共用同一版本，避免重复拉入 windows-sys 多版本
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
