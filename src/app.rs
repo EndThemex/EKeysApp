@@ -9,8 +9,8 @@ use crate::protocol::{
 };
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
-    panel_about, panel_connection, panel_keymap, panel_lighting, panel_log, panel_settings,
-    panel_voice, panel_wifi, sidenav, statusbar, topbar,
+    panel_about, panel_audio, panel_connection, panel_keymap, panel_lighting, panel_log,
+    panel_settings, panel_voice, panel_wifi, sidenav, statusbar, topbar,
     widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_local_settings, show_toasts},
 };
 
@@ -22,6 +22,7 @@ pub struct WxiApp {
     pub lighting_st: panel_lighting::LightingPanelState,
     pub wifi_st: panel_wifi::WifiPanelState,
     pub voice_st: panel_voice::VoicePanelState,
+    pub audio_st: panel_audio::AudioPanelState,
     pub log_st: panel_log::LogPanelState,
     pub toasts: Vec<Toast>,
     pub confirm_open: bool,
@@ -62,6 +63,7 @@ impl WxiApp {
             lighting_st: panel_lighting::LightingPanelState::default(),
             wifi_st: panel_wifi::WifiPanelState::default(),
             voice_st: panel_voice::VoicePanelState::default(),
+            audio_st: panel_audio::AudioPanelState::default(),
             log_st,
             toasts: vec![],
             confirm_open: false,
@@ -291,7 +293,7 @@ impl WxiApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // Keymap 面板处于"按下任意键捕获"模式时，全局快捷键必须让路，
-        // 否则 Ctrl+1~8 / Esc 会被吃掉，捕获不到用户实际按的键。
+        // 否则 Ctrl+1~9 / Esc 会被吃掉，捕获不到用户实际按的键。
         let capturing = *self.handle.capture_keyboard.lock().unwrap();
         if capturing {
             return;
@@ -318,8 +320,10 @@ impl WxiApp {
             } else if i.key_pressed(egui::Key::Num6) {
                 Some(Page::Voice)
             } else if i.key_pressed(egui::Key::Num7) {
-                Some(Page::Log)
+                Some(Page::Audio)
             } else if i.key_pressed(egui::Key::Num8) {
+                Some(Page::Log)
+            } else if i.key_pressed(egui::Key::Num9) {
                 Some(Page::About)
             } else {
                 None
@@ -356,6 +360,8 @@ impl eframe::App for WxiApp {
         self.drain_ui_events();
         // 重连状态机：每帧驱动；time-to-next-try 之前直接 return
         self.handle.tick_reconnect();
+        // 音效上传收尾：finished 置位后 Toast + 清理（任何页面都生效）
+        panel_audio::tick_upload(&self.handle);
         // PC 状态周期推送：Online 时每 1s 通过 0x0D 推给设备一次。
         // tick 内部自带节流，未到节拍时直接 return，CPU 开销可忽略。
         self.handle.tick_pc_status_push();
@@ -413,6 +419,18 @@ impl eframe::App for WxiApp {
                     .log_kind(LogKind::App, format!("进入按键映射页拉取当前方案失败: {e}"));
             }
         }
+        // 进入音效页边沿：拉一次文件列表 + 键位绑定（离线 / 旧固件失败静默，
+        // 页面内「刷新」按钮可手动重试）。
+        if current_page == Page::Audio && self.last_page != Some(Page::Audio) {
+            if let Err(e) = self
+                .handle
+                .refresh_audio_files()
+                .and_then(|_| self.handle.refresh_audio_pads())
+            {
+                self.handle
+                    .log_kind(LogKind::App, format!("进入音效页拉取失败: {e}"));
+            }
+        }
         self.last_page = Some(current_page);
 
         if matches!(current_page, Page::Keymap) {
@@ -438,6 +456,7 @@ impl eframe::App for WxiApp {
                         }
                         Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
                         Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
+                        Page::Audio => panel_audio::show(&self.handle, ui, &mut self.audio_st),
                         Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
                         Page::About => panel_about::show(&self.handle, ui),
                     });

@@ -3,6 +3,7 @@
 pub mod fonts;
 pub mod icons;
 pub mod panel_about;
+pub mod panel_audio;
 pub mod panel_connection;
 pub mod panel_keymap;
 pub mod panel_lighting;

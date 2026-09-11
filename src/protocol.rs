@@ -3011,12 +3011,12 @@ mod tests {
         // 合法
         assert!(valid_audio_name("a.mp3"));
         assert!(valid_audio_name("kick_01.wav"));
-        assert!(valid_audio_name(&"a".repeat(20) + ".mp3"), "基段恰好 20 字符");
+        assert!(valid_audio_name(&("a".repeat(20) + ".mp3")), "基段恰好 20 字符");
         assert!(valid_audio_name("0123456789.wav"));
         // 非法：太长 / 大写 / 特殊字符 / 错误扩展名
         assert!(!valid_audio_name("a.wav2"));
-        assert!(valid_audio_name("ab.mp3"), "基段 2 字符合法（白名单 {1,20}）");
-        assert!(!valid_audio_name(&"a".repeat(21) + ".mp3"));
+        assert!(valid_audio_name("ab.mp3"), "基段 2 字符合法（白名单 {{1,20}}）");
+        assert!(!valid_audio_name(&("a".repeat(21) + ".mp3")));
         assert!(!valid_audio_name("Kick.mp3"));
         assert!(!valid_audio_name("kick.flac"));
         assert!(!valid_audio_name("kick"));

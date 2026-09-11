@@ -69,6 +69,11 @@ App 端已声明全部 **18 个命令常量**（与固件 `SerialProtocol.h` 对
 | Profile 状态       | `CMD_PROFILE_STATE`             | `0x10`          | 双向       | ✅ 数据结构定义；调用未接入；**异类响应**                    |
 | Profile 图标       | `CMD_PROFILE_ICON_SET`          | `0x11`          | App → 设备 | ✅ **已接入**（设置 → 键盘页：上传 / 清除图标）              |
 | HA 状态            | `CMD_HA_STATUS`                 | `0x12`          | 设备 → App | ❌ 固件侧未实现                                              |
+| 时间设置           | `CMD_TIME_SET`                  | `0x13`          | App → 设备 | ✅ **已接入**（连接后 `auto_get` 同步本机 epoch + tz）       |
+| 进入下载模式       | `CMD_FIRMWARE_DOWNLOAD`         | `0x14`          | App → 设备 | ✅ **已接入**（设置 → 固件升级 tab：烧录模式）               |
+| Profile 名称       | `CMD_PROFILE_NAME_SET`          | `0x15`          | App → 设备 | ✅ **已接入**（设置 → 键盘页：Profile 重命名）               |
+| 音效文件管理       | `CMD_AUDIO_FILE`                | `0x16`          | App → 设备 | ✅ **已接入**（音效页：list / begin / data / end / abort / delete，见 §9.5） |
+| 音效板绑定与播放   | `CMD_AUDIO_PAD`                 | `0x17`          | App → 设备 | ✅ **已接入**（音效页：get / set / play / stop，见 §9.5）    |
 
 **响应帧**：`response_cmd(req) = req | 0x80`。**例外**：`CMD_PROFILE_STATE` 的响应帧 `cmd` 仍是 `0x10`（详见 §3.3 与 §5.6）。
 
@@ -315,6 +320,11 @@ App 收到后：
 | `0x10` `CMD_PROFILE_STATE`    | （无 body）                                                                                           | `ProfileState { ... }`（**顶层**，**异类响应**）                                |
 | `0x11` `CMD_PROFILE_ICON_SET` | `ProfileIconSetPayload { profile_icon: ProfileIconSetReq }`（位于 `data`，**必须包 `profile_icon`**） | `ProfileIconSetResp { profile, profile_number, has_custom_icon, profile_name }` |
 | `0x12` `CMD_HA_STATUS`        | —                                                                                                     | 固件未实现                                                                      |
+| `0x13` `CMD_TIME_SET`         | `TimeSetReq { epoch, tz }`（位于 `data`）                                                             | 标准响应                                                                        |
+| `0x14` `CMD_FIRMWARE_DOWNLOAD`| （无 body）                                                                                           | 标准响应（确认后设备复位进下载模式）                                            |
+| `0x15` `CMD_PROFILE_NAME_SET` | `ProfileNameSetReq { profile, name }`（位于 `data`）                                                  | 标准响应（`profile_name` 回显）                                                 |
+| `0x16` `CMD_AUDIO_FILE`       | `AudioOpReq { op, … }`（op 分发，见 §9.5）                                                            | op 各异，见 §9.5                                                                |
+| `0x17` `CMD_AUDIO_PAD`        | `AudioPadOpReq { op, … }`（op 分发，见 §9.5）                                                         | op 各异，见 §9.5                                                                |
 
 ### 9.1 字段序列化约定
 
@@ -350,6 +360,40 @@ App 的 `KeymapData`（4 层 × 槽位 × 绑定表）与固件"每 Profile 11 �
 - 单帧 ≤ 2048 字节：Base64 膨胀 4/3，App 上传前校验 PNG 签名 + `image` 解码 + Base64 长度 ≤ 1400，超限弹错误 Toast；
 - 固件**不校验 PNG 尺寸**（注释提到 48×48 但未强制），App 自行保证格式与大小；
 - 成功后固件会再推一条 `cmd=0x10, seq=0` 的 Profile 状态。
+
+### 9.5 音效板（0x16 / 0x17）
+
+两条命令均按 `data.op` 字符串分发。App 侧类型：`AudioFileInfo` / `AudioFileListResp`（0x16 list 响应）、`AudioPadBinding`（`{key, file}`，`file = ""` 表示未绑定）。约定常量：`AUDIO_NAME_BASE_MAX = 20`、`AUDIO_NAME_LEN_MAX = 24`、`AUDIO_FILE_MAX_BYTES = 2MB`、`AUDIO_UPLOAD_BLOCK_BYTES = 1024`、`AUDIO_PAD_KEY_COUNT = 11`。
+
+**0x16 音效文件管理**
+
+| op       | 请求 data                        | 响应 data                                                      |
+| -------- | -------------------------------- | -------------------------------------------------------------- |
+| `list`   | `{}`                             | `files:[{name,size}]`（≤64 条）+ `total_bytes/used_bytes/free_bytes` |
+| `begin`  | `{name, size}`                   | `{received:0, free_bytes}`；固件建 `/name.part`                |
+| `data`   | `{name, index, b64}`             | `{received:N}`；`index` 从 0 严格递增，每块 1024B              |
+| `end`    | `{name, size}`                   | 大小校验一致 → `.part` 原子改名提交 → `{free_bytes}`           |
+| `abort`  | `{name}`                         | 删 `.part`（幂等）；App 失败 / 取消时回滚                      |
+| `delete` | `{name}`                         | `{pads:[{key,file}], free_bytes}`；固件先清引用该文件的绑定    |
+
+约束（固件强校验，App 预检同名规则）：
+
+- 文件名白名单 `^[a-z0-9_]{1,20}\.(mp3|wav)$`（`valid_audio_name` 按字节判定；`sanitize_audio_name` 由本机文件名生成合法名），存 SPIFFS 根目录；
+- 单文件 ≤ 2MB；`begin` 要求 `free_bytes ≥ size + 64KB` headroom；
+- 同一时刻仅一个上传流（`begin` 互斥）；正在播放的同名文件拒绝 `delete`。
+
+App 上传在后台线程执行（`state::audio_upload_worker`，进度写 `AudioPadData.upload`，UI 每帧读）：`begin → data×N（逐块等响应）→ end`，任一步失败或用户取消 → `abort` 回滚 → 完成后自动 `list` 刷新。b64 用标准 alphabet（`base64::engine::general_purpose::STANDARD`），1024B 块编码后 1368 字符 < 固件 `kMaxB64Len = 1400`。
+
+**0x17 音效板绑定与播放**
+
+| op     | 请求 data                     | 响应 data                          |
+| ------ | ----------------------------- | ---------------------------------- |
+| `get`  | `{}`                          | `{pads:[{key,file}]}`（11 键全量） |
+| `set`  | `{key, file}`（`file=""` 清除） | `{key, file}`；先 ACK 再落盘     |
+| `play` | `{key}` 或 `{file}`（试播）   | `{playing:true}`                   |
+| `stop` | `{}`                          | `{playing:false}`                  |
+
+`set` 的 `file` 非空时固件校验白名单 + 文件存在；`play {key}` 走键位绑定（未绑定拒绝），`play {file}` 试播不亮键位高亮。**预留**：网络音频播放（固件 `Speaker::PlayRemoteAudio` 已具备）后续在 0x17 增加 op 或 `play.url` 字段，不动 0x16 语义。
 
 ---
 
@@ -390,6 +434,11 @@ CMD_MUSIC_CONTROL     // 0x0f
 CMD_PROFILE_STATE     // 0x10  // 异类响应：cmd 不带 0x80
 CMD_PROFILE_ICON_SET  // 0x11
 CMD_HA_STATUS         // 0x12
+CMD_TIME_SET          // 0x13
+CMD_FIRMWARE_DOWNLOAD // 0x14
+CMD_PROFILE_NAME_SET  // 0x15
+CMD_AUDIO_FILE        // 0x16  // op 分发：list/begin/data/end/abort/delete
+CMD_AUDIO_PAD         // 0x17  // op 分发：get/set/play/stop
 response_cmd(req) -> u8  // req | 0x80
 
 // 4. SET 请求体（仅 config，不带 mask）

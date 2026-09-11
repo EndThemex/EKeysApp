@@ -57,18 +57,25 @@ const ITEMS: &[NavItem] = &[
         hint: Some("语音设置 (Ctrl+6)"),
     },
     NavItem {
+        page: Page::Audio,
+        label: "音效",
+        icon: crate::ui::icons::NAV_AUDIO,
+        enabled: true,
+        hint: Some("音效板文件与键位绑定 (Ctrl+7)"),
+    },
+    NavItem {
         page: Page::Log,
         label: "日志",
         icon: crate::ui::icons::NAV_LOG,
         enabled: true,
-        hint: Some("协议与应用日志 (Ctrl+7)"),
+        hint: Some("协议与应用日志 (Ctrl+8)"),
     },
     NavItem {
         page: Page::About,
         label: "关于",
         icon: crate::ui::icons::NAV_ABOUT,
         enabled: true,
-        hint: Some("版本信息 (Ctrl+8)"),
+        hint: Some("版本信息 (Ctrl+9)"),
     },
 ];
 
@@ -99,14 +106,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(10.0);
 
-    // 主导航：设备相关（连接 / 设置 / 键映射 / 灯效 / WiFi / 语音 → 共 6 项）
-    nav_group(ui, handle, current, "设备", &ITEMS[..6]);
+    // 主导航：设备相关（连接 / 设置 / 键映射 / 灯效 / WiFi / 语音 / 音效 → 共 7 项）
+    nav_group(ui, handle, current, "设备", &ITEMS[..7]);
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
     // 系统组：日志 / 关于
-    nav_group(ui, handle, current, "系统", &ITEMS[6..]);
+    nav_group(ui, handle, current, "系统", &ITEMS[7..]);
 }
 
 fn nav_group(ui: &mut egui::Ui, handle: &AppHandle, current: Page, title: &str, items: &[NavItem]) {

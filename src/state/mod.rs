@@ -7,10 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{Language, LocalConfig, Theme};
-use crate::link::{ConnectionState, LinkManager};
+use crate::link::{ConnectionState, LinkManager, LinkRequester};
 use crate::protocol::{
-    DeviceInfo, DeviceSettings, FieldMask, FirmwareKeyEntry, Frame, KeyAction, KeyRef, KeymapData,
-    ProfileState,
+    AudioFileInfo, AudioFileListResp, AudioPadBinding, DeviceInfo, DeviceSettings, FieldMask,
+    FirmwareKeyEntry, Frame, KeyAction, KeyRef, KeymapData, ProfileState, AUDIO_FILE_MAX_BYTES,
+    AUDIO_PAD_KEY_COUNT, AUDIO_UPLOAD_BLOCK_BYTES, CMD_AUDIO_FILE, CMD_AUDIO_PAD, valid_audio_name,
 };
 use crate::util::log::SharedLog;
 
@@ -92,8 +93,38 @@ pub enum Page {
     Lighting,
     Wifi,
     Voice,
+    Audio,
     Log,
     About,
+}
+
+/// 音效上传进度（后台线程写，UI 每帧读；`finished` 置位后由 UI 收尾）。
+#[derive(Debug, Clone)]
+pub struct AudioUploadProgress {
+    pub name: String,
+    pub sent: usize,
+    pub total: usize,
+    /// 上传线程已结束（成功或失败）；UI 读到后负责 Toast + 刷新 + 清理。
+    pub finished: bool,
+    /// `finished = true` 时的错误信息；None = 成功。
+    pub error: Option<String>,
+    /// UI 置位 → 后台线程在下一个分块前中止并向设备发 abort 回滚。
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// 音效板共享状态（Audio 页）：文件列表 / 存储占用 / 键位绑定 / 上传进度。
+///
+/// 连接后 `auto_get` 刷新文件与绑定；上传线程写 `upload`；
+/// set/delete/play 等即改即发操作成功后同步更新本地缓存。
+#[derive(Debug, Clone, Default)]
+pub struct AudioPadData {
+    pub files: Vec<AudioFileInfo>,
+    pub total_bytes: u32,
+    pub used_bytes: u32,
+    pub free_bytes: u32,
+    /// `pads[k-1]` = 键 k 绑定的设备端文件名（空串 = 未绑定）。
+    pub pads: [String; AUDIO_PAD_KEY_COUNT],
+    pub upload: Option<AudioUploadProgress>,
 }
 
 /// 应用共享状态
@@ -163,6 +194,8 @@ pub struct AppHandle {
     /// 置位时机：用户确认进入烧录模式、0x14 请求发出之前；
     /// 清除时机：下一次连接成功（attach_link）。
     pub download_mode_armed: Arc<AtomicBool>,
+    /// 音效板共享状态（Audio 页；连接后 auto_get 刷新，上传线程写进度）。
+    pub audio: Arc<Mutex<AudioPadData>>,
 }
 
 /// PC 状态周期性推送间隔。1 秒一拍，与心跳同节拍，确保固件 Lock 灯指示
@@ -278,6 +311,7 @@ impl AppHandle {
             // Settings → PC 状态 tab 可勾选打开。
             pc_status_push_enabled: Arc::new(AtomicBool::new(false)),
             download_mode_armed: Arc::new(AtomicBool::new(false)),
+            audio: Arc::new(Mutex::new(AudioPadData::default())),
         }
     }
 
@@ -453,6 +487,14 @@ impl AppHandle {
         // 4) 当前 Profile 的键映射（0x05；失败仅记日志，键映射页可手动"重新加载"）
         if let Err(e) = self.refresh_keymap_from_device() {
             self.log_kind(LogKind::App, format!("GET 键映射失败: {e}"));
+        }
+        // 5) 音效板：文件列表 + 键位绑定（0x16 list / 0x17 get；失败仅记日志，
+        //    与 0x03/0x07 同策略，Audio 页可手动刷新）
+        if let Err(e) = self.refresh_audio_files() {
+            self.log_kind(LogKind::App, format!("GET 音效文件失败: {e}"));
+        }
+        if let Err(e) = self.refresh_audio_pads() {
+            self.log_kind(LogKind::App, format!("GET 音效绑定失败: {e}"));
         }
     }
 
@@ -671,6 +713,247 @@ impl AppHandle {
             Ok(name)
         })
         .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    // ==================== 音效板（Sound Pad，0x16/0x17） ====================
+
+    /// 发放音效上传用的跨线程请求句柄（未连接返回 None）。
+    pub fn audio_requester(&self) -> Option<LinkRequester> {
+        self.with_link(|lm| lm.requester())
+    }
+
+    /// 拉取设备音效文件列表与存储占用（0x16 list）。
+    pub fn refresh_audio_files(&self) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_FILE,
+                    Some(serde_json::json!({ "op": "list" })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x16 list 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let data = frame.data.ok_or("0x16 list 响应缺 data 字段")?;
+            let resp: AudioFileListResp = serde_json::from_value(data)
+                .map_err(|e| format!("0x16 list 解析失败: {e}"))?;
+            let mut a = self.audio.lock().unwrap();
+            a.files = resp.files;
+            a.total_bytes = resp.total_bytes;
+            a.used_bytes = resp.used_bytes;
+            a.free_bytes = resp.free_bytes;
+            self.log_kind(
+                LogKind::Rx,
+                format!("GET → 音效文件（{} 个，剩 {} KB）", a.files.len(), a.free_bytes / 1024),
+            );
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 拉取设备键位绑定表（0x17 get）。设备返回全量 11 键，空绑定文件名为空串。
+    pub fn refresh_audio_pads(&self) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_PAD,
+                    Some(serde_json::json!({ "op": "get" })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x17 get 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let data = frame.data.ok_or("0x17 get 响应缺 data 字段")?;
+            let pads_raw = data
+                .get("pads")
+                .cloned()
+                .ok_or("0x17 get 响应缺 pads 字段")?;
+            let pads: Vec<AudioPadBinding> =
+                serde_json::from_value(pads_raw).map_err(|e| format!("0x17 get 解析失败: {e}"))?;
+            let mut a = self.audio.lock().unwrap();
+            // 设备是绑定表的唯一权威：先清空再填充，避免残留陈旧条目
+            a.pads = Default::default();
+            for p in pads {
+                let k = p.key as usize;
+                if k >= 1 && k <= a.pads.len() {
+                    a.pads[k - 1] = p.file;
+                }
+            }
+            self.log_kind(LogKind::Rx, "GET → 音效键位绑定");
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 设置单键绑定（0x17 set）；`file = ""` 清除。成功后同步本地缓存。
+    pub fn set_audio_pad(&self, key: u8, file: &str) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_PAD,
+                    Some(serde_json::json!({ "op": "set", "key": key, "file": file })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x17 set 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let k = key as usize;
+            if k >= 1 && k <= self.audio.lock().unwrap().pads.len() {
+                self.audio.lock().unwrap().pads[k - 1] = file.to_string();
+            }
+            self.log_kind(
+                LogKind::Tx,
+                if file.is_empty() {
+                    format!("SET → 音效绑定 K{key}=（清除）")
+                } else {
+                    format!("SET → 音效绑定 K{key}={file}")
+                },
+            );
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 试播键位绑定文件（0x17 play + key）。
+    pub fn audio_play_key(&self, key: u8) -> Result<(), String> {
+        self.audio_play(serde_json::json!({ "op": "play", "key": key }))
+    }
+
+    /// 试播指定文件（0x17 play + file；不改变键位高亮）。
+    pub fn audio_play_file(&self, file: &str) -> Result<(), String> {
+        self.audio_play(serde_json::json!({ "op": "play", "file": file }))
+    }
+
+    fn audio_play(&self, data: serde_json::Value) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(CMD_AUDIO_PAD, Some(data), Duration::from_millis(1000))
+                .map_err(|e| format!("0x17 play 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "播放被拒绝".into()));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 停止播放（0x17 stop）。
+    pub fn audio_stop(&self) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_PAD,
+                    Some(serde_json::json!({ "op": "stop" })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x17 stop 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 删除设备音效文件（0x16 delete）。固件会先清除引用该文件的键位绑定；
+    /// 响应带回最新 pads 与剩余空间，这里同步本地缓存并移除列表条目。
+    pub fn delete_audio_file(&self, name: &str) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_FILE,
+                    Some(serde_json::json!({ "op": "delete", "name": name })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x16 delete 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let mut a = self.audio.lock().unwrap();
+            if let Some(data) = frame.data.as_ref() {
+                if let Some(free) = data.get("free_bytes").and_then(|v| v.as_u64()) {
+                    a.free_bytes = free as u32;
+                    if a.total_bytes > 0 {
+                        a.used_bytes = a.total_bytes.saturating_sub(a.free_bytes);
+                    }
+                }
+                if let Some(list) = data.get("pads").and_then(|v| {
+                    serde_json::from_value::<Vec<AudioPadBinding>>(v.clone()).ok()
+                }) {
+                    a.pads = Default::default();
+                    for p in list {
+                        let k = p.key as usize;
+                        if k >= 1 && k <= a.pads.len() {
+                            a.pads[k - 1] = p.file;
+                        }
+                    }
+                }
+            }
+            a.files.retain(|f| f.name != name);
+            self.log_kind(LogKind::Tx, format!("DEL → 音效文件 {name}"));
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 启动音效文件上传（0x16 begin → data×N → end，1024B/块）。
+    ///
+    /// 前置校验：文件名白名单、大小 1B..2MB、无进行中任务、已连接。
+    /// 上传在后台线程执行（进度写 `audio.upload`，UI 每帧读），
+    /// 失败/取消会向设备发 abort 回滚 `.part` 文件。
+    pub fn start_audio_upload(&self, device_name: String, bytes: Vec<u8>) -> Result<(), String> {
+        if !valid_audio_name(&device_name) {
+            return Err(format!(
+                "文件名不合法（a-z0-9_ + .mp3/.wav）: {device_name}"
+            ));
+        }
+        if bytes.is_empty() || bytes.len() as u32 > AUDIO_FILE_MAX_BYTES {
+            return Err(format!(
+                "文件大小超出范围（上限 {} KB）",
+                AUDIO_FILE_MAX_BYTES / 1024
+            ));
+        }
+        {
+            let a = self.audio.lock().unwrap();
+            if a.upload.is_some() {
+                return Err("已有上传任务进行中".into());
+            }
+        }
+        let Some(req) = self.audio_requester() else {
+            return Err("未连接".into());
+        };
+        self.audio.lock().unwrap().upload = Some(AudioUploadProgress {
+            name: device_name.clone(),
+            sent: 0,
+            total: bytes.len(),
+            finished: false,
+            error: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let audio = Arc::clone(&self.audio);
+        let log = self.log.clone();
+        let name = device_name.clone();
+        let total_kb = bytes.len() / 1024;
+        let spawned = std::thread::Builder::new()
+            .name("audio-upload".into())
+            .spawn(move || audio_upload_worker(req, audio, log, name, bytes));
+        match spawned {
+            Ok(_) => {
+                self.log_kind(
+                    LogKind::Tx,
+                    format!("开始上传音效 {device_name}（{total_kb} KB）"),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // 线程没起来：清掉进度，避免 UI 永远卡在上传态
+                self.audio.lock().unwrap().upload = None;
+                Err(format!("启动上传线程失败: {e}"))
+            }
+        }
     }
 
     /// 关闭连接
@@ -1082,6 +1365,130 @@ fn pc_status_float_changed(old: Option<f32>, new: Option<f32>) -> bool {
         (None, Some(_)) | (Some(_), None) => true,
         (Some(a), Some(b)) => (a - b).abs() > PC_STATUS_FLOAT_EPS,
     }
+}
+
+/// 音效上传后台线程：`begin → data×N → end`，失败/取消发 `abort` 回滚 `.part`。
+///
+/// 协议与固件 `cmd_audio.cpp` 对齐：块 index 从 0 起严格递增，每块 1024B
+/// b64 后 1368 字符 < 固件 kMaxB64Len=1400；`end` 校验总大小一致才提交。
+///
+/// 进度写 `audio.upload`（`sent` 每块更新，`finished`/`error` 收尾置位）；
+/// UI 每帧读进度，`finished = true` 后负责 Toast + 清理（`upload = None`）。
+/// 取消：UI 置位 `cancel`，本线程在下一个分块前检测并回滚，`error = "已取消"`。
+/// 收尾后尽力刷新一次 0x16 list（成功出现新文件、失败恢复剩余空间）。
+fn audio_upload_worker(
+    req: LinkRequester,
+    audio: Arc<Mutex<AudioPadData>>,
+    log: SharedLog,
+    name: String,
+    bytes: Vec<u8>,
+) {
+    use base64::Engine as _;
+    const REQ_TIMEOUT: Duration = Duration::from_millis(2000);
+
+    let total = bytes.len();
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut sent = 0usize;
+    let mut err: Option<String> = None;
+    let mut cancelled = false;
+
+    // begin：声明文件名与总大小
+    let begin = serde_json::json!({ "op": "begin", "name": name, "size": total });
+    match req.request(CMD_AUDIO_FILE, Some(begin), REQ_TIMEOUT) {
+        Ok(f) if f.status() == Some(0) => {}
+        Ok(f) => err = Some(format!("begin 被拒绝: {}", f.error.unwrap_or_default())),
+        Err(e) => err = Some(format!("begin 请求失败: {e}")),
+    }
+
+    // data×N：每块等响应（固件按 index 严格递增校验）
+    if err.is_none() {
+        for (index, chunk) in bytes.chunks(AUDIO_UPLOAD_BLOCK_BYTES).enumerate() {
+            let cancel_now = audio
+                .lock()
+                .unwrap()
+                .upload
+                .as_ref()
+                .map(|u| u.cancel.load(Ordering::Acquire))
+                .unwrap_or(true);
+            if cancel_now {
+                cancelled = true;
+                break;
+            }
+            let data = serde_json::json!({
+                "op": "data",
+                "name": name,
+                "index": index,
+                "b64": engine.encode(chunk),
+            });
+            match req.request(CMD_AUDIO_FILE, Some(data), REQ_TIMEOUT) {
+                Ok(f) if f.status() == Some(0) => {
+                    sent += chunk.len();
+                    if let Ok(mut a) = audio.lock() {
+                        if let Some(u) = a.upload.as_mut() {
+                            u.sent = sent;
+                        }
+                    }
+                }
+                Ok(f) => {
+                    err = Some(format!("第 {index} 块被拒绝: {}", f.error.unwrap_or_default()));
+                    break;
+                }
+                Err(e) => {
+                    err = Some(format!("第 {index} 块请求失败: {e}"));
+                    break;
+                }
+            }
+        }
+    }
+
+    // end 提交 / abort 回滚（固件 abort 幂等，残留 .part 一并清理）
+    if err.is_none() && !cancelled {
+        let end = serde_json::json!({ "op": "end", "name": name, "size": total });
+        match req.request(CMD_AUDIO_FILE, Some(end), REQ_TIMEOUT) {
+            Ok(f) if f.status() == Some(0) => {}
+            Ok(f) => err = Some(format!("end 被拒绝: {}", f.error.unwrap_or_default())),
+            Err(e) => err = Some(format!("end 请求失败: {e}")),
+        }
+    } else {
+        let abort = serde_json::json!({ "op": "abort", "name": name });
+        let _ = req.request(CMD_AUDIO_FILE, Some(abort), REQ_TIMEOUT);
+    }
+
+    let final_err = if cancelled { Some("已取消".to_string()) } else { err };
+    {
+        let mut a = audio.lock().unwrap();
+        if let Some(u) = a.upload.as_mut() {
+            u.sent = sent;
+            u.finished = true;
+            u.error = final_err.clone();
+        }
+    }
+    // 尽力刷新文件列表：成功后新文件出现，失败/取消后剩余空间恢复
+    let list = req.request(
+        CMD_AUDIO_FILE,
+        Some(serde_json::json!({ "op": "list" })),
+        REQ_TIMEOUT,
+    );
+    if let Ok(f) = list {
+        if f.status() == Some(0) {
+            if let Some(data) = f.data {
+                if let Ok(resp) = serde_json::from_value::<AudioFileListResp>(data) {
+                    let mut a = audio.lock().unwrap();
+                    a.files = resp.files;
+                    a.total_bytes = resp.total_bytes;
+                    a.used_bytes = resp.used_bytes;
+                    a.free_bytes = resp.free_bytes;
+                }
+            }
+        }
+    }
+    log.push(
+        LogKind::App,
+        match &final_err {
+            Some(e) => format!("音效上传 {name} 结束: {e}"),
+            None => format!("音效上传 {name} 完成（{} KB）", total / 1024),
+        },
+    );
 }
 
 #[cfg(test)]

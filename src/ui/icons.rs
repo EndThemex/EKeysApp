@@ -11,6 +11,7 @@ pub const NAV_KEYMAP: &str = r::KEYBOARD;
 pub const NAV_LIGHTING: &str = r::LIGHTBULB;
 pub const NAV_WIFI: &str = r::WIFI_HIGH;
 pub const NAV_VOICE: &str = r::MICROPHONE_STAGE;
+pub const NAV_AUDIO: &str = r::MUSIC_NOTE;
 pub const NAV_LOG: &str = r::SCROLL;
 pub const NAV_ABOUT: &str = r::INFO;
 

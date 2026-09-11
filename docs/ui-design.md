@@ -32,8 +32,9 @@
 │  🎛 Settings │                                                      │
 │  🎹 Keymap   │                                                      │
 │  💡 Lighting │                                                      │
-│  📶 WiFi     │                                                      │
-│  � Voice    │                                                      │
+|  📶 WiFi     │                                                      │
+│  🎤 Voice    │                                                      │
+│  🎵 Audio    │                                                      │
 │  📜 Log      │                                                      │
 │  ℹ  About    │                                                      │
 │              │                                                      │
@@ -66,6 +67,7 @@
 💡 灯效   (灰，阶段 06)  → Lighting Panel（占位）
 📶 WiFi   (灰，阶段 06)  → WiFi Panel（占位）
 🎤 语音   (灰，阶段 06)  → Voice Panel（占位）
+🎵 音效                  → Audio Panel（上传音频 + 11 键绑定 + 试播）
 📜 日志                  → Log Panel
 ℹ 关于                   → About Panel
 ```
@@ -95,11 +97,25 @@
 | P6  | Voice    | 06   | 占位                                              |
 | P7  | Log      | 04   | `LogViewer`                                       |
 | P8  | About    | 04   | `AboutCard`                                       |
+| P9  | Audio    | 09   | `StorageCard` + `UploadCard` + `FileList` + `PadBindings`（见 §3.1） |
+
+### 3.1 P9 — Audio（音效板）页面
+
+数据源：`AudioPadData`（`state::audio`），连接后 `auto_get` 拉取、进入页面边沿补拉，上传进度由后台线程写。
+
+| 区块          | 内容                                                                 |
+| ------------- | -------------------------------------------------------------------- |
+| 顶部操作行    | 「刷新」（0x16 list + 0x17 get）、「停止播放」（0x17 stop）          |
+| 设备存储卡片  | used / total 进度条 + 剩余空间（SPIFFS）                             |
+| 上传卡片      | 本地路径 TextEdit + 设备端名 TextEdit（空 = 自动生成）+「开始上传」；上传中显示进度条 +「取消上传」 |
+| 音频文件列表  | 文件名 + 大小 + 「试播」（0x17 play file）+「删除」（0x16 delete）   |
+| 键位绑定      | K1~K11 每行 ComboBox（未绑定 + 文件列表）+ 「试播」「清除」（0x17 set） |
+
+约束提示：单文件 ≤ 2MB、设备端名 `a-z0-9_` + `.mp3/.wav`、`begin` 预留 64KB 空间。上传在后台线程进行（可切页面），失败 / 取消自动 abort 回滚，完成 Toast 由 `panel_audio::tick_upload` 统一收尾。
 
 ---
 
 ## 4. P1 — Connect 页面
-
 ### 4.1 布局
 
 ```
@@ -398,7 +414,7 @@ Transport (reader thread)
 | `Ctrl+L`     | 切换到 Log 页面               |
 | `Ctrl+,`     | 打开 Local Settings 弹窗      |
 | `Ctrl+Q`     | 退出应用                      |
-| `1` ~ `8`    | 快速切换 SideNav 页面         |
+| `Ctrl+1` ~ `Ctrl+9` | 快速切换 SideNav 页面（7=音效，8=日志，9=关于） |
 
 ---
 

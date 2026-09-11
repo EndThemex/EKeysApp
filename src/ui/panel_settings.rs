@@ -283,6 +283,14 @@ fn keyboard_tab(
                     .hint_text("选择 PNG 图片文件…")
                     .desired_width(260.0),
             );
+            if ui.button("浏览…").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG 图片", &["png"])
+                    .pick_file()
+                {
+                    st.icon_path = path.display().to_string();
+                }
+            }
             let uploading = !st.icon_path.trim().is_empty();
             if ui
                 .add_enabled(uploading, egui::Button::new("上传"))
@@ -433,7 +441,10 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
 fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
         ui.label("音量（范围 0~100）");
-        let mut v = draft.device_volume.max(snap.device_volume).clamp(0, 100);
+        // 直接读 draft：未编辑时 draft 经 merge_push 始终跟随 snapshot，
+        // 不能取 max（否则低于当前值的修改会被立刻回显成旧值，
+        // 只能调大不能调小）。
+        let mut v = draft.device_volume.clamp(0, 100);
         if ui
             .add(egui::Slider::new(&mut v, 0..=100).show_value(true))
             .changed()

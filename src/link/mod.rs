@@ -63,6 +63,83 @@ pub enum LinkEvent {
 /// seq → 等待该响应的 oneshot Sender
 type PendingMap = Arc<Mutex<HashMap<u32, Sender<Frame>>>>;
 
+/// 请求 seq 分配（LinkManager 与 LinkRequester 共用，连接内唯一）
+static REQ_SEQ: AtomicU32 = AtomicU32::new(1);
+
+fn alloc_seq() -> u32 {
+    REQ_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// request 的实质逻辑：writer 通道 + pending 表 + 日志即可完成，
+/// 与 LinkManager 本体解耦，供 [`LinkRequester`] 在后台线程复用。
+fn request_via(
+    write_tx: &Sender<WriterMsg>,
+    pending: &PendingMap,
+    log: &SharedLog,
+    cmd: u8,
+    data: Option<serde_json::Value>,
+    timeout: Duration,
+) -> Result<Frame, String> {
+    let seq = alloc_seq();
+    let (tx, rx) = channel::<Frame>();
+    pending.lock().unwrap().insert(seq, tx);
+    let frame = Frame::request(cmd, seq, data);
+    if write_tx.send(WriterMsg::Frame(frame)).is_err() {
+        // writer 已退出（连接关闭）：清掉 pending 避免泄漏，按断线处理
+        pending.lock().unwrap().remove(&seq);
+        log.push(
+            LogKind::App,
+            format!("request cmd=0x{cmd:02X} seq={seq}: disconnected"),
+        );
+        return Err("disconnected".to_string());
+    }
+
+    match rx.recv_timeout(timeout) {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            // sender 已被 router 回收（断线） vs 超时，区分开来便于上层决定
+            // 是立刻放弃还是继续等待。
+            let still_pending = pending.lock().unwrap().remove(&seq).is_some();
+            if !still_pending {
+                log.push(
+                    LogKind::App,
+                    format!("request cmd=0x{cmd:02X} seq={seq}: disconnected"),
+                );
+                return Err("disconnected".to_string());
+            }
+            log.push(
+                LogKind::App,
+                format!("request cmd=0x{cmd:02X} seq={seq}: timeout ({e})"),
+            );
+            Err(format!("timeout: {e}"))
+        }
+    }
+}
+
+/// 可跨线程克隆的请求句柄（音效文件上传等后台长流程用）。
+///
+/// LinkManager 因持有 `Receiver` 不是 Sync，无法把 `&LinkManager` 交给
+/// 后台线程；但请求的实质依赖只有 writer 通道 + pending 表 + 日志，
+/// 三者均可共享。断线时 router 清空 pending / writer 关闭，句柄上的
+/// request 会立即 `Err("disconnected")`，与 LinkManager 语义一致。
+#[derive(Clone)]
+pub struct LinkRequester {
+    write_tx: Sender<WriterMsg>,
+    pending: PendingMap,
+    log: SharedLog,
+}
+
+impl LinkRequester {
+    pub fn request(
+        &self,
+        cmd: u8,
+        data: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<Frame, String> {
+        request_via(&self.write_tx, &self.pending, &self.log, cmd, data, timeout)
+    }
+}
+
 /// reader 退出回调类型
 type OnReaderExit = Arc<dyn Fn() + Send + Sync>;
 
@@ -454,31 +531,15 @@ impl LinkManager {
         data: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<Frame, String> {
-        let seq = self.next_seq();
-        let (tx, rx) = channel::<Frame>();
-        self.pending.lock().unwrap().insert(seq, tx);
-        let frame = Frame::request(cmd, seq, data);
-        self.send(frame);
+        request_via(&self.write_tx, &self.pending, &self.log, cmd, data, timeout)
+    }
 
-        match rx.recv_timeout(timeout) {
-            Ok(resp) => Ok(resp),
-            Err(e) => {
-                // sender 已被 router 回收（断线） vs 超时，区分开来便于上层决定
-                // 是立刻放弃还是继续等待。
-                let still_pending = self.pending.lock().unwrap().remove(&seq).is_some();
-                if !still_pending {
-                    self.log.push(
-                        LogKind::App,
-                        format!("request cmd=0x{cmd:02X} seq={seq}: disconnected"),
-                    );
-                    return Err("disconnected".to_string());
-                }
-                self.log.push(
-                    LogKind::App,
-                    format!("request cmd=0x{cmd:02X} seq={seq}: timeout ({e})"),
-                );
-                Err(format!("timeout: {e}"))
-            }
+    /// 发放一个可跨线程克隆的请求句柄（连接存活期间有效，见 [`LinkRequester`]）。
+    pub fn requester(&self) -> LinkRequester {
+        LinkRequester {
+            write_tx: self.write_tx.clone(),
+            pending: Arc::clone(&self.pending),
+            log: self.log.clone(),
         }
     }
 
@@ -494,7 +555,7 @@ impl LinkManager {
         data: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Receiver<Result<Frame, String>> {
-        let seq = self.next_seq();
+        let seq = alloc_seq();
         let (tx, rx) = channel::<Frame>();
         self.pending.lock().unwrap().insert(seq, tx);
         let frame = Frame::request(cmd, seq, data);
@@ -530,10 +591,5 @@ impl LinkManager {
             out.push(ev);
         }
         out
-    }
-
-    fn next_seq(&self) -> u32 {
-        static SEQ: AtomicU32 = AtomicU32::new(1);
-        SEQ.fetch_add(1, Ordering::Relaxed)
     }
 }
