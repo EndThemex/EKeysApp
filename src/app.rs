@@ -31,6 +31,10 @@ pub struct WxiApp {
     pub current_port: Option<String>,
     pub local_settings_open: bool,
     pub last_inner_size: [f32; 2],
+    /// 上一次渲染的页面：用于检测"切到按键映射页"边沿，
+    /// 进入时主动拉一次当前激活 Profile 的键映射，避免出现
+    /// "设置页切了 Profile 但 Keymap 页仍展示旧数据"的视图不同步。
+    pub last_page: Option<Page>,
 }
 
 impl WxiApp {
@@ -67,6 +71,7 @@ impl WxiApp {
             current_port: None,
             local_settings_open: false,
             last_inner_size: [960.0, 600.0],
+            last_page: None,
         }
     }
 
@@ -396,7 +401,21 @@ impl eframe::App for WxiApp {
 
         // Keymap 页面自带 top/central/bottom 三段（同步下发区固定在状态栏上方），
         // 必须在最外层 ctx 上注册面板，不能套在 CentralPanel + ScrollArea 里。
-        if matches!(*self.handle.page.lock().unwrap(), Page::Keymap) {
+        let current_page = *self.handle.page.lock().unwrap();
+        // 进入 Keymap 页面时主动拉一次当前激活 Profile 的键映射：
+        // 设置页切换 Profile 后，0x10 推送可能因设备侧时序（不推送 /
+        // 推送被丢）导致 keymap.active_profile 与 settings.active_keymap_profile
+        // 不一致；进入页面时按需补拉，保证首帧展示的就是设备当前方案。
+        // 失败静默（离线 / 旧固件），UI 会继续使用本地缓存。
+        if current_page == Page::Keymap && self.last_page != Some(Page::Keymap) {
+            if let Err(e) = self.handle.refresh_keymap_from_device() {
+                self.handle
+                    .log_kind(LogKind::App, format!("进入按键映射页拉取当前方案失败: {e}"));
+            }
+        }
+        self.last_page = Some(current_page);
+
+        if matches!(current_page, Page::Keymap) {
             panel_keymap::show(ctx, &self.handle, &mut self.keymap_st);
         } else {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -406,24 +425,21 @@ impl eframe::App for WxiApp {
                 // 时直接滚动显示。
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let page = *self.handle.page.lock().unwrap();
-                        match page {
-                            Page::Connect => {
-                                panel_connection::show(&self.handle, ui, &mut self.connect_st)
-                            }
-                            Page::Settings => {
-                                panel_settings::show(&self.handle, ui, &mut self.settings_st)
-                            }
-                            Page::Keymap => unreachable!(),
-                            Page::Lighting => {
-                                panel_lighting::show(&self.handle, ui, &mut self.lighting_st)
-                            }
-                            Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
-                            Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
-                            Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
-                            Page::About => panel_about::show(&self.handle, ui),
+                    .show(ui, |ui| match current_page {
+                        Page::Connect => {
+                            panel_connection::show(&self.handle, ui, &mut self.connect_st)
                         }
+                        Page::Settings => {
+                            panel_settings::show(&self.handle, ui, &mut self.settings_st)
+                        }
+                        Page::Keymap => unreachable!(),
+                        Page::Lighting => {
+                            panel_lighting::show(&self.handle, ui, &mut self.lighting_st)
+                        }
+                        Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
+                        Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
+                        Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
+                        Page::About => panel_about::show(&self.handle, ui),
                     });
             });
         }
@@ -439,8 +455,7 @@ impl eframe::App for WxiApp {
                 ConfirmOutcome::Yes => {
                     if let Some(k) = self.confirm_kind.take() {
                         match k {
-                            UiConfirmKind::SwitchWorkMode
-                            | UiConfirmKind::EnterDownloadMode => {
+                            UiConfirmKind::SwitchWorkMode | UiConfirmKind::EnterDownloadMode => {
                                 self.settings_st.pending_confirm = Some(k);
                             }
                         }
