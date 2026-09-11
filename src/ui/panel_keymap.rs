@@ -387,12 +387,14 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
     ui.horizontal(|ui| {
         // Profile + 重命名：draft 写锁只在这一块持有，块结束即释放，
         // 避免与下方"重新加载"路径里的 draft 二次加锁死锁。
+        let mut switched_profile: Option<u8> = None;
         {
             let mut draft = handle.keymap_draft.lock().unwrap();
 
             ui.label("配置：");
             let mut p = draft.active_profile as i32;
-            // ComboBox 只显示用户命名，默认值"P{i}"在 make_demo_profile 中设置
+            // ComboBox 显示设备端方案名称（0x10 列表同步，UTF-8 中文），
+            // 未连接 / 旧固件时为本地默认 "P{i}"
             let current_name = draft
                 .profile(p as u8)
                 .map(|x| x.name.clone())
@@ -412,6 +414,8 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                 *handle.selected_key.lock().unwrap() = None;
                 st.draft_action = None;
                 st.selected_ref = None;
+                // 记录新选中的方案：draft 锁释放后按方案拉取设备端内容
+                switched_profile = Some(p as u8);
             }
 
             // 重命名按钮
@@ -456,6 +460,26 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                 {
                     commit_rename(handle, &mut *draft, p as u8, &st.profile_name_edit);
                     st.renaming_profile = false;
+                }
+            }
+        }
+
+        // 切换方案后按方案拉取设备端映射（0x05 + data.profile）：进入键盘
+        // 设置页选中某方案时单独获取该方案的具体配置，草稿/快照对应槽位
+        // 随之对齐。连接时 1s 内阻塞（与"重新加载"按钮同模式），离线跳过。
+        if let Some(p) = switched_profile {
+            match handle.refresh_keymap_from_device_profile(p) {
+                Ok(n) => {
+                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                        crate::state::ToastKind::Success,
+                        format!("已加载配置 {} 的 {} 个按键映射", p + 1, n),
+                    ));
+                }
+                Err(e) => {
+                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                        crate::state::ToastKind::Warning,
+                        format!("加载配置 {} 失败：{}（显示本地缓存）", p + 1, e),
+                    ));
                 }
             }
         }
@@ -1925,20 +1949,37 @@ fn capture_combo(ctx: &egui::Context) -> Option<Option<(u8, u16)>> {
 }
 
 /// 提交 Profile 重命名。
-/// 命名属于本地元数据，**直接同步进 snapshot**（不走 DiffPreviewBar），
-/// 避免用户后续"放弃改动"时把命名回滚。等协议 `CMD_PROFILE_RENAME` 接入后再
-/// 把这一行改成发到设备。
+///
+/// 已连接设备时走 `0x15 CMD_PROFILE_NAME_SET` 同步到固件（持久化到
+/// config.ini，设备 UI 同名显示；空名 = 清除回退默认）——协议已接入，
+/// 固件成功后会推送 0x10 列表，本端名称由 apply_profile_state 对齐。
+/// 离线时退化为本地命名（仅改草稿/快照），重连后可再次下发。
 fn commit_rename(handle: &AppHandle, draft: &mut KeymapData, idx: u8, name: &str) {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return;
-    }
+    let trimmed = name.trim().to_string();
+    // 本地立即生效：空名回退默认 "P{n}"（n=1 基，与设备 Conf%u 对齐）
+    let local_name = if trimmed.is_empty() {
+        format!("P{}", idx + 1)
+    } else {
+        trimmed.clone()
+    };
     if let Some(p) = draft.profile_mut(idx) {
-        p.name = trimmed.to_string();
+        p.name = local_name.clone();
     }
-    let mut snap = handle.keymap.lock().unwrap();
-    if let Some(p) = snap.profile_mut(idx) {
-        p.name = trimmed.to_string();
+    {
+        let mut snap = handle.keymap.lock().unwrap();
+        if let Some(p) = snap.profile_mut(idx) {
+            p.name = local_name.clone();
+        }
+    }
+    // 设备同步：连接时下发 0x15（失败弹 Toast，本地命名保留）
+    match handle.set_profile_name(idx, &trimmed) {
+        Ok(_) => {}
+        Err(e) => {
+            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                crate::state::ToastKind::Error,
+                format!("设备同步名称失败：{e}（仅本地生效）"),
+            ));
+        }
     }
 }
 

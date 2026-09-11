@@ -143,6 +143,8 @@ pub const CMD_HA_STATUS: u8 = 0x12;
 pub const CMD_TIME_SET: u8 = 0x13;
 /// 进入烧录模式（App → 固件，设备回复后立即复位进 USB-Serial-JTAG 下载模式）
 pub const CMD_FIRMWARE_DOWNLOAD: u8 = 0x14;
+/// Profile 名称设置（App → 固件；name="" 表示清除，回退设备默认名）
+pub const CMD_PROFILE_NAME_SET: u8 = 0x15;
 
 /// 响应帧命令 ID = 请求命令 ID | 0x80
 ///
@@ -717,6 +719,28 @@ pub struct FirmwareInfo {
 // ⚠️ 例外：响应帧 `cmd = 0x10`（不是 `0x90`），不带 `status`，body 在**顶层**
 // 而非 `data.profile_state`。解析时需走单独路径。
 
+/// 0x10 帧顶层 `profiles` 数组的一个条目：方案名称 + 图标元数据，
+/// **不含键映射内容**（键映射用 0x05 + `data.profile` 按需拉取）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    /// Profile 索引（0~7，与 0x05/0x06 的 profile 一致）
+    pub profile: u8,
+    /// 1 基编号（设备 UI 显示 Conf{profile_number}）
+    #[serde(default)]
+    pub profile_number: u8,
+    /// 方案名称（UTF-8 中文；未自定义时固件回传内置符号文本，
+    /// App 侧用 `is_custom_name == false` 判断并显示 "P{profile_number}"）
+    #[serde(default)]
+    pub profile_name: String,
+    /// 是否设置了自定义名称（0x15 下发过）
+    #[serde(default)]
+    pub is_custom_name: bool,
+    #[serde(default)]
+    pub has_custom_icon: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon_path: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProfileState {
     pub active_profile: u8,
@@ -724,20 +748,24 @@ pub struct ProfileState {
     pub profile_name: String,
     pub has_custom_icon: bool,
     pub icon_path: String,
+    /// 全部方案列表（名称+图标元数据）。旧固件无此字段 → 空向量，
+    /// 调用方需按"空 = 设备不支持列表"处理，不要清空本地已有名称。
+    pub profiles: Vec<ProfileEntry>,
 }
 
-/// 帧 wrapper：`ProfileState` 在固件 JSON 顶层 `profile_state` 字段里。
+/// 帧 wrapper：`ProfileState` 在固件 JSON 顶层 `profile_state` 字段里，
+/// 新增的 `profiles` 数组在**帧顶层**（与 `profile_state` 平级）。
 impl<'de> serde::Deserialize<'de> for ProfileState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         // 接受两种格式：
-        // 1) 整行 JSON: { "cmd":.., "seq":.., "profile_state": {...} }
+        // 1) 整行 JSON: { "cmd":.., "seq":.., "profile_state": {...}, "profiles": [...] }
         // 2) 直接 body: { "active_profile":.., "profile_number":.., ... }
         // 注意：必须**避免**在自定义 Deserialize 里再次调用 from_value::<Self>，会无限递归。
         let v = serde_json::Value::deserialize(deserializer)?;
-        let inner = v.get("profile_state").cloned().unwrap_or(v);
+        let inner = v.get("profile_state").cloned().unwrap_or(v.clone());
         #[derive(serde::Deserialize)]
         struct Body {
             #[serde(default)]
@@ -752,12 +780,21 @@ impl<'de> serde::Deserialize<'de> for ProfileState {
             icon_path: String,
         }
         let b: Body = serde_json::from_value(inner).map_err(serde::de::Error::custom)?;
+        // `profiles` 数组在帧顶层（直接 body 形状时就在本层）
+        let profiles = v
+            .get("profiles")
+            .cloned()
+            .map(|p| serde_json::from_value::<Vec<ProfileEntry>>(p))
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
         Ok(ProfileState {
             active_profile: b.active_profile,
             profile_number: b.profile_number,
             profile_name: b.profile_name,
             has_custom_icon: b.has_custom_icon,
             icon_path: b.icon_path,
+            profiles,
         })
     }
 }
@@ -769,12 +806,13 @@ impl Serialize for ProfileState {
     {
         // 序列化时直接走普通结构体字段（用于 App 内部传递 / 测试）。
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("ProfileState", 5)?;
+        let mut s = serializer.serialize_struct("ProfileState", 6)?;
         s.serialize_field("active_profile", &self.active_profile)?;
         s.serialize_field("profile_number", &self.profile_number)?;
         s.serialize_field("profile_name", &self.profile_name)?;
         s.serialize_field("has_custom_icon", &self.has_custom_icon)?;
         s.serialize_field("icon_path", &self.icon_path)?;
+        s.serialize_field("profiles", &self.profiles)?;
         s.end()
     }
 }
@@ -795,6 +833,23 @@ pub struct ProfileIconSetReq {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileIconSetPayload {
     pub profile_icon: ProfileIconSetReq,
+}
+
+/// `0x15 CMD_PROFILE_NAME_SET` 请求：`data` 直接就是本结构
+/// （固件读 `data.profile` / `data.name`，无包裹字段）。
+/// `name` 为空串 = 清除自定义名称，回退设备默认名。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileNameSetReq {
+    /// 0~7；缺省时固件作用于当前激活 Profile
+    #[serde(skip_serializing_if = "is_zero")]
+    pub profile: u8,
+    /// UTF-8 中文名称（≤31 字节，固件按字符边界截断）；"" = 清除
+    pub name: String,
+}
+
+/// serde skip 助手：0 序列化为缺省（固件按缺省=激活 Profile 处理）
+fn is_zero(v: &u8) -> bool {
+    *v == 0
 }
 
 // ---------- 0x0C 语音文本（推送） ----------
@@ -1681,8 +1736,15 @@ impl KeymapData {
     /// `combo1_*` / `combo2_*` 分别写入 layer 1 / 2（FUN 组合层）。
     /// 返回是否有变化。
     pub fn apply_firmware_entries(&mut self, entries: &[FirmwareKeyEntry]) -> bool {
+        let idx = self.active_profile;
+        self.apply_firmware_entries_to(idx, entries)
+    }
+
+    /// 同 [Self::apply_firmware_entries]，但写入**指定** profile
+    /// （0x05 + `data.profile` 按方案拉取时，目标方案 ≠ 激活方案）。
+    pub fn apply_firmware_entries_to(&mut self, idx: u8, entries: &[FirmwareKeyEntry]) -> bool {
         let mut changed = false;
-        let Some(profile) = self.profile_mut(self.active_profile) else {
+        let Some(profile) = self.profile_mut(idx) else {
             return false;
         };
         let Some(base) = profile.layers.iter().find(|l| l.index == 0) else {
@@ -1744,7 +1806,8 @@ impl KeymapData {
     pub fn demo_60() -> Self {
         let mut profiles = Vec::with_capacity(8);
         for i in 0..8u8 {
-            profiles.push(Self::make_demo_profile(i, format!("P{i}")));
+            // 默认名 P1~P8（1 基，与设备 UI Conf1~Conf8 对齐）
+            profiles.push(Self::make_demo_profile(i, format!("P{}", i + 1)));
         }
         Self {
             active_profile: 0,
@@ -2361,6 +2424,48 @@ mod tests {
         let ps: ProfileState = serde_json::from_str(body).to("ps");
         assert_eq!(ps.active_profile, 2);
         assert_eq!(ps.profile_number, 3);
+    }
+
+    /// 0x10 推送（新固件）：顶层 `profiles` 数组解析进 `ProfileState.profiles`；
+    /// 中文名与 is_custom_name 逐字保留。
+    #[test]
+    fn profile_state_with_profiles_list() {
+        let raw = r#"{"cmd":16,"seq":0,"profile_state":{"active_profile":1,"profile_number":2,"profile_name":"P2","has_custom_icon":false},"profiles":[{"profile":0,"profile_number":1,"profile_name":"办公","is_custom_name":true,"has_custom_icon":false},{"profile":1,"profile_number":2,"profile_name":"","is_custom_name":false,"has_custom_icon":true,"icon_path":"/icon2.png"}]}"#;
+        let ps: ProfileState = serde_json::from_str(raw).to("ps");
+        assert_eq!(ps.active_profile, 1);
+        assert_eq!(ps.profiles.len(), 2);
+        assert_eq!(ps.profiles[0].profile, 0);
+        assert_eq!(ps.profiles[0].profile_name, "办公");
+        assert!(ps.profiles[0].is_custom_name);
+        assert!(!ps.profiles[1].is_custom_name);
+        assert_eq!(ps.profiles[1].icon_path, "/icon2.png");
+    }
+
+    /// 旧固件 0x10 无 `profiles` 字段 → 空向量（调用方按"无列表"处理）。
+    #[test]
+    fn profile_state_without_profiles_defaults_empty() {
+        let raw = r#"{"cmd":16,"seq":3,"profile_state":{"active_profile":0,"profile_number":1,"profile_name":"P1","has_custom_icon":false}}"#;
+        let ps: ProfileState = serde_json::from_str(raw).to("ps");
+        assert!(ps.profiles.is_empty());
+    }
+
+    /// 0x15 请求：data 直接是 {profile, name}，profile=0 缺省（固件按激活方案处理）。
+    #[test]
+    fn profile_name_set_req_shape() {
+        let req = ProfileNameSetReq {
+            profile: 0,
+            name: "游戏方案".into(),
+        };
+        let v = serde_json::to_value(&req).to("v");
+        assert_eq!(v["name"], "游戏方案");
+        assert!(v.get("profile").is_none(), "profile=0 应缺省序列化");
+        let req2 = ProfileNameSetReq {
+            profile: 3,
+            name: String::new(),
+        };
+        let v2 = serde_json::to_value(&req2).to("v2");
+        assert_eq!(v2["profile"], 3);
+        assert_eq!(v2["name"], "");
     }
 
     #[test]

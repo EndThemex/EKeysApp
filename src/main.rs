@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// 直接用编译期嵌入 exe 的 `img/ekeys.ico` 生成窗口/程序图标。
 /// `include_bytes!` 把图标字节打包进二进制，运行时无需外部文件。
 fn load_icon() -> Option<Arc<IconData>> {
-    const ICO_BYTES: &[u8] = include_bytes!("../img/icon.png");
+    const ICO_BYTES: &[u8] = include_bytes!("../img/icon.ico");
 
     if let Ok(img) = image::load_from_memory(ICO_BYTES) {
         let rgba = img.to_rgba8();

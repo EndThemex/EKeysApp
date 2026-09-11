@@ -310,7 +310,9 @@ impl AppHandle {
     /// 自动 GET：连接成功后拉取设备信息 + 全量设置。
     /// 失败只写日志，不弹 Toast（避免断线后连刷错误）。
     pub fn auto_get(&self) {
-        use crate::protocol::{CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, CMD_TIME_SET, DeviceSettings};
+        use crate::protocol::{
+            CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, CMD_PROFILE_STATE, CMD_TIME_SET, DeviceSettings,
+        };
         // 0) 同步本地时间到设备
         //
         // 协议 §9.4：连接后先下发 `0x13 CMD_TIME_SET`，写入 epoch + tz。
@@ -415,7 +417,40 @@ impl AppHandle {
                 }
             }
         });
-        // 3) 当前 Profile 的键映射（0x05；失败仅记日志，键映射页可手动"重新加载"）
+        // 3) Profile 状态 + 方案列表（0x10；TCP 连接时固件会主动推送，
+        //    串口无推送，这里统一拉一次兜底。失败仅记日志。）
+        let _ = self.with_link(|lm| {
+            match lm.request(CMD_PROFILE_STATE, None, Duration::from_millis(1000)) {
+                Ok(frame) => {
+                    // ProfileState 的自定义 Deserialize 接受整帧形状
+                    // （profile_state / profiles 都在顶层）。
+                    match serde_json::to_value(&frame)
+                        .map_err(|e| e.to_string())
+                        .and_then(|v| {
+                            serde_json::from_value::<ProfileState>(v).map_err(|e| e.to_string())
+                        })
+                    {
+                        Ok(ps) => {
+                            self.apply_profile_state(&ps);
+                            self.log_kind(
+                                LogKind::Rx,
+                                format!(
+                                    "GET → Profile 列表（{} 个方案）",
+                                    ps.profiles.len()
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            self.log_kind(LogKind::App, format!("GET Profile 解析失败: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.log_kind(LogKind::App, format!("GET Profile 状态失败: {e}"));
+                }
+            }
+        });
+        // 4) 当前 Profile 的键映射（0x05；失败仅记日志，键映射页可手动"重新加载"）
         if let Err(e) = self.refresh_keymap_from_device() {
             self.log_kind(LogKind::App, format!("GET 键映射失败: {e}"));
         }
@@ -441,6 +476,11 @@ impl AppHandle {
 
     /// 应用设备推送的 Profile 状态（0x10）：更新快照与草稿中的 Profile 展示字段。
     /// 草稿未被编辑的字段跟随新值（与 merge_push 同语义）。
+    ///
+    /// 新固件会在帧顶层携带 `profiles` 数组（全部方案的名称+图标元数据），
+    /// 这里同步进 keymap 快照/草稿的 profile 名称与图标标记，键映射页的
+    /// ComboBox 直接显示设备端名称（UTF-8 中文）。旧固件无此字段时
+    /// （空向量）保留本地名称不动。
     pub fn apply_profile_state(&self, ps: &ProfileState) {
         let old = {
             let s = self.settings.lock().unwrap();
@@ -466,6 +506,27 @@ impl AppHandle {
         if d.active_profile_has_custom_icon == old.2 {
             d.active_profile_has_custom_icon = ps.has_custom_icon;
         }
+        drop(d);
+
+        // 方案名称/图标列表同步：设备是名称的唯一权威（0x15 改名后固件持久化）。
+        // 未自定义名称的方案显示 "P{profile_number}"（与设备 UI Conf%u 对齐）。
+        if ps.profiles.is_empty() {
+            return;
+        }
+        for km in [&self.keymap, &self.keymap_draft] {
+            let mut data = km.lock().unwrap();
+            for entry in &ps.profiles {
+                let Some(p) = data.profile_mut(entry.profile) else {
+                    continue;
+                };
+                if entry.is_custom_name {
+                    p.name = entry.profile_name.clone();
+                } else if entry.profile_number > 0 {
+                    p.name = format!("P{}", entry.profile_number);
+                }
+                p.icon_set = entry.has_custom_icon;
+            }
+        }
     }
 
     /// 本次连接是否已成功读取全量配置
@@ -480,11 +541,23 @@ impl AppHandle {
     /// （settings.active_keymap_profile），保证条目写入正确的 Profile。
     /// 返回 Ok(条目数) / Err(原因)。
     pub fn refresh_keymap_from_device(&self) -> Result<usize, String> {
+        self.refresh_keymap_from_device_impl(None)
+    }
+
+    /// 按方案拉取（0x05 + `data.profile`）：键盘设置页选中某方案时单独
+    /// 获取该方案的具体配置，写入快照/草稿中对应的 profile 槽位。
+    /// **不改动** `active_profile`（切换激活仍走 0x08），只填充数据。
+    pub fn refresh_keymap_from_device_profile(&self, profile: u8) -> Result<usize, String> {
+        self.refresh_keymap_from_device_impl(Some(profile))
+    }
+
+    fn refresh_keymap_from_device_impl(&self, profile: Option<u8>) -> Result<usize, String> {
+        let data = profile.map(|p| serde_json::json!({ "profile": p }));
         self.with_link(|lm| {
             let frame = lm
                 .request(
                     crate::protocol::CMD_KEYMAP_GET,
-                    None,
+                    data,
                     Duration::from_millis(1000),
                 )
                 .map_err(|e| format!("0x05 请求失败: {e}"))?;
@@ -508,29 +581,81 @@ impl AppHandle {
                 .map(|n| n.min(11) as u8)
                 .unwrap_or(0);
             let n = entries.len();
-            let dev_profile = self.settings.lock().unwrap().active_keymap_profile as u8;
+            // 目标 profile：优先用响应的 `profile` 字段（固件回显实际返回的
+            // 方案），缺省时回退请求的 profile / 设备当前激活方案。
+            let dev_profile = frame
+                .extra_value("profile")
+                .and_then(|x| x.as_u64())
+                .map(|n| n as u8)
+                .or(profile)
+                .unwrap_or(self.settings.lock().unwrap().active_keymap_profile as u8);
             {
                 let mut snap = self.keymap.lock().unwrap();
-                if snap.profile(dev_profile).is_some() {
+                if profile.is_none() && snap.profile(dev_profile).is_some() {
+                    // 拉激活方案时对齐 active_profile（保持原行为）
                     snap.active_profile = dev_profile;
                 }
                 snap.fun_key1 = fun_key1;
                 snap.fun_key2 = fun_key2;
-                snap.apply_firmware_entries(&entries);
+                snap.apply_firmware_entries_to(dev_profile, &entries);
             }
             {
                 let mut draft = self.keymap_draft.lock().unwrap();
-                if draft.profile(dev_profile).is_some() {
+                if profile.is_none() && draft.profile(dev_profile).is_some() {
                     draft.active_profile = dev_profile;
                 }
                 draft.fun_key1 = fun_key1;
                 draft.fun_key2 = fun_key2;
-                draft.apply_firmware_entries(&entries);
+                draft.apply_firmware_entries_to(dev_profile, &entries);
             }
             // 选中键引用可能属于旧 Profile，直接清掉避免误导
             *self.selected_key.lock().unwrap() = None;
-            self.log_kind(LogKind::Rx, format!("GET → 键映射（{n} 键）"));
+            match profile {
+                Some(p) => self.log_kind(
+                    LogKind::Rx,
+                    format!("GET → 键映射（P{}，{n} 键）", p + 1),
+                ),
+                None => self.log_kind(LogKind::Rx, format!("GET → 键映射（{n} 键）")),
+            }
             Ok(n)
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 设置 Profile 名称（0x15 CMD_PROFILE_NAME_SET）：name="" 表示清除，
+    /// 回退设备默认名。成功后固件持久化并推送 0x10 列表，本端名称随之
+    /// 由 apply_profile_state 对齐；这里返回 Ok(设备回传名称)。
+    pub fn set_profile_name(&self, profile: u8, name: &str) -> Result<String, String> {
+        let req = crate::protocol::ProfileNameSetReq {
+            profile,
+            name: name.to_string(),
+        };
+        let data = serde_json::to_value(&req).map_err(|e| e.to_string())?;
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    crate::protocol::CMD_PROFILE_NAME_SET,
+                    Some(data),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x15 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| "设备未接受新名称".to_string()));
+            }
+            let name = frame
+                .data
+                .as_ref()
+                .and_then(|d| d.get("profile_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.log_kind(
+                LogKind::Tx,
+                format!("SET → Profile 名称（P{}，\"{name}\"）", profile + 1),
+            );
+            Ok(name)
         })
         .unwrap_or_else(|| Err("未连接".into()))
     }

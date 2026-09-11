@@ -213,8 +213,10 @@ impl WxiApp {
                     self.handle.log_kind(
                         LogKind::Rx,
                         format!(
-                            "Rx ← Profile: #{} \"{}\"",
-                            ps.active_profile, ps.profile_name
+                            "Rx ← Profile: #{} \"{}\"（{} 个方案）",
+                            ps.active_profile,
+                            ps.profile_name,
+                            ps.profiles.len()
                         ),
                     );
                     // 设备端切了 Profile（0x06/0x08 只作用于激活 Profile）→
