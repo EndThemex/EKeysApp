@@ -610,17 +610,28 @@ fn fun_text_accent(dark: bool, side: u8) -> Color32 {
 
 /// FUN 角标（分配条 / Drawer / 图例共用样式）：FUN1 琥珀、FUN2 青，亮底深字。
 ///
-/// 高度取 `interact_size.y`。注意 egui 的 horizontal 布局会把
+/// 默认高度取 `interact_size.y`。注意 egui 的 horizontal 布局会把
 /// `allocate_exact_size` 元素在整块剩余高度内垂直居中，而 ComboBox 按钮
 /// 是「贴顶」分配，两者混排时必须把行高固定为下拉按钮实际高度
-/// （见 fun_assignment_bar 中 combo_h），否则标签与下拉框不在同一中线。
+/// （见 fun_assignment_bar 中 combo_h），否则标签与下拉框不在同一中线；
+/// 分配条里直接用 paint_fun_tag 按 ComboBox 实际矩形对齐绘制。
 /// 文字按 galley `mesh_bounds` 光学居中（同 fonts.rs 约定）："FUN1" 这类
 /// 无下延字形的墨迹高于 galley 几何中心，直接 CENTER_CENTER 会显得偏上。
 fn fun_tag(ui: &mut egui::Ui, side: u8) {
-    let (bg, stroke_c, text_c) = fun_colors(side);
-    let h = ui.spacing().interact_size.y.max(18.0);
+    fun_tag_h(ui, side, ui.spacing().interact_size.y.max(18.0));
+}
+
+/// `fun_tag` 的显式高度版本：`h` 为标签矩形高度。
+fn fun_tag_h(ui: &mut egui::Ui, side: u8, h: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(42.0, h), Sense::hover());
-    let p = ui.painter();
+    paint_fun_tag(ui.painter(), rect, side);
+}
+
+/// 在 `rect` 上绘制 FUN 角标（不占用布局）。文字按 galley `mesh_bounds`
+/// 光学居中（同 fonts.rs 约定）："FUN1" 这类无下延字形的墨迹高于 galley
+/// 几何中心，直接 CENTER_CENTER 会显得偏上。
+fn paint_fun_tag(p: &egui::Painter, rect: Rect, side: u8) {
+    let (bg, stroke_c, text_c) = fun_colors(side);
     p.rect_filled(rect, 4.0, bg);
     p.rect_stroke(rect, 4.0, Stroke::new(1.0, stroke_c), StrokeKind::Inside);
 
@@ -742,15 +753,7 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
             );
             ui.add_space(4.0);
 
-            // 两组 FUN 分配并排在一行：[FUN1 下拉] | [FUN2 下拉]。
-            // 注意：ComboBox 按钮在 horizontal 里是「贴顶」分配（内部
-            // button_frame 基于 available_rect_before_wrap 自顶向下布局），
-            // 而 fun_tag 这类 allocate_exact_size 元素按剩余空间整体居中，
-            // 两种锚定基准不同，直接混排会导致标签与下拉框不在同一水平线。
-            // 这里给整行固定高度 = 下拉按钮实际高度（Button 字体行高与
-            // icon_width 取大者，加 button_padding，且不低于 interact_size），
-            // 使两种分配方式的中心重合，FUN1/FUN2 两组必然共处一条中线。
-            let combo_h = {
+            let row_h = {
                 let pad = ui.spacing().button_padding;
                 let font = ui.style().text_styles[&egui::TextStyle::Button].clone();
                 let galley = ui
@@ -759,13 +762,26 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
                 (galley.size().y.max(ui.spacing().icon_width) + 2.0 * pad.y)
                     .max(ui.spacing().interact_size.y)
             };
+            let tag_w = 42.0_f32;
+            let combo_w = 96.0_f32;
+            let gap = 6.0_f32;
             ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), combo_h),
+                egui::vec2(ui.available_width(), row_h),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for (side, id_salt) in [(1u8, "fun-key1"), (2u8, "fun-key2")] {
-                        fun_tag(ui, side);
+                    ui.spacing_mut().item_spacing.x = gap;
+                    // 收集 tag_slot 信息，最后统一绘制（保证两个 tag
+                    // 共顶 / 共底，与 ComboBox 实际 outer_rect 解耦）。
+                    let mut tag_slots: [Rect; 2] = [Rect::NOTHING; 2];
+                    let mut side_tags: [u8; 2] = [0, 0];
+                    for (i, (side, id_salt)) in [(1u8, "fun-key1"), (2u8, "fun-key2")]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let (tag_slot, _) =
+                            ui.allocate_exact_size(Vec2::new(tag_w, row_h), Sense::hover());
+                        tag_slots[i] = tag_slot;
+                        side_tags[i] = side;
                         let value = if side == 1 {
                             draft.fun_key1
                         } else {
@@ -776,15 +792,52 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
                         } else {
                             draft.fun_key1
                         };
-                        egui::ComboBox::from_id_salt(id_salt)
-                            .selected_text(key_label(value))
-                            .width(96.0)
-                            .show_ui(ui, |cb| {
-                                fun_combo_options(cb, &mut draft, side, &phys, other)
-                            });
-                        if side == 1 {
-                            ui.separator();
+                        // 把 ComboBox 包进独立子 Ui：
+                        //  - 子 Ui 的 max_rect 高度 = row_h，保证子 Ui 内
+                        //    ComboBox 的 `available_rect_before_wrap` 高度
+                        //    = row_h，button_frame outer_rect 撑满 row 高度；
+                        //  - 子 Ui 内部 ComboBox 的 advance 不会污染主 Ui
+                        //    的 placer（cursor.max.y 在子 Ui 内被 max_rect
+                        //    截断在 row.bottom）。
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(combo_w, row_h),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |cb| {
+                                egui::ComboBox::from_id_salt(id_salt)
+                                    .selected_text(key_label(value))
+                                    .width(combo_w)
+                                    .show_ui(cb, |cbin| {
+                                        fun_combo_options(cbin, &mut draft, side, &phys, other)
+                                    });
+                            },
+                        );
+                        // 中间的视觉竖线：不走 ui.separator()（避免
+                        // 推进主 Ui cursor 进而影响后续子 Ui 布局），改用
+                        // 手绘 vline + add_space 推进 cursor。
+                        if i == 0 {
+                            let row_rect = ui.min_rect();
+                            let line_x = ui.cursor().min.x + gap * 0.5;
+                            ui.painter().vline(
+                                line_x,
+                                row_rect.top() + 2.0..=row_rect.bottom() - 2.0,
+                                ui.visuals().widgets.noninteractive.bg_stroke,
+                            );
+                            ui.add_space(gap * 0.5);
                         }
+                    }
+                    // 用整行 ui.min_rect() 的真实 min.y / max.y 重新对齐
+                    // 两组 FUN tag（替代之前用单个 ComboBox cr.top() 的
+                    // 方案，避免被 ComboBox 内部 button_frame 偏移干扰）。
+                    let row_rect = ui.min_rect();
+                    for i in 0..2 {
+                        paint_fun_tag(
+                            ui.painter(),
+                            Rect::from_min_max(
+                                egui::pos2(tag_slots[i].left(), row_rect.top()),
+                                egui::pos2(tag_slots[i].right(), row_rect.bottom()),
+                            ),
+                            side_tags[i],
+                        );
                     }
                 },
             );

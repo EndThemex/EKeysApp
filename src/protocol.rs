@@ -141,6 +141,8 @@ pub const CMD_PROFILE_ICON_SET: u8 = 0x11;
 pub const CMD_HA_STATUS: u8 = 0x12;
 /// 系统时间注入（App → 固件，写入 epoch + tz）
 pub const CMD_TIME_SET: u8 = 0x13;
+/// 进入烧录模式（App → 固件，设备回复后立即复位进 USB-Serial-JTAG 下载模式）
+pub const CMD_FIRMWARE_DOWNLOAD: u8 = 0x14;
 
 /// 响应帧命令 ID = 请求命令 ID | 0x80
 ///

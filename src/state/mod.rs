@@ -80,6 +80,8 @@ pub enum ToastKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UiConfirmKind {
     SwitchWorkMode,
+    /// 进入烧录模式（0x14）：设备复位进下载模式前断开串口
+    EnterDownloadMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,6 +158,11 @@ pub struct AppHandle {
     /// 由 Settings 页 → PC 状态 tab 切换；退出时由 `on_exit` 持久化到
     /// `LocalConfig::pc_status_push`，启动时由 `main.rs` 注入。
     pub pc_status_push_enabled: Arc<AtomicBool>,
+    /// 设备已进入（或正在进入）烧录模式。置位后跳过所有自动重连，
+    /// 避免重连逻辑占用串口导致 esptool / idf.py 无法烧录。
+    /// 置位时机：用户确认进入烧录模式、0x14 请求发出之前；
+    /// 清除时机：下一次连接成功（attach_link）。
+    pub download_mode_armed: Arc<AtomicBool>,
 }
 
 /// PC 状态周期性推送间隔。1 秒一拍，与心跳同节拍，确保固件 Lock 灯指示
@@ -184,11 +191,17 @@ pub struct ReconnectorHandle {
     /// 与 schedule_reconnect 同一约束的开关：未勾选自动连接时不兜底重连，
     /// 否则会出现"弹了开始重连 Toast 又被 tick 取消"的混乱行为。
     pub auto_connect: Arc<Mutex<bool>>,
+    /// 烧录模式抑制标记：与 `AppHandle::download_mode_armed` 同一 Arc
+    pub download_mode_armed: Arc<AtomicBool>,
 }
 
 impl ReconnectorHandle {
     /// 触发兜底重连调度：仅在 router 没机会转 Disconnected 的极端场景下使用。
     pub fn trigger(&self) {
+        // 烧录模式抑制：与 schedule_reconnect 一致
+        if self.download_mode_armed.load(Ordering::Acquire) {
+            return;
+        }
         // 未启用自动连接：与 schedule_reconnect 保持一致，静默放弃
         if !*self.auto_connect.lock().unwrap() {
             return;
@@ -264,6 +277,7 @@ impl AppHandle {
             // 默认关闭：避免用户不察觉时主动暴露 Lock / 网络状态到固件。
             // Settings → PC 状态 tab 可勾选打开。
             pc_status_push_enabled: Arc::new(AtomicBool::new(false)),
+            download_mode_armed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -283,6 +297,8 @@ impl AppHandle {
         self.tx_count.store(0, Ordering::Relaxed);
         self.rx_count.store(0, Ordering::Relaxed);
         *self.uptime_start.lock().unwrap() = Some(Instant::now());
+        // 连接成功 = 设备已离开烧录模式（或用户换了设备）：解除重连抑制
+        self.download_mode_armed.store(false, Ordering::Release);
 
         // 同步共享 state：UI 顶栏/侧栏/连接页都从这里读
         *self.state.lock().unwrap() = ConnectionState::Online;
@@ -608,6 +624,15 @@ impl AppHandle {
     /// 用户主动断开（点击断开按钮）或勾选后又取消勾选，都应进入真正的"未连接"
     /// 状态、不再被定时重连拖死。
     pub fn schedule_reconnect(&self, port_name: String) {
+        // 烧录模式抑制：设备正在下载模式等 esptool 接管串口，重连必然失败
+        // 且会占用 COM 口；烧录完成手动重连时由 attach_link 解除抑制。
+        if self.download_mode_armed.load(Ordering::Acquire) {
+            self.log_kind(
+                LogKind::App,
+                format!("跳过自动重连 {port_name}：设备处于烧录模式"),
+            );
+            return;
+        }
         // 没开自动连接就别调度重连——这是用户手动断开后被定时任务"卡死"的根因。
         if !*self.auto_connect.lock().unwrap() {
             self.log_kind(
@@ -759,6 +784,7 @@ impl AppHandle {
             ui_tx: self.ui_tx.clone(),
             pending_reconnect: Arc::clone(&self.pending_reconnect),
             auto_connect: Arc::clone(&self.auto_connect),
+            download_mode_armed: Arc::clone(&self.download_mode_armed),
         }
     }
 

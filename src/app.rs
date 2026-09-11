@@ -174,12 +174,21 @@ impl WxiApp {
                     && self.handle.link.lock().unwrap().is_some()
                 {
                     self.handle.detach_link();
+                    // 烧录模式：设备已复位进下载模式等 esptool 接管串口，
+                    // schedule_reconnect 内部会再次拦截，这里只保留端口信息，
+                    // 不做任何重连调度。
+                    let armed = self
+                        .handle
+                        .download_mode_armed
+                        .load(std::sync::atomic::Ordering::Acquire);
                     // 先取出端口释放锁再调度：if let 的 scrutinee 临时 MutexGuard
                     // 会存活到块尾，schedule_reconnect 内部再锁其它互斥体时
                     // 极易形成同类自死锁（参照 panel_connection 的教训）。
                     let last_port = self.handle.last_port.lock().unwrap().clone();
                     if let Some(port) = last_port {
-                        self.handle.schedule_reconnect(port);
+                        if !armed {
+                            self.handle.schedule_reconnect(port);
+                        }
                     }
                 }
             }
@@ -249,6 +258,15 @@ impl WxiApp {
                         self.confirm_title = "切换工作模式".into();
                         self.confirm_body =
                             "切换工作模式将重建键盘实例，期间无法响应按键，是否继续？".into();
+                        self.confirm_kind = Some(kind);
+                        self.confirm_open = true;
+                    }
+                    UiConfirmKind::EnterDownloadMode => {
+                        self.confirm_title = "进入烧录模式".into();
+                        self.confirm_body = "设备将立即复位进入烧录（下载）模式，当前连接会断开，\
+                                             之后可用 idf.py flash / esptool 烧录固件。\
+                                             烧录完成后请在「连接」页手动重连。是否继续？"
+                            .into();
                         self.confirm_kind = Some(kind);
                         self.confirm_open = true;
                     }
@@ -419,7 +437,8 @@ impl eframe::App for WxiApp {
                 ConfirmOutcome::Yes => {
                     if let Some(k) = self.confirm_kind.take() {
                         match k {
-                            UiConfirmKind::SwitchWorkMode => {
+                            UiConfirmKind::SwitchWorkMode
+                            | UiConfirmKind::EnterDownloadMode => {
                                 self.settings_st.pending_confirm = Some(k);
                             }
                         }

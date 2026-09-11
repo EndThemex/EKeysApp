@@ -81,6 +81,9 @@ pub struct SettingsPanelState {
     pub fw_status: Option<String>,
     /// 状态是否为错误（控制显示颜色）
     pub fw_status_is_err: bool,
+    /// 进入烧录模式（0x14）请求的异步结果接收端（Some = 等待设备确认，每帧轮询）
+    pub fw_download_rx:
+        Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
@@ -610,6 +613,12 @@ fn firmware_tab(
 
     let online = handle.state.lock().unwrap().is_online();
 
+    // 用户已在确认弹窗点了"是"：真正执行进入烧录模式
+    if st.pending_confirm == Some(UiConfirmKind::EnterDownloadMode) {
+        st.pending_confirm = None;
+        start_download_mode(handle, st);
+    }
+
     // ---- 异步结果回收（避免同步 request 阻塞 UI 线程导致窗口卡死）----
 
     // 固件信息查询结果
@@ -705,6 +714,75 @@ fn firmware_tab(
             Err(TryRecvError::Empty) => {} // 等待设备确认中（最多 3s）
             Err(TryRecvError::Disconnected) => {
                 st.fw_ota_rx = None;
+            }
+        }
+    }
+
+    // 烧录模式（0x14）请求结果
+    if st.fw_download_rx.is_some() {
+        let outcome = st.fw_download_rx.as_ref().unwrap().try_recv();
+        match outcome {
+            Ok(Ok(frame)) => {
+                st.fw_download_rx = None;
+                if frame.status() == Some(0) {
+                    handle.log_kind(
+                        crate::state::LogKind::Tx,
+                        "设备已确认，复位进入烧录模式",
+                    );
+                    // 设备即将复位：主动断开连接让出 COM 口给烧录工具
+                    //（download_mode_armed 已在请求发出前置位，重连被抑制）
+                    handle.detach_link();
+                    st.fw_status = Some(
+                        "设备已重启进入烧录模式，连接已断开。\
+                         请使用 idf.py flash / esptool 烧录；\
+                         烧录完成后在「连接」页手动重连。"
+                            .into(),
+                    );
+                    st.fw_status_is_err = false;
+                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                        crate::state::ToastKind::Success,
+                        "设备已进入烧录模式".to_string(),
+                    ));
+                } else {
+                    // 设备明确拒绝（如旧固件不认识 0x14）：解除重连抑制
+                    handle
+                        .download_mode_armed
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    let msg =
+                        frame.error.unwrap_or_else(|| "设备拒绝进入烧录模式".to_string());
+                    st.fw_status = Some(format!("进入烧录模式失败：{msg}"));
+                    st.fw_status_is_err = true;
+                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                        crate::state::ToastKind::Error,
+                        format!("进入烧录模式失败：{msg}"),
+                    ));
+                }
+            }
+            Ok(Err(e)) => {
+                // 请求超时：固件在发出响应约 100ms 后就复位，响应若没来得及
+                // flush 便会丢失——极可能设备已进入烧录模式。保持重连抑制
+                // （armed 置位），主动断开，由用户手动确认设备状态。
+                st.fw_download_rx = None;
+                handle.log_kind(
+                    crate::state::LogKind::App,
+                    format!("烧录模式请求未收到确认: {e}（设备可能已复位）"),
+                );
+                handle.detach_link();
+                st.fw_status = Some(
+                    "未收到设备确认（响应可能在复位前丢失）。\
+                     设备大概率已进入烧录模式，可直接尝试烧录；\
+                     若未进入，请手动重连后重试。"
+                        .into(),
+                );
+                st.fw_status_is_err = true;
+                let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                    crate::state::ToastKind::Warning,
+                    "未收到设备确认，可能已进入烧录模式".to_string(),
+                ));
+            }
+            Err(TryRecvError::Empty) => {} // 等待设备确认中（最多 3s）
+            Err(TryRecvError::Disconnected) => {
+                st.fw_download_rx = None;
             }
         }
     }
@@ -851,6 +929,76 @@ fn firmware_tab(
             );
         }
     });
+
+    ui.add_space(8.0);
+    ui.group(|ui| {
+        ui.strong("进入烧录模式");
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(
+                "设备将立即复位进入 USB 下载模式（无需按 BOOT 键），当前连接会断开，\
+                 应用在烧录完成前不会自动重连，以免占用串口。\
+                 烧录完成后请在「连接」页手动重连。",
+            )
+            .weak(),
+        );
+        ui.add_space(4.0);
+        let waiting = st.fw_download_rx.is_some();
+        if ui
+            .add_enabled(
+                online && !waiting,
+                egui::Button::new(if waiting {
+                    "等待设备确认…"
+                } else {
+                    "进入烧录模式"
+                }),
+            )
+            .on_disabled_hover_text(if !online {
+                "设备未连接"
+            } else if waiting {
+                "正在处理中"
+            } else {
+                ""
+            })
+            .clicked()
+        {
+            // 危险操作 → 走确认弹窗（与切换工作模式同机制）
+            let _ = handle
+                .ui_tx
+                .send(UiEvent::ConfirmYes(UiConfirmKind::EnterDownloadMode));
+        }
+    });
+}
+
+/// 进入烧录模式：先置位 `download_mode_armed`（抑制自动重连），再发
+/// `0x14 CMD_FIRMWARE_DOWNLOAD` 请求（异步）。设备确认后约 100ms 复位，
+/// 响应回收后由 `firmware_tab` 主动断开连接，把 COM 口让给烧录工具。
+fn start_download_mode(handle: &AppHandle, st: &mut SettingsPanelState) {
+    use crate::protocol::CMD_FIRMWARE_DOWNLOAD;
+    use std::sync::atomic::Ordering;
+
+    // 先武装抑制标记再发请求：设备复位导致的被动断开也必须跳过重连
+    handle.download_mode_armed.store(true, Ordering::Release);
+    st.fw_status = Some("已发送进入烧录模式请求，等待设备确认…".into());
+    st.fw_status_is_err = false;
+
+    match handle.with_link(|lm| {
+        lm.request_async(CMD_FIRMWARE_DOWNLOAD, None, std::time::Duration::from_millis(3000))
+    }) {
+        Some(rx) => {
+            st.fw_download_rx = Some(rx);
+        }
+        None => {
+            // 未连接：解除抑制，避免残留标记影响后续正常重连
+            handle.download_mode_armed.store(false, Ordering::Release);
+            st.fw_status = Some("设备未连接".into());
+            st.fw_status_is_err = true;
+            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                crate::state::ToastKind::Error,
+                "设备未连接".to_string(),
+            ));
+        }
+    }
 }
 
 /// 选择固件文件：读入内存 + 基础校验（ESP32 应用镜像首字节 0xE9）+ 计算 MD5。
