@@ -88,9 +88,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut ConnectPanelState) {
                                 info.vid.map(|v| format!("0x{v:04X}")).unwrap_or("-".into()),
                                 info.pid.map(|v| format!("0x{v:04X}")).unwrap_or("-".into())
                             ));
-                            if let Some(m) = &info.manufacturer {
-                                ui.label(format!("厂商名称：{m}"));
-                            }
                             if let Some(s) = &info.serial_number {
                                 ui.label(format!("序列号：{s}"));
                             }
