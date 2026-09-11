@@ -1048,6 +1048,126 @@ pub fn sanitize_audio_name(raw: &str) -> Option<String> {
     Some(format!("{base}.{ext}"))
 }
 
+/// 音频文件内容预检：按扩展名核对文件魔数，拦截两类问题——
+/// ① 改扩展名伪装（下载站 ".wav" 实为 MP4 容器，2026-09-11 实测事故）：
+///    固件按扩展名选解码器，RIFF 校验失败后会把整个文件当裸 PCM 播出
+///    （表现为"呲"一声噪声即停）；② 设备解码库不支持的 WAV 编码
+///    （IEEE float / WAVE_FORMAT_EXTENSIBLE / 非 16bit，见库
+///    read_WAV_Header）。失败时返回可直接展示给用户的中文错误。
+pub fn validate_audio_content(ext: &str, bytes: &[u8]) -> Result<(), String> {
+    match ext {
+        "wav" => validate_wav(bytes),
+        "mp3" => validate_mp3(bytes),
+        _ => Ok(()), // 扩展名白名单由 valid_audio_name 负责
+    }
+}
+
+/// 通过魔数猜测真实容器格式（用于错误提示）。
+fn sniff_audio_container(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some("MP4/M4A 容器（可能是改了扩展名的视频/音频文件）");
+    }
+    if bytes.len() >= 4 {
+        match &bytes[0..4] {
+            b"RIFF" => return Some("RIFF（WAV）"),
+            b"OggS" => return Some("OGG"),
+            b"fLaC" => return Some("FLAC"),
+            _ => {}
+        }
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"ID3" {
+        return Some("MP3");
+    }
+    // MPEG 帧同步：0xFF + 0b111xxxxx
+    if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
+        return Some("MP3");
+    }
+    None
+}
+
+fn validate_wav(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        let actual = sniff_audio_container(bytes).unwrap_or("无法识别的格式");
+        return Err(format!(
+            "文件内容不是 WAV（实际为{actual}）。设备按扩展名选解码器，\
+             伪装文件会被播放成噪声。请转码后上传：\
+             ffmpeg -i 输入 -vn -acodec pcm_s16le 输出.wav"
+        ));
+    }
+    let (code, ch, _sr, bits) = wav_format_params(bytes)
+        .ok_or_else(|| "WAV 缺少 fmt 块（文件头损坏），设备无法解码".to_string())?;
+    if code != 1 {
+        let codec_name = match code {
+            3 => "IEEE float",
+            6 => "A-law",
+            7 => "μ-law",
+            0xFFFE => "WAVE_FORMAT_EXTENSIBLE",
+            _ => "非 PCM 编码",
+        };
+        return Err(format!(
+            "WAV 编码为格式码 {code}（{codec_name}），设备仅支持 PCM（格式码 1）。\
+             请转码：ffmpeg -i 输入 -acodec pcm_s16le 输出.wav"
+        ));
+    }
+    if bits != 16 {
+        return Err(format!(
+            "WAV 位深 {bits}bit，设备仅支持 16bit PCM。\
+             请转码：ffmpeg -i 输入 -acodec pcm_s16le 输出.wav"
+        ));
+    }
+    if ch != 1 && ch != 2 {
+        return Err(format!("WAV 声道数 {ch}，设备仅支持单声道/立体声"));
+    }
+    Ok(())
+}
+
+fn validate_mp3(bytes: &[u8]) -> Result<(), String> {
+    let is_id3 = bytes.len() >= 3 && &bytes[0..3] == b"ID3";
+    let is_frame_sync = bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0;
+    if is_id3 || is_frame_sync {
+        return Ok(());
+    }
+    let actual = sniff_audio_container(bytes).unwrap_or("无法识别的格式");
+    Err(format!(
+        "文件内容不是 MP3（实际为{actual}）。请转码后上传：\
+         ffmpeg -i 输入 -acodec libmp3lame 输出.mp3"
+    ))
+}
+
+/// 解析 WAV 的 fmt 块：返回 (格式码, 声道数, 采样率, 位深)。
+/// 从 offset 12 起按 RIFF chunk 规则逐块查找 "fmt "（跳过 LIST/JUNK 等）。
+fn wav_format_params(bytes: &[u8]) -> Option<(u16, u16, u32, u16)> {
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        if id == b"fmt " {
+            if pos + 8 + 16 > bytes.len() {
+                return None;
+            }
+            let p = pos + 8;
+            let code = u16::from_le_bytes([bytes[p], bytes[p + 1]]);
+            let ch = u16::from_le_bytes([bytes[p + 2], bytes[p + 3]]);
+            let sr = u32::from_le_bytes([
+                bytes[p + 4],
+                bytes[p + 5],
+                bytes[p + 6],
+                bytes[p + 7],
+            ]);
+            let bits = u16::from_le_bytes([bytes[p + 14], bytes[p + 15]]);
+            return Some((code, ch, sr, bits));
+        }
+        // RIFF 规范：chunk payload 按 2 字节对齐
+        pos += 8 + size + (size & 1);
+    }
+    None
+}
+
 /// `0x16 list` 响应的单个文件条目（data.files[]）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioFileInfo {
@@ -3054,6 +3174,72 @@ mod tests {
             let n = sanitize_audio_name(raw).to("n");
             assert!(valid_audio_name(&n), "{raw} → {n} 应通过白名单");
         }
+    }
+
+    /// 构造最小 WAV 头（44 字节标准布局）便于测试。
+    fn pcm_wav(code: u16, ch: u16, bits: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&36u32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&code.to_le_bytes());
+        v.extend_from_slice(&ch.to_le_bytes());
+        v.extend_from_slice(&44100u32.to_le_bytes());
+        v.extend_from_slice(&(44100u32 * u32::from(ch) * u32::from(bits) / 8).to_le_bytes());
+        v.extend_from_slice(&(ch * bits / 8).to_le_bytes());
+        v.extend_from_slice(&bits.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v
+    }
+
+    /// 构造 MP4 容器头（ftyp isom，与 2026-09-11 下载站假 wav 同构）。
+    fn mp4_bytes() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        v.extend_from_slice(b"ftypisom");
+        v.extend_from_slice(&[0x00, 0x00, 0x02, 0x00]);
+        v.extend_from_slice(b"isomiso2avc1mp41");
+        v.resize(64, 0);
+        v
+    }
+
+    /// 内容预检：拦截伪装扩展名与设备不支持的 WAV 编码。
+    #[test]
+    fn validate_audio_content_rules() {
+        // 下载站"假 wav"：MP4 容器改扩展名（2026-09-11 实测事故）
+        let err = validate_audio_content("wav", &mp4_bytes()).unwrap_err();
+        assert!(err.contains("不是 WAV"), "{err}");
+        assert!(err.contains("MP4"), "{err}");
+
+        // 真 WAV：PCM 16bit 单声道/立体声 → 放行
+        assert!(validate_audio_content("wav", &pcm_wav(1, 1, 16)).is_ok());
+        assert!(validate_audio_content("wav", &pcm_wav(1, 2, 16)).is_ok());
+
+        // 设备解码库不支持的编码 → 明确报错（对齐 read_WAV_Header 能力）
+        assert!(validate_audio_content("wav", &pcm_wav(3, 2, 32)).is_err(), "IEEE float");
+        assert!(
+            validate_audio_content("wav", &pcm_wav(0xFFFE, 2, 16)).is_err(),
+            "WAVE_FORMAT_EXTENSIBLE"
+        );
+        assert!(validate_audio_content("wav", &pcm_wav(1, 2, 24)).is_err(), "24bit");
+        // 8bit：库头解析虽放行，但输出通路失真（幅度 ~0.8%），按不支持处理
+        assert!(validate_audio_content("wav", &pcm_wav(1, 1, 8)).is_err(), "8bit");
+
+        // MP3：ID3 头 / 帧同步 0xFFEx 都是合法内容
+        let mut id3 = b"ID3\x03".to_vec();
+        id3.resize(64, 0);
+        assert!(validate_audio_content("mp3", &id3).is_ok());
+        assert!(validate_audio_content("mp3", &[0xFF, 0xFB, 0x90, 0x00]).is_ok());
+
+        // 伪装 MP3：RIFF（WAV）→ 报错并提示真实格式
+        let err = validate_audio_content("mp3", &pcm_wav(1, 2, 16)).unwrap_err();
+        assert!(err.contains("不是 MP3"), "{err}");
+        assert!(err.contains("RIFF"), "{err}");
+        let err = validate_audio_content("mp3", &mp4_bytes()).unwrap_err();
+        assert!(err.contains("MP4"), "{err}");
     }
 
     /// 0x16 list / 0x17 get 响应解析（与固件响应字段对齐）。

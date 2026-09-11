@@ -7,7 +7,9 @@
 
 use eframe::egui;
 
-use crate::protocol::{sanitize_audio_name, valid_audio_name, AUDIO_FILE_MAX_BYTES};
+use crate::protocol::{
+    sanitize_audio_name, valid_audio_name, validate_audio_content, AUDIO_FILE_MAX_BYTES,
+};
 use crate::state::{AppHandle, ToastKind, UiEvent};
 
 /// 固件侧 `begin` 要求的剩余空间 headroom（cmd_audio.cpp kFreeHeadroomBytes）。
@@ -175,6 +177,16 @@ fn start_upload(handle: &AppHandle, st: &mut AudioPanelState) {
                 AUDIO_FILE_MAX_BYTES / 1024
             ),
         );
+        return;
+    }
+    // 内容预检：拦截伪装扩展名（如 .wav 实为 MP4）与设备不支持的编码
+    let local_ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if let Err(e) = validate_audio_content(&local_ext, &bytes) {
+        toast(handle, ToastKind::Error, e);
         return;
     }
     // 设备端文件名：手动填的优先，否则由本地文件名自动生成
