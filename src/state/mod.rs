@@ -547,6 +547,8 @@ impl AppHandle {
     /// 按方案拉取（0x05 + `data.profile`）：键盘设置页选中某方案时单独
     /// 获取该方案的具体配置，写入快照/草稿中对应的 profile 槽位。
     /// **不改动** `active_profile`（切换激活仍走 0x08），只填充数据。
+    /// 旧固件不回显 `profile`（不支持按方案拉取）时返回 Err，
+    /// 不会向任何槽位写入数据。
     pub fn refresh_keymap_from_device_profile(&self, profile: u8) -> Result<usize, String> {
         self.refresh_keymap_from_device_impl(Some(profile))
     }
@@ -582,13 +584,24 @@ impl AppHandle {
                 .unwrap_or(0);
             let n = entries.len();
             // 目标 profile：优先用响应的 `profile` 字段（固件回显实际返回的
-            // 方案），缺省时回退请求的 profile / 设备当前激活方案。
-            let dev_profile = frame
+            // 方案）。旧固件不支持按方案拉取（忽略 data.profile，永远返回
+            // 设备激活方案）且不回显：此时若按请求的 profile 落槽，会把
+            // 激活方案的数据覆盖进目标方案的槽位（切方案后显示别的方案的
+            // 配置）。必须显式报错让 UI 提示升级固件，而不是静默写错。
+            let echoed = frame
                 .extra_value("profile")
                 .and_then(|x| x.as_u64())
-                .map(|n| n as u8)
-                .or(profile)
-                .unwrap_or(self.settings.lock().unwrap().active_keymap_profile as u8);
+                .map(|n| n as u8);
+            let dev_profile = match (profile, echoed) {
+                (Some(_), None) => {
+                    return Err(
+                        "设备固件不支持按方案拉取键映射（0x05 无 profile 回显），请升级固件"
+                            .into(),
+                    );
+                }
+                (_, Some(e)) => e,
+                (None, None) => self.settings.lock().unwrap().active_keymap_profile as u8,
+            };
             {
                 let mut snap = self.keymap.lock().unwrap();
                 if profile.is_none() && snap.profile(dev_profile).is_some() {

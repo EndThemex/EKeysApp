@@ -145,6 +145,10 @@ pub const CMD_TIME_SET: u8 = 0x13;
 pub const CMD_FIRMWARE_DOWNLOAD: u8 = 0x14;
 /// Profile 名称设置（App → 固件；name="" 表示清除，回退设备默认名）
 pub const CMD_PROFILE_NAME_SET: u8 = 0x15;
+/// 音效文件管理（App → 固件，data.op 分发：list/begin/data/end/abort/delete）
+pub const CMD_AUDIO_FILE: u8 = 0x16;
+/// 音效板绑定与播放（App → 固件，data.op 分发：get/set/play/stop）
+pub const CMD_AUDIO_PAD: u8 = 0x17;
 
 /// 响应帧命令 ID = 请求命令 ID | 0x80
 ///
@@ -986,6 +990,92 @@ pub struct HeartbeatResp {
     pub device: String,
 }
 
+// ---------- 0x16 音效文件管理 / 0x17 音效板绑定 ----------
+
+/// 文件名基段上限（不含 '.' 和扩展名；与固件 `kNameBaseMax` 同步维护）
+pub const AUDIO_NAME_BASE_MAX: usize = 20;
+/// 完整文件名上限：20 基名 + '.' + 3 扩展 = 24 字符（与固件 `kNameLenMax` 一致）
+pub const AUDIO_NAME_LEN_MAX: usize = AUDIO_NAME_BASE_MAX + 4;
+/// 单文件大小上限 2MB（固件 begin/data 双重校验；free 还要求 ≥ size + 64KB）
+pub const AUDIO_FILE_MAX_BYTES: u32 = 2 * 1024 * 1024;
+/// 上传分块二进制大小（b64 后 1368 字符 < 固件 2048 行缓冲）
+pub const AUDIO_UPLOAD_BLOCK_BYTES: usize = 1024;
+/// 音效板键位数（矩阵键 1~11）
+pub const AUDIO_PAD_KEY_COUNT: usize = 11;
+
+/// 音效文件名白名单校验：`^[a-z0-9_]{1,20}\.(mp3|wav)$`
+///
+/// 与固件 `cmd_audio.cpp::validAudioName` **字节级一致**：按字节而非字符判断，
+/// 避免多字节 UTF-8 文件名在两侧边界判定不同。
+pub fn valid_audio_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    if !(5..=AUDIO_NAME_LEN_MAX).contains(&b.len()) {
+        return false;
+    }
+    let (base, ext) = b.split_at(b.len() - 4);
+    if ext != b".mp3" && ext != b".wav" {
+        return false;
+    }
+    base.iter().all(|&c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_'
+    })
+}
+
+/// 由本机文件名生成合法的设备端文件名：
+/// 扩展名强制小写（非 mp3/wav 返回 None）、基段非法字符替换为 `_`、
+/// 截断到 20 字符、空基段回退 "audio"。
+pub fn sanitize_audio_name(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    let dot = lower.rfind('.')?;
+    let ext = &lower[dot + 1..];
+    if ext != "mp3" && ext != "wav" {
+        return None;
+    }
+    let mut base: String = lower[..dot]
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if base.is_empty() {
+        base = "audio".to_string();
+    }
+    base.truncate(AUDIO_NAME_BASE_MAX);
+    Some(format!("{base}.{ext}"))
+}
+
+/// `0x16 list` 响应的单个文件条目（data.files[]）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFileInfo {
+    pub name: String,
+    pub size: u32,
+}
+
+/// `0x16 list` 响应（data）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AudioFileListResp {
+    #[serde(default)]
+    pub files: Vec<AudioFileInfo>,
+    #[serde(default)]
+    pub total_bytes: u32,
+    #[serde(default)]
+    pub used_bytes: u32,
+    #[serde(default)]
+    pub free_bytes: u32,
+}
+
+/// `0x17 get` / `0x16 delete` 响应的单个键位绑定（pads[]；file 为空串 = 未绑定）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioPadBinding {
+    pub key: u8,
+    #[serde(default)]
+    pub file: String,
+}
+
 // ---------- 解析辅助 ----------
 
 /// 把一整行 JSON（包括异类响应字段）解析为目标类型。
@@ -1542,11 +1632,15 @@ impl KeymapData {
             });
         }
 
-        // 2. 当前 profile 的 bindings 差异
+        // 2. 当前 profile 的 bindings 差异：两侧必须取**同一个**方案的槽位。
+        // 下发语义是"切到 draft.active 并整表写入该方案"，基线应为快照里
+        // 同一方案的槽位。若各自取 active（草稿已切方案、快照仍停在旧方案，
+        // 典型：本页 ComboBox 刚切了 Profile、0x08 尚未下发），会把两个不同
+        // 方案的映射互相比对，diff 出一堆假"待同步"项并污染 Apply 落槽。
         let Some(profile) = self.profile(active) else {
             return out;
         };
-        let Some(other_profile) = other.profile(other_active) else {
+        let Some(other_profile) = other.profile(active) else {
             return out;
         };
 
@@ -2902,10 +2996,111 @@ mod tests {
         assert_eq!(CMD_PROFILE_STATE, 0x10);
         assert_eq!(CMD_PROFILE_ICON_SET, 0x11);
         assert_eq!(CMD_HA_STATUS, 0x12);
+        assert_eq!(CMD_AUDIO_FILE, 0x16);
+        assert_eq!(CMD_AUDIO_PAD, 0x17);
         // 标准响应关系
         assert_eq!(response_cmd(CMD_CONFIG_SET), 0x88);
         assert_eq!(response_cmd(CMD_CONFIG_GET), 0x87);
         // 0x10 例外：响应就是自己
         assert_eq!(response_cmd(CMD_PROFILE_STATE), 0x90);
+    }
+
+    /// 音效文件名白名单：与固件 validAudioName 字节级一致。
+    #[test]
+    fn valid_audio_name_whitelist() {
+        // 合法
+        assert!(valid_audio_name("a.mp3"));
+        assert!(valid_audio_name("kick_01.wav"));
+        assert!(valid_audio_name(&"a".repeat(20) + ".mp3"), "基段恰好 20 字符");
+        assert!(valid_audio_name("0123456789.wav"));
+        // 非法：太长 / 大写 / 特殊字符 / 错误扩展名
+        assert!(!valid_audio_name("a.wav2"));
+        assert!(valid_audio_name("ab.mp3"), "基段 2 字符合法（白名单 {1,20}）");
+        assert!(!valid_audio_name(&"a".repeat(21) + ".mp3"));
+        assert!(!valid_audio_name("Kick.mp3"));
+        assert!(!valid_audio_name("kick.flac"));
+        assert!(!valid_audio_name("kick"));
+        assert!(!valid_audio_name("ki-ck.mp3"));
+        assert!(!valid_audio_name("kick .mp3"));
+        // UTF-8 多字节：按字节判断时总长可能达标但基段字节不在白名单
+        assert!(!valid_audio_name("鼓.mp3"));
+        // 空串 / 超长全链
+        assert!(!valid_audio_name(""));
+        assert!(!valid_audio_name(".mp3"));
+    }
+
+    /// sanitize_audio_name：本机文件名 → 合法设备名。
+    #[test]
+    fn sanitize_audio_name_rules() {
+        assert_eq!(
+            sanitize_audio_name("Kick Drum 01.MP3").as_deref(),
+            Some("kick_drum_01.mp3")
+        );
+        assert_eq!(
+            sanitize_audio_name("坏/名字:测试.wav").as_deref(),
+            Some("_______.wav"),
+            "非 ASCII 全部替换为 _"
+        );
+        assert_eq!(sanitize_audio_name("song.flac"), None);
+        assert_eq!(sanitize_audio_name("noext"), None);
+        // 基段截断到 20 字符
+        let long = sanitize_audio_name("abcdefghijklmnopqrstuvwxyz1234567890.mp3")
+            .to("name");
+        assert_eq!(long, "abcdefghijklmnopqrst.mp3");
+        // 空基段（".mp3"）回退 audio
+        assert_eq!(sanitize_audio_name(".mp3").as_deref(), Some("audio.mp3"));
+        // 生成结果必须通过白名单
+        for raw in ["A B(1).mp3", "音效-01.WAV", "x.wav"] {
+            let n = sanitize_audio_name(raw).to("n");
+            assert!(valid_audio_name(&n), "{raw} → {n} 应通过白名单");
+        }
+    }
+
+    /// 0x16 list / 0x17 get 响应解析（与固件响应字段对齐）。
+    #[test]
+    fn audio_resp_parsing() {
+        let list_raw = serde_json::json!({
+            "files": [
+                {"name": "kick.mp3", "size": 10240},
+                {"name": "hat.wav", "size": 2048}
+            ],
+            "total_bytes": 4063232,
+            "used_bytes": 12288,
+            "free_bytes": 4050944
+        });
+        let list: AudioFileListResp = serde_json::from_value(list_raw).to("list");
+        assert_eq!(list.files.len(), 2);
+        assert_eq!(list.files[0].name, "kick.mp3");
+        assert_eq!(list.files[1].size, 2048);
+        assert_eq!(list.free_bytes, 4050944);
+
+        // 空列表 / 缺字段都能解析（Default 兜底）
+        let empty: AudioFileListResp = serde_json::from_value(serde_json::json!({})).to("empty");
+        assert!(empty.files.is_empty());
+
+        let pads_raw = serde_json::json!({
+            "pads": [
+                {"key": 1, "file": "kick.mp3"},
+                {"key": 2, "file": ""},
+                {"key": 11, "file": "hat.wav"}
+            ]
+        });
+        let pads: Vec<AudioPadBinding> =
+            serde_json::from_value(pads_raw["pads"].clone()).to("pads");
+        assert_eq!(pads.len(), 3);
+        assert_eq!(pads[2].key, 11);
+        assert_eq!(pads[1].file, "");
+    }
+
+    /// 上传分块：2MB 上限文件按 1024B 分块的 b64 长度必须 < 固件 1400 字符上限
+    /// （kMaxB64Len），否则固件会拒绝该块。
+    #[test]
+    fn audio_block_b64_under_firmware_limit() {
+        use base64::Engine as _;
+        let block = vec![0xABu8; AUDIO_UPLOAD_BLOCK_BYTES];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&block);
+        // 1024B → ceil(1024/3)*4 = 1368 字符
+        assert_eq!(b64.len(), 1368);
+        assert!(b64.len() <= 1400, "b64 长度必须 ≤ 固件 kMaxB64Len=1400");
     }
 }

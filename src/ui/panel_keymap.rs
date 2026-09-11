@@ -1071,9 +1071,12 @@ fn draw_keyboard(
         for slot in row {
             let w = slot.width_units * u_px - KEY_GAP;
             let r = Rect::from_min_size(egui::pos2(x, y), Vec2::new(w.max(8.0), key_h));
-            // 同时取 snapshot 的 binding 用于判断"是否待下发"
+            // 待下发对比基线：与展示中的键位取快照里**同一方案**的槽位。
+            // 快照的 active 仍可能停在旧方案（切换后 0x08 尚未下发），
+            // 取 snapshot.active_profile 会拿另一个方案的映射来比对，
+            // 导致整页键帽误标"待下发"。
             let snap_bindings = snapshot
-                .profile(snapshot.active_profile)
+                .profile(effective_profile_idx)
                 .map(|p| &p.bindings);
             if matches!(slot.kind, SlotKind::Encoder) {
                 draw_encoder(
