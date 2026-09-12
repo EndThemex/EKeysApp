@@ -318,9 +318,9 @@ impl WxiApp {
             } else if i.key_pressed(egui::Key::Num5) {
                 Some(Page::Wifi)
             } else if i.key_pressed(egui::Key::Num6) {
-                Some(Page::Voice)
-            } else if i.key_pressed(egui::Key::Num7) {
                 Some(Page::Audio)
+            } else if i.key_pressed(egui::Key::Num7) {
+                Some(Page::Voice)
             } else if i.key_pressed(egui::Key::Num8) {
                 Some(Page::Log)
             } else if i.key_pressed(egui::Key::Num9) {
@@ -482,7 +482,12 @@ impl eframe::App for WxiApp {
                     self.confirm_open = false;
                 }
                 ConfirmOutcome::No => {
-                    self.confirm_kind = None;
+                    if let Some(k) = self.confirm_kind.take() {
+                        if k == UiConfirmKind::SwitchWorkMode {
+                            // 用户取消：丢弃暂存选择，组合框下次渲染回到设备当前值
+                            self.settings_st.pending_work_mode = None;
+                        }
+                    }
                     self.confirm_open = false;
                 }
                 ConfirmOutcome::None => {}

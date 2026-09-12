@@ -51,6 +51,10 @@ pub struct SettingsPanelState {
     pub tab: SettingsTab,
     /// 等待 Confirm 的危险操作
     pub pending_confirm: Option<UiConfirmKind>,
+    /// 切换工作模式确认弹窗期间暂存的用户选择。
+    /// 组合框选中值是帧局部变量，跨帧会从 draft/snap 重算回旧值，
+    /// 不暂存的话确认时写回的是旧值，导致 work_mode 永远下发不出去。
+    pub pending_work_mode: Option<i32>,
     /// Profile 图标：PNG 路径输入框内容（0x11 上传用）
     pub icon_path: String,
     /// PC 状态 tab 上次刷新实时快照的时刻。每 1s 才重新采集一次，
@@ -220,16 +224,33 @@ fn keyboard_tab(
                 cb.selectable_value(&mut mode, 1, "蓝牙");
                 cb.selectable_value(&mut mode, 2, "2.4G 无线");
             });
-        if mode != snap.work_mode {
-            // 危险操作 → 走 confirm
-            if st.pending_confirm == Some(UiConfirmKind::SwitchWorkMode) {
-                draft.work_mode = mode;
-                st.pending_confirm = None;
-            } else if mode != draft.work_mode && mode != snap.work_mode {
-                let _ = handle
-                    .ui_tx
-                    .send(UiEvent::ConfirmYes(UiConfirmKind::SwitchWorkMode));
+        // 危险操作 → 走 confirm。
+        // 弹窗「是」由 app.rs 下一帧置位 pending_confirm，此时组合框选中值
+        // （帧局部变量）已从 draft/snap 重算回旧值，`mode != snap.work_mode`
+        // 必然为 false——确认的消费逻辑绝不能挂在该条件之下，否则必须再动
+        // 一次下拉框才会真正下发。
+        if st.pending_confirm == Some(UiConfirmKind::SwitchWorkMode) {
+            st.pending_confirm = None;
+            if let Some(target) = st.pending_work_mode.take() {
+                // 与 EnterDownloadMode 一致：确认即生效，直接单字段下发
+                // （{"config":{"work_mode":N}}）。固件重建键盘后回推新
+                // 快照（0x87 seq=0），UI 随之刷新。
+                let diff = {
+                    let mut d = snap.clone();
+                    d.work_mode = target;
+                    d
+                };
+                let mask =
+                    crate::protocol::FieldMask::empty().set(crate::protocol::F_WORK_MODE);
+                draft.work_mode = target;
+                crate::ui::widgets::apply_diff(handle, &diff, mask);
             }
+        } else if mode != snap.work_mode && mode != draft.work_mode {
+            // 本帧刚选了与 draft/snap 都不同的新值 → 暂存选择并弹出确认
+            st.pending_work_mode = Some(mode);
+            let _ = handle
+                .ui_tx
+                .send(UiEvent::ConfirmYes(UiConfirmKind::SwitchWorkMode));
         }
         ui.add_space(6.0);
 

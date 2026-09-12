@@ -432,7 +432,7 @@ fn pad_row(
             }
         }
         if ui
-            .add_enabled(!bound.is_empty(), egui::Button::new("清除"))
+            .add_enabled(!bound.is_empty(), egui::Button::new("清除").small())
             .clicked()
         {
             if let Err(e) = handle.set_audio_pad(key as u8, "") {

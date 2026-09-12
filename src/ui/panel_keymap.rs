@@ -176,9 +176,23 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
 
                     // ─── 左：屏幕占位 + 键盘图 ───
                     ui.allocate_ui(Vec2::new(geom.left_w, geom.left_h), |ui| {
+                        // 外壳深色块按主题适配：深色 UI 用深蓝灰；浅色 UI 用
+                        // 浅灰底（与整体卡片区分），保留"设备外壳"视觉语义。
+                        let dark = ui.visuals().dark_mode;
                         egui::Frame::new()
-                            .fill(Color32::from_rgb(0x14, 0x17, 0x1E))
-                            .stroke(Stroke::new(1.5, Color32::from_rgb(0x32, 0x38, 0x44)))
+                            .fill(crate::ui::colors::themed(
+                                dark,
+                                Color32::from_rgb(0x14, 0x17, 0x1E),
+                                Color32::from_rgb(0xE1, 0xE5, 0xEC),
+                            ))
+                            .stroke(Stroke::new(
+                                1.5,
+                                crate::ui::colors::themed(
+                                    dark,
+                                    Color32::from_rgb(0x32, 0x38, 0x44),
+                                    Color32::from_rgb(0xB8, 0xBF, 0xCA),
+                                ),
+                            ))
                             .corner_radius(egui::CornerRadius::same(14))
                             .inner_margin(egui::Margin {
                                 left: 14,
@@ -739,9 +753,21 @@ fn draw_fun_corner(painter: &egui::Painter, key: Rect, side: u8, label: &str) {
 /// 键盘下方的 FUN 分配条：琥珀角标 + 紧凑下拉，直接贴着键盘布局，
 /// 替代原先塞在顶部控制条里的两行式下拉。提示文案收进 hover tooltip。
 fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
+    let dark = ui.visuals().dark_mode;
     egui::Frame::new()
-        .fill(Color32::from_rgb(0x1C, 0x20, 0x2A))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(0x2C, 0x32, 0x3E)))
+        .fill(crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x1C, 0x20, 0x2A),
+            Color32::from_rgb(0xE4, 0xE7, 0xEC),
+        ))
+        .stroke(Stroke::new(
+            1.0,
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0x2C, 0x32, 0x3E),
+                Color32::from_rgb(0xC2, 0xC9, 0xD2),
+            ),
+        ))
         .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin {
             left: 10,
@@ -769,7 +795,11 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
                 egui::RichText::new("FUN 组合键")
                     .strong()
                     .size(12.0)
-                    .color(Color32::from_rgb(0xC8, 0xCE, 0xD8)),
+                    .color(crate::ui::colors::themed(
+                        dark,
+                        Color32::from_rgb(0xC8, 0xCE, 0xD8),
+                        Color32::from_rgb(0x1A, 0x1D, 0x24),
+                    )),
             )
             .on_hover_text(
                 "按住 FUN 键再按其它键，触发该键的 FUN 层行为。\n\
@@ -917,35 +947,72 @@ fn fun_combo_options(
 fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
     let (rect, _resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let painter = ui.painter_at(rect);
+    let dark = ui.visuals().dark_mode;
 
     // 屏幕外壳（深色边框 + 玻璃质感渐变）。注意：rect_stroke 在 Middle
     // 模式下描边会向两侧各延 0.5px，可能被父容器裁掉；这里把 bezel 整体
     // 向内缩 1px，并把描边改成 Inside，保证右/下边线完整可见。
+    // 颜色按主题适配：深色 UI 用深色屏（玻璃质感），浅色 UI 用白屏 + 灰边，
+    // 避免整片纯黑块出现在白底页面上。
     let bezel = rect.shrink(1.0);
     let screen = bezel.shrink(2.0);
-    painter.rect_filled(bezel, 8.0, Color32::from_rgb(0x10, 0x12, 0x18));
+    painter.rect_filled(
+        bezel,
+        8.0,
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x10, 0x12, 0x18),
+            Color32::from_rgb(0xCE, 0xD3, 0xDB),
+        ),
+    );
     painter.rect_stroke(
         bezel,
         8.0,
-        Stroke::new(1.0, Color32::from_rgb(0x3A, 0x40, 0x4C)),
+        Stroke::new(
+            1.0,
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0x3A, 0x40, 0x4C),
+                Color32::from_rgb(0xA8, 0xAF, 0xBA),
+            ),
+        ),
         StrokeKind::Inside,
     );
-    painter.rect_filled(screen, 6.0, Color32::from_rgb(0x0A, 0x12, 0x1E));
+    painter.rect_filled(
+        screen,
+        6.0,
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x0A, 0x12, 0x1E),
+            Color32::from_rgb(0xF6, 0xF8, 0xFB),
+        ),
+    );
 
-    // 屏幕内左上角小指示 + 右下角比例标签
+    // 屏幕内左上角小指示 + 右下角比例标签（浅色主题用对应深色文字）
+    let label_c = crate::ui::colors::themed(
+        dark,
+        Color32::from_rgb(0x70, 0x88, 0xA8),
+        Color32::from_rgb(0x55, 0x60, 0x78),
+    );
+    let dim_c = crate::ui::colors::themed(
+        dark,
+        Color32::from_rgb(0x55, 0x60, 0x78),
+        Color32::from_rgb(0x80, 0x88, 0x98),
+    );
+    let center_c = crate::ui::colors::themed(dark, Color32::from_gray(110), Color32::from_gray(160));
     painter.text(
         screen.left_top() + Vec2::new(8.0, 6.0),
         egui::Align2::LEFT_TOP,
         "屏幕布局占位",
         egui::FontId::proportional(11.0),
-        Color32::from_rgb(0x70, 0x88, 0xA8),
+        label_c,
     );
     painter.text(
         screen.right_bottom() + Vec2::new(-8.0, -6.0),
         egui::Align2::RIGHT_BOTTOM,
         "428 × 124",
         egui::FontId::proportional(10.0),
-        Color32::from_rgb(0x55, 0x60, 0x78),
+        dim_c,
     );
     // 中心提示文字
     painter.text(
@@ -953,7 +1020,7 @@ fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
         egui::Align2::CENTER_CENTER,
         "（待接入屏幕布局）",
         egui::FontId::proportional(12.0),
-        Color32::from_gray(110),
+        center_c,
     );
 }
 
@@ -966,15 +1033,28 @@ fn draw_keyboard(
 ) {
     let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
+    let dark = ui.visuals().dark_mode;
 
-    // 背景：占位深色块 + "键盘背景图" 文字
-    painter.rect_filled(rect, 8.0, Color32::from_rgb(0x18, 0x1B, 0x22));
+    // 背景：占位深色块 + "键盘背景图" 文字（按主题适配）
+    painter.rect_filled(
+        rect,
+        8.0,
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x18, 0x1B, 0x22),
+            Color32::from_rgb(0xEC, 0xEF, 0xF4),
+        ),
+    );
     painter.text(
         rect.left_top() + Vec2::new(10.0, 6.0),
         egui::Align2::LEFT_TOP,
         "键盘外观图（待接入图片）",
         egui::FontId::proportional(11.0),
-        Color32::from_rgb(0x70, 0x70, 0x80),
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x70, 0x70, 0x80),
+            Color32::from_rgb(0x80, 0x88, 0x98),
+        ),
     );
 
     // 固件只有一层物理映射，本页固定编辑 layer 0（Base）。
@@ -1165,30 +1245,77 @@ fn draw_key(
     let is_sel = selected
         .map(|k| k.row == slot.row && k.col == slot.col)
         .unwrap_or(false);
+    let dark = ui.visuals().dark_mode;
 
-    // 基础颜色（按 binding 状态决定；选中态在最后再单独叠一层外圈高亮）
+    // 基础颜色（按 binding 状态决定；选中态在最后再单独叠一层外圈高亮）。
+    // 颜色按主题适配：深色 UI 用深键帽，浅色 UI 用白键帽 + 灰描边
+    // （与物理键帽一致），避免整片纯黑键帽出现在白底页面上。
     let (fill, stroke) = if is_pending && binding.map(|b| b.is_set()).unwrap_or(false) {
         // 待下发（draft 有但与 snapshot 不同）—— 琥珀色
         (
-            Color32::from_rgb(0xC0, 0x80, 0x20),
-            Stroke::new(1.0, Color32::from_rgb(0xFF, 0xC8, 0x60)),
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0xC0, 0x80, 0x20),
+                Color32::from_rgb(0xF6, 0xD8, 0xA0),
+            ),
+            Stroke::new(
+                1.0,
+                crate::ui::colors::themed(
+                    dark,
+                    Color32::from_rgb(0xFF, 0xC8, 0x60),
+                    Color32::from_rgb(0xC0, 0x80, 0x20),
+                ),
+            ),
         )
     } else if binding.map(|b| b.is_set()).unwrap_or(false) {
         // 已同步（draft 与 snapshot 一致且非空）
         (
-            Color32::from_rgb(0x2C, 0x46, 0x7A),
-            Stroke::new(1.0, Color32::from_rgb(0x6A, 0x88, 0xC0)),
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0x2C, 0x46, 0x7A),
+                Color32::from_rgb(0xCF, 0xDC, 0xF6),
+            ),
+            Stroke::new(
+                1.0,
+                crate::ui::colors::themed(
+                    dark,
+                    Color32::from_rgb(0x6A, 0x88, 0xC0),
+                    Color32::from_rgb(0x4F, 0x8C, 0xFF),
+                ),
+            ),
         )
     } else if is_pending {
         // draft 是 None 但 snapshot 有值 → 也是"待下发"（删绑定）
         (
-            Color32::from_rgb(0x44, 0x44, 0x44),
-            Stroke::new(1.0, Color32::from_rgb(0x88, 0x88, 0x88)),
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0x44, 0x44, 0x44),
+                Color32::from_rgb(0xE0, 0xE2, 0xE6),
+            ),
+            Stroke::new(
+                1.0,
+                crate::ui::colors::themed(
+                    dark,
+                    Color32::from_rgb(0x88, 0x88, 0x88),
+                    Color32::from_rgb(0xB8, 0xBE, 0xC8),
+                ),
+            ),
         )
     } else {
         (
-            Color32::from_rgb(0x28, 0x2C, 0x36),
-            Stroke::new(1.0, Color32::from_rgb(0x44, 0x4A, 0x55)),
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0x28, 0x2C, 0x36),
+                Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            ),
+            Stroke::new(
+                1.0,
+                crate::ui::colors::themed(
+                    dark,
+                    Color32::from_rgb(0x44, 0x4A, 0x55),
+                    Color32::from_rgb(0xC2, 0xC9, 0xD2),
+                ),
+            ),
         )
     };
 
@@ -1239,7 +1366,11 @@ fn draw_key(
         egui::Align2::CENTER_CENTER,
         &action_label,
         egui::FontId::proportional(font_size),
-        Color32::from_rgb(0xE0, 0xE5, 0xF0),
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0xE0, 0xE5, 0xF0),
+            Color32::from_rgb(0x1A, 0x1D, 0x24),
+        ),
     );
 
     // FUN1 / FUN2 组合层是否配置了行为 → 键帽上角的实色小牌：
@@ -1269,7 +1400,11 @@ fn draw_key(
             egui::Align2::LEFT_TOP,
             &slot.label,
             egui::FontId::proportional(10.5),
-            Color32::from_rgb(0x90, 0x98, 0xA8),
+            crate::ui::colors::themed(
+                dark,
+                Color32::from_rgb(0x90, 0x98, 0xA8),
+                Color32::from_rgb(0x6E, 0x74, 0x80),
+            ),
         );
     }
 
@@ -1393,6 +1528,7 @@ fn draw_encoder(
     let is_sel = selected
         .map(|k| k.row == slot.row && k.col == slot.col)
         .unwrap_or(false);
+    let dark = ui.visuals().dark_mode;
 
     // 旋钮按 inset 缩进一圈再画圆
     let pad = 4.0;
@@ -1402,19 +1538,40 @@ fn draw_encoder(
     );
     let radius = r.width().min(r.height()) * 0.5;
 
-    // 基础颜色（按 binding 状态决定；选中态只改外圈描边）
+    // 基础颜色（按 binding 状态决定；选中态只改外圈描边）。
+    // 颜色按主题适配：深色 UI 用深键帽；浅色 UI 用白底 + 灰环。
     let body = if is_pending && binding.map(|b| b.is_set()).unwrap_or(false) {
-        Color32::from_rgb(0xC0, 0x80, 0x20)
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0xC0, 0x80, 0x20),
+            Color32::from_rgb(0xF6, 0xD8, 0xA0),
+        )
     } else if binding.map(|b| b.is_set()).unwrap_or(false) {
-        Color32::from_rgb(0x2C, 0x46, 0x7A)
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x2C, 0x46, 0x7A),
+            Color32::from_rgb(0xCF, 0xDC, 0xF6),
+        )
     } else {
-        Color32::from_rgb(0x28, 0x2C, 0x36)
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x28, 0x2C, 0x36),
+            Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        )
     };
     painter.circle_filled(r.center(), radius, body);
     let ring_color = if is_pending {
-        Color32::from_rgb(0xFF, 0xC8, 0x60)
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0xFF, 0xC8, 0x60),
+            Color32::from_rgb(0xC0, 0x80, 0x20),
+        )
     } else {
-        Color32::from_rgb(0x44, 0x4A, 0x55)
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0x44, 0x4A, 0x55),
+            Color32::from_rgb(0xC2, 0xC9, 0xD2),
+        )
     };
     painter.circle_stroke(
         r.center(),
@@ -1448,7 +1605,14 @@ fn draw_encoder(
         );
         painter.line_segment(
             [p1, p2],
-            Stroke::new(1.0, Color32::from_rgb(0x6A, 0x88, 0xC0)),
+            Stroke::new(
+                1.0,
+                crate::ui::colors::themed(
+                    dark,
+                    Color32::from_rgb(0x6A, 0x88, 0xC0),
+                    Color32::from_rgb(0x4F, 0x8C, 0xFF),
+                ),
+            ),
         );
     }
 
@@ -1464,7 +1628,11 @@ fn draw_encoder(
         egui::Align2::CENTER_CENTER,
         &action_label,
         egui::FontId::proportional(font_size),
-        Color32::from_rgb(0xE0, 0xE5, 0xF0),
+        crate::ui::colors::themed(
+            dark,
+            Color32::from_rgb(0xE0, 0xE5, 0xF0),
+            Color32::from_rgb(0x1A, 0x1D, 0x24),
+        ),
     );
 
     // 待下发标记：右上角小三角点
@@ -1535,7 +1703,8 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
     let selected = handle.selected_key.lock().unwrap().clone();
     crate::ui::card(ui, |ui| {
         // Drawer 占满调用方分配的高度（中间区域剩余高度）；
-        // 内部 ScrollArea 在内容超出时独立滚动，与左侧键盘外壳完全解耦。
+        // 上半部 ScrollArea 在内容超出时独立滚动，操作按钮固定在底部
+        // （与左侧键盘外壳完全解耦，按钮始终可见不被滚出）。
         ui.vertical(|ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -1765,54 +1934,8 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             *handle.capture_keyboard.lock().unwrap() = st.capture_keyboard;
 
                             ui.add_space(10.0);
-                            let channel_name = match channel {
-                                LAYER_FUN1 => "FUN1",
-                                LAYER_FUN2 => "FUN2",
-                                _ => "单击",
-                            };
-                            ui.horizontal(|ui| {
-                                if ui.button("保存").clicked() {
-                                    // 写回 draft（draft_action 是当前用户在 Drawer
-                                    // 里编辑出来的最终结果）；按编辑通道写入
-                                    // layer 0（单击）/ 1（FUN1）/ 2（FUN2）。
-                                    let to_save =
-                                        st.draft_action.clone().unwrap_or(KeyAction::None);
-                                    let mut d = handle.keymap_draft.lock().unwrap();
-                                    let active = d.active_profile;
-                                    if let Some(p) = d.profile_mut(active) {
-                                        if to_save.is_set() {
-                                            p.bindings.insert(edit_ref, to_save.clone());
-                                        } else {
-                                            p.bindings.remove(&edit_ref);
-                                        }
-                                    }
-                                    let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
-                                        crate::state::ToastKind::Success,
-                                        format!(
-                                            "已为「{label}」{chan}通道设为 {}（待同步）",
-                                            to_save.label(),
-                                            chan = if channel == LAYER_BASE {
-                                                String::new()
-                                            } else {
-                                                format!("{channel_name} ")
-                                            }
-                                        ),
-                                    ));
-                                }
-                                if ui.button("清除").clicked() {
-                                    let mut d = handle.keymap_draft.lock().unwrap();
-                                    let active = d.active_profile;
-                                    if let Some(p) = d.profile_mut(active) {
-                                        p.bindings.remove(&edit_ref);
-                                    }
-                                    st.draft_action = Some(KeyAction::None);
-                                }
-                                if ui.button("关闭").clicked() {
-                                    let mut sel = handle.selected_key.lock().unwrap();
-                                    *sel = None;
-                                }
-                            });
-
+                            // 仅在抽屉里有选中键时才显示底部按钮（按钮本身在
+                            // 滚动区外、由 drawer 函数尾部统一绘制，避免随内容滚动）。
                             ui.add_space(6.0);
                             ui.label(
                                 egui::RichText::new("改动需点击下方「应用」按钮才会同步到设备。")
@@ -1822,6 +1945,98 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                         }
                     }
                 });
+            // ─── 底部固定操作按钮 ───
+            // 按钮移出 ScrollArea，固定贴在弹窗底部，避免抽屉内容溢出
+            // 时被滚到屏外看不见；也避免按钮行挤压顶部内容布局。
+            if selected.is_some() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                let channel_name = match st.edit_channel.min(2) {
+                    LAYER_FUN1 => "FUN1",
+                    LAYER_FUN2 => "FUN2",
+                    _ => "单击",
+                };
+                let label = selected
+                    .and_then(|kref| {
+                        draft
+                            .profile(draft.active_profile)
+                            .and_then(|p| p.layers.iter().find(|l| l.index == kref.layer))
+                            .and_then(|l| {
+                                l.slots
+                                    .iter()
+                                    .find(|s| s.row == kref.row && s.col == kref.col)
+                            })
+                            .map(|s| s.label.clone())
+                    })
+                    .unwrap_or_default();
+                let channel_for_save = st.edit_channel.min(2);
+                let phys_of_selected = selected.and_then(|kref| {
+                    draft
+                        .physical_key_slots()
+                        .into_iter()
+                        .find(|(_, r, c, _)| *r == kref.row && *c == kref.col)
+                        .map(|(p, _, _, _)| p)
+                });
+                let is_fun_key = match phys_of_selected {
+                    Some(n) => {
+                        (draft.fun_key1 != 0 && n == draft.fun_key1)
+                            || (draft.fun_key2 != 0 && n == draft.fun_key2)
+                    }
+                    None => false,
+                };
+                let mut channel = channel_for_save;
+                if (channel == LAYER_FUN1 && (draft.fun_key1 == 0 || is_fun_key))
+                    || (channel == LAYER_FUN2 && (draft.fun_key2 == 0 || is_fun_key))
+                {
+                    channel = LAYER_BASE;
+                }
+                let edit_ref = selected.map(|kref| crate::protocol::KeyRef {
+                    layer: channel,
+                    ..kref
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("保存").clicked() {
+                        let to_save =
+                            st.draft_action.clone().unwrap_or(KeyAction::None);
+                        let mut d = handle.keymap_draft.lock().unwrap();
+                        let active = d.active_profile;
+                        if let (Some(edit_ref), Some(p)) = (edit_ref, d.profile_mut(active)) {
+                            if to_save.is_set() {
+                                p.bindings.insert(edit_ref, to_save.clone());
+                            } else {
+                                p.bindings.remove(&edit_ref);
+                            }
+                            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                                crate::state::ToastKind::Success,
+                                format!(
+                                    "已为「{label}」{chan}通道设为 {}（待同步）",
+                                    to_save.label(),
+                                    chan = if channel == LAYER_BASE {
+                                        String::new()
+                                    } else {
+                                        format!("{channel_name} ")
+                                    }
+                                ),
+                            ));
+                        }
+                    }
+                    if ui.button("清除").clicked() {
+                        if let Some(edit_ref) = edit_ref {
+                            let mut d = handle.keymap_draft.lock().unwrap();
+                            let active = d.active_profile;
+                            if let Some(p) = d.profile_mut(active) {
+                                p.bindings.remove(&edit_ref);
+                            }
+                        }
+                        st.draft_action = Some(KeyAction::None);
+                    }
+                    if ui.button("关闭").clicked() {
+                        let mut sel = handle.selected_key.lock().unwrap();
+                        *sel = None;
+                    }
+                });
+            }
         });
     });
 }

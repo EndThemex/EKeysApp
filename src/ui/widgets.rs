@@ -106,6 +106,9 @@ pub fn show_confirm(
         .open(open)
         .collapsible(false)
         .resizable(false)
+        // 居中：固定锚点 + 显式 default_pos 避免 egui 记忆上次位置飘离屏幕中心。
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_pos([0.0, 0.0])
         .default_size([380.0, 180.0])
         .min_size([320.0, 140.0])
         .max_size([520.0, 320.0])
@@ -144,6 +147,9 @@ pub fn show_local_settings(
         .open(open)
         .collapsible(false)
         .resizable(false)
+        // 居中：固定锚点 + 显式 default_pos 避免 egui 记忆上次位置飘离屏幕中心。
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_pos([0.0, 0.0])
         .default_size([420.0, 360.0])
         .show(ctx, |ui| {
             // 1) 自动连接

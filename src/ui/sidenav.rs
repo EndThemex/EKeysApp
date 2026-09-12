@@ -50,18 +50,18 @@ const ITEMS: &[NavItem] = &[
         hint: Some("无线网络 (Ctrl+5)"),
     },
     NavItem {
-        page: Page::Voice,
-        label: "语音",
-        icon: crate::ui::icons::NAV_VOICE,
-        enabled: true,
-        hint: Some("语音设置 (Ctrl+6)"),
-    },
-    NavItem {
         page: Page::Audio,
         label: "音效",
         icon: crate::ui::icons::NAV_AUDIO,
         enabled: true,
-        hint: Some("音效板文件与键位绑定 (Ctrl+7)"),
+        hint: Some("音效板文件与键位绑定 (Ctrl+6)"),
+    },
+    NavItem {
+        page: Page::Voice,
+        label: "语音",
+        icon: crate::ui::icons::NAV_VOICE,
+        enabled: true,
+        hint: Some("语音设置 (Ctrl+7)"),
     },
     NavItem {
         page: Page::Log,
