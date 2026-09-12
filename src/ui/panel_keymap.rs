@@ -1060,7 +1060,7 @@ fn draw_keyboard(
     painter.text(
         rect.left_top() + Vec2::new(10.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "键盘外观图（待接入图片）",
+        "键盘布局",
         egui::FontId::proportional(11.0),
         crate::ui::colors::themed(
             dark,
