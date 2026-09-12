@@ -9,14 +9,14 @@ use crate::protocol::{
 };
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
-    panel_about, panel_audio, panel_connection, panel_keymap, panel_lighting, panel_log,
-    panel_settings, panel_voice, panel_wifi, sidenav, statusbar, topbar,
+    panel_about, panel_audio, panel_keymap, panel_lighting, panel_log, panel_settings,
+    panel_voice, panel_wifi, sidenav, statusbar, topbar,
     widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_local_settings, show_toasts},
 };
 
 pub struct WxiApp {
     pub handle: AppHandle,
-    pub connect_st: panel_connection::ConnectPanelState,
+    pub connect_st: topbar::ConnectPanelState,
     pub settings_st: panel_settings::SettingsPanelState,
     pub keymap_st: panel_keymap::KeymapPanelState,
     pub lighting_st: panel_lighting::LightingPanelState,
@@ -43,7 +43,7 @@ impl WxiApp {
         crate::ui::fonts::install(&cc.egui_ctx);
         // 启动时应用主题（语言/主题由本地配置驱动）
         crate::ui::apply_theme(&cc.egui_ctx, handle.theme());
-        let mut connect_st = panel_connection::ConnectPanelState::default();
+        let mut connect_st = topbar::ConnectPanelState::default();
         connect_st.refresh();
         let log_st = panel_log::LogPanelState {
             show_tx: true,
@@ -308,22 +308,20 @@ impl WxiApp {
             if !i.modifiers.ctrl {
                 None
             } else if i.key_pressed(egui::Key::Num1) {
-                Some(Page::Connect)
-            } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Settings)
-            } else if i.key_pressed(egui::Key::Num3) {
+            } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Keymap)
-            } else if i.key_pressed(egui::Key::Num4) {
+            } else if i.key_pressed(egui::Key::Num3) {
                 Some(Page::Lighting)
-            } else if i.key_pressed(egui::Key::Num5) {
+            } else if i.key_pressed(egui::Key::Num4) {
                 Some(Page::Wifi)
-            } else if i.key_pressed(egui::Key::Num6) {
+            } else if i.key_pressed(egui::Key::Num5) {
                 Some(Page::Audio)
-            } else if i.key_pressed(egui::Key::Num7) {
+            } else if i.key_pressed(egui::Key::Num6) {
                 Some(Page::Voice)
-            } else if i.key_pressed(egui::Key::Num8) {
+            } else if i.key_pressed(egui::Key::Num7) {
                 Some(Page::Log)
-            } else if i.key_pressed(egui::Key::Num9) {
+            } else if i.key_pressed(egui::Key::Num8) {
                 Some(Page::About)
             } else {
                 None
@@ -378,7 +376,12 @@ impl eframe::App for WxiApp {
                 bottom: 6,
             }))
             .show(ctx, |ui| {
-                topbar::show(&self.handle, ui, self.current_port.as_deref());
+                topbar::show(
+                    &self.handle,
+                    ui,
+                    self.current_port.as_deref(),
+                    &mut self.connect_st,
+                );
             });
 
         egui::SidePanel::left("sidenav")
@@ -444,9 +447,6 @@ impl eframe::App for WxiApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| match current_page {
-                        Page::Connect => {
-                            panel_connection::show(&self.handle, ui, &mut self.connect_st)
-                        }
                         Page::Settings => {
                             panel_settings::show(&self.handle, ui, &mut self.settings_st)
                         }
@@ -458,7 +458,7 @@ impl eframe::App for WxiApp {
                         Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
                         Page::Audio => panel_audio::show(&self.handle, ui, &mut self.audio_st),
                         Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
-                        Page::About => panel_about::show(&self.handle, ui),
+                        Page::About => panel_about::show(&self.handle, ui, &self.connect_st),
                     });
             });
         }

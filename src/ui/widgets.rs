@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::protocol::{DeviceSettings, FieldMask};
-use crate::state::{AppHandle, ToastKind, UiEvent};
+use crate::state::{AppHandle, ToastKind};
 
 // ============ Toast ============
 
@@ -181,24 +181,37 @@ pub fn show_local_settings(
                 ui.label("（目前仅提供中文界面；切换到英文后部分文案暂未翻译）");
             });
 
-            // 3) 主题
+            // 3) 主题：两段式按钮，选中态填品牌色，与 Settings 页 tab 同款风格。
             ui.add_space(4.0);
             ui.group(|ui| {
                 ui.strong("主题");
-                let mut theme = handle.theme();
-                egui::ComboBox::from_id_salt("theme-combo")
-                    .selected_text(theme.label())
-                    .show_ui(ui, |cb| {
-                        cb.selectable_value(&mut theme, crate::config::Theme::Dark, "深色");
-                        cb.selectable_value(&mut theme, crate::config::Theme::Light, "浅色");
-                    });
-                if theme != handle.theme() {
-                    handle.local_config.lock().unwrap().theme = theme;
-                    let _ = handle.ui_tx.send(UiEvent::Toast(
-                        ToastKind::Info,
-                        "主题将在下次启动应用时生效".to_string(),
-                    ));
-                }
+                let current = handle.theme();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for t in [
+                        crate::config::Theme::Dark,
+                        crate::config::Theme::Light,
+                    ] {
+                        let selected = current == t;
+                        let mut btn = crate::ui::fonts::IconTextButton::new("", t.label(), 14.0)
+                            .gap(0.0)
+                            .fill(if selected {
+                                crate::ui::ACCENT
+                            } else {
+                                ui.visuals().faint_bg_color
+                            })
+                            .corner_radius(egui::CornerRadius::same(8));
+                        if selected {
+                            btn = btn.fg(egui::Color32::WHITE);
+                        }
+                        if ui.add(btn).clicked() && !selected {
+                            handle.local_config.lock().unwrap().theme = t;
+                            // 即时切换 visuals：避免重启应用才能看到效果；
+                            // 退出时 on_exit 会把 LocalConfig 落盘，下次启动仍生效。
+                            crate::ui::apply_theme(ui.ctx(), t);
+                        }
+                    }
+                });
             });
 
             // 4) 窗口大小（只读展示）

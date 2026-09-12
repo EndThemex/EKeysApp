@@ -5,7 +5,6 @@ pub use egui_phosphor::regular as r;
 
 // 品牌 / 导航
 pub const BRAND_KEYBOARD: &str = r::KEYBOARD;
-pub const NAV_CONNECT: &str = r::PLUG;
 pub const NAV_SETTINGS: &str = r::SLIDERS_HORIZONTAL;
 pub const NAV_KEYMAP: &str = r::KEYBOARD;
 pub const NAV_LIGHTING: &str = r::LIGHTBULB;

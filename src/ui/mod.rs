@@ -4,7 +4,6 @@ pub mod fonts;
 pub mod icons;
 pub mod panel_about;
 pub mod panel_audio;
-pub mod panel_connection;
 pub mod panel_keymap;
 pub mod panel_lighting;
 pub mod panel_log;
@@ -54,12 +53,6 @@ pub mod colors {
         let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
         Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
     }
-}
-
-/// 渲染一个状态灯圆点
-pub fn status_dot(ui: &mut egui::Ui, color: eframe::egui::Color32) {
-    let (r, painter) = ui.allocate_painter(egui::Vec2::new(12.0, 12.0), egui::Sense::hover());
-    painter.circle_filled(r.rect.center(), 5.0, color);
 }
 
 /// 卡片容器：内容页分区统一使用（圆角 + 底色 + 细边框），自动撑满可用宽度。

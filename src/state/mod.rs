@@ -87,7 +87,6 @@ pub enum UiConfirmKind {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
-    Connect,
     Settings,
     Keymap,
     Lighting,
@@ -287,7 +286,7 @@ impl AppHandle {
             draft: Arc::new(Mutex::new(DeviceSettings::default())),
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             log: SharedLog::new(),
-            page: Arc::new(Mutex::new(Page::Connect)),
+            page: Arc::new(Mutex::new(Page::Settings)),
             ui_tx,
             ui_rx,
             link: Mutex::new(None),

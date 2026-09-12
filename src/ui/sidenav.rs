@@ -15,67 +15,60 @@ pub struct NavItem {
 
 const ITEMS: &[NavItem] = &[
     NavItem {
-        page: Page::Connect,
-        label: "连接",
-        icon: crate::ui::icons::NAV_CONNECT,
-        enabled: true,
-        hint: Some("端口选择与连接 (Ctrl+1)"),
-    },
-    NavItem {
         page: Page::Settings,
         label: "设备设置",
         icon: crate::ui::icons::NAV_SETTINGS,
         enabled: true,
-        hint: Some("设备参数配置 (Ctrl+2)"),
+        hint: Some("设备参数配置 (Ctrl+1)"),
     },
     NavItem {
         page: Page::Keymap,
         label: "键盘",
         icon: crate::ui::icons::NAV_KEYMAP,
         enabled: true,
-        hint: Some("按键盘自定义按键功能 (Ctrl+3)"),
+        hint: Some("按键盘自定义按键功能 (Ctrl+2)"),
     },
     NavItem {
         page: Page::Lighting,
         label: "灯效",
         icon: crate::ui::icons::NAV_LIGHTING,
         enabled: true,
-        hint: Some("灯光效果 (Ctrl+4)"),
+        hint: Some("灯光效果 (Ctrl+3)"),
     },
     NavItem {
         page: Page::Wifi,
         label: "WiFi",
         icon: crate::ui::icons::NAV_WIFI,
         enabled: true,
-        hint: Some("无线网络 (Ctrl+5)"),
+        hint: Some("无线网络 (Ctrl+4)"),
     },
     NavItem {
         page: Page::Audio,
         label: "音效",
         icon: crate::ui::icons::NAV_AUDIO,
         enabled: true,
-        hint: Some("音效板文件与键位绑定 (Ctrl+6)"),
+        hint: Some("音效板文件与键位绑定 (Ctrl+5)"),
     },
     NavItem {
         page: Page::Voice,
         label: "语音",
         icon: crate::ui::icons::NAV_VOICE,
         enabled: true,
-        hint: Some("语音设置 (Ctrl+7)"),
+        hint: Some("语音设置 (Ctrl+6)"),
     },
     NavItem {
         page: Page::Log,
         label: "日志",
         icon: crate::ui::icons::NAV_LOG,
         enabled: true,
-        hint: Some("协议与应用日志 (Ctrl+8)"),
+        hint: Some("协议与应用日志 (Ctrl+7)"),
     },
     NavItem {
         page: Page::About,
         label: "关于",
         icon: crate::ui::icons::NAV_ABOUT,
         enabled: true,
-        hint: Some("版本信息 (Ctrl+9)"),
+        hint: Some("版本信息 (Ctrl+8)"),
     },
 ];
 
@@ -106,14 +99,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(10.0);
 
-    // 主导航：设备相关（连接 / 设置 / 键映射 / 灯效 / WiFi / 语音 / 音效 → 共 7 项）
-    nav_group(ui, handle, current, "设备", &ITEMS[..7]);
+    // 主导航：设备相关（设置 / 键映射 / 灯效 / WiFi / 语音 / 音效 → 共 6 项）
+    nav_group(ui, handle, current, "设备", &ITEMS[..6]);
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
     // 系统组：日志 / 关于
-    nav_group(ui, handle, current, "系统", &ITEMS[7..]);
+    nav_group(ui, handle, current, "系统", &ITEMS[6..]);
 }
 
 fn nav_group(ui: &mut egui::Ui, handle: &AppHandle, current: Page, title: &str, items: &[NavItem]) {

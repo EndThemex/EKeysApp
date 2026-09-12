@@ -71,13 +71,21 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
     // 被 `keymap-diff` 顶部 padding 遮挡。
     //
     // 下：DiffPreviewBar 同步下发区（停靠在状态栏上方）
+    // 注意：`Frame::new()` 默认无填充（透明），而 Panel 一旦显式指定 frame
+    // 就不再回退到默认的 `panel_fill`，会导致底色露出 eframe 清屏黑色。
+    // 因此必须显式 `.fill(panel_fill)`，与 CentralPanel 底色保持一致。
+    let panel_fill = ctx.style().visuals.panel_fill;
     egui::TopBottomPanel::bottom("keymap-diff")
-        .frame(egui::Frame::new().inner_margin(egui::Margin {
-            left: 4,
-            right: 4,
-            top: 4,
-            bottom: 4,
-        }))
+        .frame(
+            egui::Frame::new()
+                .fill(panel_fill)
+                .inner_margin(egui::Margin {
+                    left: 4,
+                    right: 4,
+                    top: 4,
+                    bottom: 4,
+                }),
+        )
         .show(ctx, |ui| {
             let snapshot = handle.keymap.lock().unwrap().clone();
             let draft = handle.keymap_draft.lock().unwrap().clone();
@@ -88,12 +96,16 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
 
     // 上：标题 + 控制条 + 图例（停靠固定）
     egui::TopBottomPanel::top("keymap-header")
-        .frame(egui::Frame::new().inner_margin(egui::Margin {
-            left: 4,
-            right: 4,
-            top: 4,
-            bottom: 4,
-        }))
+        .frame(
+            egui::Frame::new()
+                .fill(panel_fill)
+                .inner_margin(egui::Margin {
+                    left: 4,
+                    right: 4,
+                    top: 4,
+                    bottom: 4,
+                }),
+        )
         .show(ctx, |ui| {
             ui.heading("按键映射");
             ui.label(
