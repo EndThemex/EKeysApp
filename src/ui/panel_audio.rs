@@ -30,29 +30,35 @@ fn toast(handle: &AppHandle, kind: ToastKind, text: impl Into<String>) {
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) {
     ui.horizontal(|ui| {
         ui.heading("音效板");
-        if ui.button("刷新").clicked() {
-            if let Err(e) = handle
-                .refresh_audio_files()
-                .and_then(|_| handle.refresh_audio_pads())
-            {
-                toast(handle, ToastKind::Error, format!("刷新失败：{e}"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("停止播放").clicked() {
+                if let Err(e) = handle.audio_stop() {
+                    toast(handle, ToastKind::Error, format!("停止失败：{e}"));
+                }
             }
-        }
-        if ui.button("停止播放").clicked() {
-            if let Err(e) = handle.audio_stop() {
-                toast(handle, ToastKind::Error, format!("停止失败：{e}"));
+            if ui.button("刷新").clicked() {
+                if let Err(e) = handle
+                    .refresh_audio_files()
+                    .and_then(|_| handle.refresh_audio_pads())
+                {
+                    toast(handle, ToastKind::Error, format!("刷新失败：{e}"));
+                }
             }
-        }
+        });
     });
-    ui.label("为 11 个矩阵键绑定音频文件，设备音效页（导航环）按键即播");
+    ui.label(
+        egui::RichText::new("为 11 个矩阵键绑定音频文件，设备音效页（导航环）按键即播")
+            .weak()
+            .small(),
+    );
     ui.add_space(4.0);
 
     storage_card(handle, ui);
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     upload_card(handle, ui, st);
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     files_card(handle, ui);
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     pads_card(handle, ui);
 }
 
@@ -109,33 +115,71 @@ fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) 
                 );
             }
             None => {
+                egui::Grid::new("audio-upload-grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .min_col_width(64.0)
+                    .show(ui, |ui| {
+                        ui.label("本地文件");
+                        ui.horizontal(|ui| {
+                            // 给「浏览…」按钮预留 ~80px（按钮 ~50px + 间距），
+                            // 避免 `f32::INFINITY` 抢占导致按钮被截断。
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut st.upload_path)
+                                    .desired_width((ui.available_width() - 80.0).max(80.0)),
+                            );
+                            // 输入框为空时显示一行提示文字（不占位符）
+                            if st.upload_path.trim().is_empty()
+                                && !resp.has_focus()
+                            {
+                                ui.painter().text(
+                                    resp.rect.left_center()
+                                        + egui::vec2(6.0, 0.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    "点击「浏览…」选择 .mp3 / .wav 文件",
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                    ui.visuals().weak_text_color(),
+                                );
+                            }
+                            if ui.button("浏览…").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("音频文件", &["mp3", "wav"])
+                                    .pick_file()
+                                {
+                                    st.upload_path = path.display().to_string();
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("设备端名");
+                        ui.horizontal(|ui| {
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut st.upload_name)
+                                    .desired_width(ui.available_width()),
+                            );
+                            if st.upload_name.trim().is_empty()
+                                && !resp.has_focus()
+                            {
+                                ui.painter().text(
+                                    resp.rect.left_center()
+                                        + egui::vec2(6.0, 0.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    "留空 = 自动从文件名生成（a-z0-9_ + .mp3/.wav）",
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                    ui.visuals().weak_text_color(),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    });
+
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    ui.label("本地文件");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut st.upload_path)
-                            .hint_text(r"C:\music\kick.mp3")
-                            .desired_width(320.0),
-                    );
-                    if ui.button("浏览…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("音频文件", &["mp3", "wav"])
-                            .pick_file()
-                        {
-                            st.upload_path = path.display().to_string();
-                        }
+                    if ui.button("开始上传").clicked() {
+                        start_upload(handle, st);
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.label("设备端名");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut st.upload_name)
-                            .hint_text("留空 = 自动从文件名生成（a-z0-9_ + .mp3/.wav）")
-                            .desired_width(320.0),
-                    );
-                });
-                if ui.button("开始上传").clicked() {
-                    start_upload(handle, st);
-                }
                 ui.label(
                     egui::RichText::new(format!(
                         "限制：单文件 ≤ {} KB，文件名 a-z0-9_ + .mp3/.wav",
@@ -247,38 +291,50 @@ fn start_upload(handle: &AppHandle, st: &mut AudioPanelState) {
 fn files_card(handle: &AppHandle, ui: &mut egui::Ui) {
     let files = handle.audio.lock().unwrap().files.clone();
     ui.group(|ui| {
-        ui.label(format!("音频文件（{}）", files.len()));
+        ui.horizontal(|ui| {
+            ui.label(format!("音频文件（{}）", files.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new("名称 · 大小 · 试播 / 删除")
+                        .weak()
+                        .small(),
+                );
+            });
+        });
         if files.is_empty() {
             ui.label(egui::RichText::new("暂无文件").weak());
             return;
         }
         egui::ScrollArea::vertical()
             .max_height(180.0)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 for f in &files {
                     ui.horizontal(|ui| {
                         ui.label(&f.name);
-                        ui.label(
-                            egui::RichText::new(format!("{} KB", f.size / 1024))
-                                .weak()
-                                .small(),
-                        );
-                        if ui.small_button("试播").clicked() {
-                            if let Err(e) = handle.audio_play_file(&f.name) {
-                                toast(handle, ToastKind::Error, format!("试播失败：{e}"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("删除").clicked() {
+                                if let Err(e) = handle.delete_audio_file(&f.name) {
+                                    toast(handle, ToastKind::Error, format!("删除失败：{e}"));
+                                } else {
+                                    toast(
+                                        handle,
+                                        ToastKind::Success,
+                                        format!("已删除 {f}，引用它的键位已清空", f = f.name),
+                                    );
+                                }
                             }
-                        }
-                        if ui.small_button("删除").clicked() {
-                            if let Err(e) = handle.delete_audio_file(&f.name) {
-                                toast(handle, ToastKind::Error, format!("删除失败：{e}"));
-                            } else {
-                                toast(
-                                    handle,
-                                    ToastKind::Success,
-                                    format!("已删除 {f}，引用它的键位已清空", f = f.name),
-                                );
+                            if ui.small_button("试播").clicked() {
+                                if let Err(e) = handle.audio_play_file(&f.name) {
+                                    toast(handle, ToastKind::Error, format!("试播失败：{e}"));
+                                }
                             }
-                        }
+                            ui.label(
+                                egui::RichText::new(format!("{} KB", f.size / 1024))
+                                    .weak()
+                                    .small(),
+                            );
+                        });
                     });
                 }
             });
@@ -298,61 +354,91 @@ fn pads_card(handle: &AppHandle, ui: &mut egui::Ui) {
                 egui::RichText::new("设备上还没有音频文件，先上传后再绑定").weak(),
             );
         }
-        for (i, bound) in pads.iter().enumerate() {
-            let key = i + 1;
-            ui.horizontal(|ui| {
-                let selected_text = if bound.is_empty() {
-                    format!("K{key}：（未绑定）")
-                } else {
-                    format!("K{key}：{bound}")
-                };
-                egui::ComboBox::from_id_salt(("audio-pad", key))
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        // 「未绑定」选项
-                        if ui
-                            .selectable_label(bound.is_empty(), "（未绑定）")
-                            .clicked()
-                        {
-                            if !bound.is_empty() {
-                                if let Err(e) = handle.set_audio_pad(key as u8, "") {
-                                    toast(handle, ToastKind::Error, format!("清除绑定失败：{e}"));
-                                }
-                            }
-                        }
-                        for f in &files {
-                            if ui.selectable_label(*bound == f.name, &f.name).clicked() {
-                                if *bound != f.name {
-                                    if let Err(e) = handle.set_audio_pad(key as u8, &f.name) {
-                                        toast(
-                                            handle,
-                                            ToastKind::Error,
-                                            format!("绑定失败：{e}"),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    });
-                if ui.small_button("试播").clicked() {
-                    if bound.is_empty() {
-                        toast(handle, ToastKind::Warning, format!("K{key} 未绑定文件"));
-                    } else if let Err(e) = handle.audio_play_key(key as u8) {
-                        toast(handle, ToastKind::Error, format!("试播失败：{e}"));
+        egui::Grid::new("audio-pads-grid")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .min_col_width(220.0)
+            .show(ui, |ui| {
+                for (i, bound) in pads.iter().enumerate() {
+                    let key = i + 1;
+                    pad_row(ui, handle, key, bound, &files);
+                    if i % 2 == 1 {
+                        ui.end_row();
                     }
                 }
-                if ui.small_button("清除").clicked() && !bound.is_empty() {
-                    if let Err(e) = handle.set_audio_pad(key as u8, "") {
-                        toast(handle, ToastKind::Error, format!("清除绑定失败：{e}"));
-                    }
+                // 奇数行补一格,避免末尾孤行拉伸
+                if pads.len() % 2 == 1 {
+                    ui.label("");
+                    ui.end_row();
                 }
             });
-        }
         ui.label(
             egui::RichText::new("绑定即改即发；设备音效页按键播放，音量跟随设备「音频」设置")
                 .weak()
                 .small(),
         );
+    });
+}
+
+/// 键位绑定单行：K 编号 + ComboBox + 试播 + 清除。
+fn pad_row(
+    ui: &mut egui::Ui,
+    handle: &AppHandle,
+    key: usize,
+    bound: &str,
+    files: &[crate::protocol::AudioFileInfo],
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("K{key}"))
+                .strong()
+                .monospace(),
+        );
+        let selected_text = if bound.is_empty() {
+            "（未绑定）".to_string()
+        } else {
+            bound.to_string()
+        };
+        egui::ComboBox::from_id_salt(("audio-pad", key))
+            .selected_text(selected_text)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                // 「未绑定」选项
+                if ui
+                    .selectable_label(bound.is_empty(), "（未绑定）")
+                    .clicked()
+                {
+                    if !bound.is_empty() {
+                        if let Err(e) = handle.set_audio_pad(key as u8, "") {
+                            toast(handle, ToastKind::Error, format!("清除绑定失败：{e}"));
+                        }
+                    }
+                }
+                for f in files {
+                    if ui.selectable_label(*bound == f.name, &f.name).clicked() {
+                        if *bound != f.name {
+                            if let Err(e) = handle.set_audio_pad(key as u8, &f.name) {
+                                toast(handle, ToastKind::Error, format!("绑定失败：{e}"));
+                            }
+                        }
+                    }
+                }
+            });
+        if ui.small_button("试播").clicked() {
+            if bound.is_empty() {
+                toast(handle, ToastKind::Warning, format!("K{key} 未绑定文件"));
+            } else if let Err(e) = handle.audio_play_key(key as u8) {
+                toast(handle, ToastKind::Error, format!("试播失败：{e}"));
+            }
+        }
+        if ui
+            .add_enabled(!bound.is_empty(), egui::Button::new("清除"))
+            .clicked()
+        {
+            if let Err(e) = handle.set_audio_pad(key as u8, "") {
+                toast(handle, ToastKind::Error, format!("清除绑定失败：{e}"));
+            }
+        }
     });
 }
 

@@ -453,8 +453,11 @@ impl AppHandle {
         });
         // 3) Profile 状态 + 方案列表（0x10；TCP 连接时固件会主动推送，
         //    串口无推送，这里统一拉一次兜底。失败仅记日志。）
+        //    连接期只需要方案名称 + 图标（响应顶层 profiles 数组），具体
+        //    11 键映射不在这里拉。实测部分固件刚连上时处理 0x10 需要
+        //    ~2s（串行处理 + NVS 读取），1s 会误报超时，放宽到 3s。
         let _ = self.with_link(|lm| {
-            match lm.request(CMD_PROFILE_STATE, None, Duration::from_millis(1000)) {
+            match lm.request(CMD_PROFILE_STATE, None, Duration::from_millis(3000)) {
                 Ok(frame) => {
                     // ProfileState 的自定义 Deserialize 接受整帧形状
                     // （profile_state / profiles 都在顶层）。
@@ -484,10 +487,9 @@ impl AppHandle {
                 }
             }
         });
-        // 4) 当前 Profile 的键映射（0x05；失败仅记日志，键映射页可手动"重新加载"）
-        if let Err(e) = self.refresh_keymap_from_device() {
-            self.log_kind(LogKind::App, format!("GET 键映射失败: {e}"));
-        }
+        // 4) 键映射（0x05）不在连接期拉取：连接只需要方案名称/图标（0x10
+        //    已带回），具体 11 键映射在进入键映射页 / 切换方案时按需获取
+        //    （app.rs 页面边沿拉取 + panel_keymap「重新加载」按钮）。
         // 5) 音效板：文件列表 + 键位绑定（0x16 list / 0x17 get；失败仅记日志，
         //    与 0x03/0x07 同策略，Audio 页可手动刷新）
         if let Err(e) = self.refresh_audio_files() {
