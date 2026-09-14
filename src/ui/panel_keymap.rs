@@ -224,7 +224,9 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                 let geom = compute_keymap_geometry(ui.available_size(), &draft);
                 let band_h = ui.available_height();
 
-                ui.horizontal(|ui| {
+                // 顶部对齐（horizontal 默认垂直居中）：键盘外壳比视口高时，
+                // Drawer 若被居中会整体下移，底部按钮行被挤出视口。
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
 
                     // ─── 左：屏幕占位 + 键盘图 ───
@@ -788,16 +790,13 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
                 }
             };
 
-            ui.label(
-                egui::RichText::new("FUN 组合键")
-                    .strong()
-                    .size(12.0)
-                    .color(crate::ui::colors::themed(
-                        dark,
-                        Color32::from_rgb(0xC8, 0xCE, 0xD8),
-                        Color32::from_rgb(0x1A, 0x1D, 0x24),
-                    )),
-            )
+            ui.label(egui::RichText::new("FUN 组合键").strong().size(12.0).color(
+                crate::ui::colors::themed(
+                    dark,
+                    Color32::from_rgb(0xC8, 0xCE, 0xD8),
+                    Color32::from_rgb(0x1A, 0x1D, 0x24),
+                ),
+            ))
             .on_hover_text(
                 "按住 FUN 键再按其它键，触发该键的 FUN 层行为。\n\
                  右键键盘上的键帽可快速分配 / 取消 FUN 键。",
@@ -996,7 +995,8 @@ fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
         Color32::from_rgb(0x55, 0x60, 0x78),
         Color32::from_rgb(0x80, 0x88, 0x98),
     );
-    let center_c = crate::ui::colors::themed(dark, Color32::from_gray(110), Color32::from_gray(160));
+    let center_c =
+        crate::ui::colors::themed(dark, Color32::from_gray(110), Color32::from_gray(160));
     painter.text(
         screen.left_top() + Vec2::new(8.0, 6.0),
         egui::Align2::LEFT_TOP,
@@ -1152,9 +1152,7 @@ fn draw_keyboard(
             // 快照的 active 仍可能停在旧方案（切换后 0x08 尚未下发），
             // 取 snapshot.active_profile 会拿另一个方案的映射来比对，
             // 导致整页键帽误标"待下发"。
-            let snap_bindings = snapshot
-                .profile(effective_profile_idx)
-                .map(|p| &p.bindings);
+            let snap_bindings = snapshot.profile(effective_profile_idx).map(|p| &p.bindings);
             if matches!(slot.kind, SlotKind::Encoder) {
                 draw_encoder(
                     ui,
@@ -1700,8 +1698,119 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
     let selected = handle.selected_key.lock().unwrap().clone();
     crate::ui::card(ui, |ui| {
         // Drawer 占满调用方分配的高度（中间区域剩余高度）；
-        // 上半部 ScrollArea 在内容超出时独立滚动，操作按钮固定在底部
-        // （与左侧键盘外壳完全解耦，按钮始终可见不被滚出）。
+        // ─── 底部固定操作按钮 ───
+        // 先用底部 Panel 从卡片中划走固定底条，再让 ScrollArea 拿剩余高度。
+        // 若直接「ScrollArea + 底部按钮」竖排，auto_shrink(false) 的
+        // ScrollArea 会吃掉全部可用高度，把按钮挤出卡片底部（需滚动才能
+        // 看到，内容不满时表现为按钮上方一大段空白）；Panel 先占位后
+        // 按钮恒定贴底、始终可见。
+        if selected.is_some() {
+            egui::TopBottomPanel::bottom("keymap-drawer-actions")
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::new())
+                .show_inside(ui, |ui| {
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    let channel_name = match st.edit_channel.min(2) {
+                        LAYER_FUN1 => "FUN1",
+                        LAYER_FUN2 => "FUN2",
+                        _ => "单击",
+                    };
+                    let label = selected
+                        .and_then(|kref| {
+                            draft
+                                .profile(draft.active_profile)
+                                .and_then(|p| p.layers.iter().find(|l| l.index == kref.layer))
+                                .and_then(|l| {
+                                    l.slots
+                                        .iter()
+                                        .find(|s| s.row == kref.row && s.col == kref.col)
+                                })
+                                .map(|s| s.label.clone())
+                        })
+                        .unwrap_or_default();
+                    let channel_for_save = st.edit_channel.min(2);
+                    let phys_of_selected = selected.and_then(|kref| {
+                        draft
+                            .physical_key_slots()
+                            .into_iter()
+                            .find(|(_, r, c, _)| *r == kref.row && *c == kref.col)
+                            .map(|(p, _, _, _)| p)
+                    });
+                    let is_fun_key = match phys_of_selected {
+                        Some(n) => {
+                            (draft.fun_key1 != 0 && n == draft.fun_key1)
+                                || (draft.fun_key2 != 0 && n == draft.fun_key2)
+                        }
+                        None => false,
+                    };
+                    let mut channel = channel_for_save;
+                    if (channel == LAYER_FUN1 && (draft.fun_key1 == 0 || is_fun_key))
+                        || (channel == LAYER_FUN2 && (draft.fun_key2 == 0 || is_fun_key))
+                    {
+                        channel = LAYER_BASE;
+                    }
+                    let edit_ref = selected.map(|kref| crate::protocol::KeyRef {
+                        layer: channel,
+                        ..kref
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            let to_save = st.draft_action.clone().unwrap_or(KeyAction::None);
+                            let mut d = handle.keymap_draft.lock().unwrap();
+                            let active = d.active_profile;
+                            if let (Some(edit_ref), Some(p)) = (edit_ref, d.profile_mut(active)) {
+                                let prev = p.bindings.get(&edit_ref);
+                                let next = if to_save.is_set() {
+                                    Some(&to_save)
+                                } else {
+                                    None
+                                };
+                                if prev != next {
+                                    if to_save.is_set() {
+                                        p.bindings.insert(edit_ref, to_save.clone());
+                                    } else {
+                                        p.bindings.remove(&edit_ref);
+                                    }
+                                    d.bump_version();
+                                }
+                                let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                                    crate::state::ToastKind::Success,
+                                    format!(
+                                        "已为「{label}」{chan}通道设为 {}（待同步）",
+                                        to_save.label(),
+                                        chan = if channel == LAYER_BASE {
+                                            String::new()
+                                        } else {
+                                            format!("{channel_name} ")
+                                        }
+                                    ),
+                                ));
+                            }
+                        }
+                        if ui.button("清除").clicked() {
+                            if let Some(edit_ref) = edit_ref {
+                                let mut d = handle.keymap_draft.lock().unwrap();
+                                let active = d.active_profile;
+                                if let Some(p) = d.profile_mut(active) {
+                                    if p.bindings.remove(&edit_ref).is_some() {
+                                        d.bump_version();
+                                    }
+                                }
+                            }
+                            st.draft_action = Some(KeyAction::None);
+                        }
+                        if ui.button("关闭").clicked() {
+                            let mut sel = handle.selected_key.lock().unwrap();
+                            *sel = None;
+                        }
+                    });
+                    ui.add_space(2.0);
+                });
+        }
+        // ─── 内容滚动区 ───
         ui.vertical(|ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -1919,8 +2028,6 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             *handle.capture_keyboard.lock().unwrap() = st.capture_keyboard;
 
                             ui.add_space(10.0);
-                            // 仅在抽屉里有选中键时才显示底部按钮（按钮本身在
-                            // 滚动区外、由 drawer 函数尾部统一绘制，避免随内容滚动）。
                             ui.add_space(6.0);
                             ui.label(
                                 egui::RichText::new("改动需点击下方「应用」按钮才会同步到设备。")
@@ -1930,105 +2037,6 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                         }
                     }
                 });
-            // ─── 底部固定操作按钮 ───
-            // 按钮移出 ScrollArea，固定贴在弹窗底部，避免抽屉内容溢出
-            // 时被滚到屏外看不见；也避免按钮行挤压顶部内容布局。
-            if selected.is_some() {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-                let channel_name = match st.edit_channel.min(2) {
-                    LAYER_FUN1 => "FUN1",
-                    LAYER_FUN2 => "FUN2",
-                    _ => "单击",
-                };
-                let label = selected
-                    .and_then(|kref| {
-                        draft
-                            .profile(draft.active_profile)
-                            .and_then(|p| p.layers.iter().find(|l| l.index == kref.layer))
-                            .and_then(|l| {
-                                l.slots
-                                    .iter()
-                                    .find(|s| s.row == kref.row && s.col == kref.col)
-                            })
-                            .map(|s| s.label.clone())
-                    })
-                    .unwrap_or_default();
-                let channel_for_save = st.edit_channel.min(2);
-                let phys_of_selected = selected.and_then(|kref| {
-                    draft
-                        .physical_key_slots()
-                        .into_iter()
-                        .find(|(_, r, c, _)| *r == kref.row && *c == kref.col)
-                        .map(|(p, _, _, _)| p)
-                });
-                let is_fun_key = match phys_of_selected {
-                    Some(n) => {
-                        (draft.fun_key1 != 0 && n == draft.fun_key1)
-                            || (draft.fun_key2 != 0 && n == draft.fun_key2)
-                    }
-                    None => false,
-                };
-                let mut channel = channel_for_save;
-                if (channel == LAYER_FUN1 && (draft.fun_key1 == 0 || is_fun_key))
-                    || (channel == LAYER_FUN2 && (draft.fun_key2 == 0 || is_fun_key))
-                {
-                    channel = LAYER_BASE;
-                }
-                let edit_ref = selected.map(|kref| crate::protocol::KeyRef {
-                    layer: channel,
-                    ..kref
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("保存").clicked() {
-                        let to_save =
-                            st.draft_action.clone().unwrap_or(KeyAction::None);
-                        let mut d = handle.keymap_draft.lock().unwrap();
-                        let active = d.active_profile;
-                        if let (Some(edit_ref), Some(p)) = (edit_ref, d.profile_mut(active)) {
-                            let prev = p.bindings.get(&edit_ref);
-                            let next = if to_save.is_set() { Some(&to_save) } else { None };
-                            if prev != next {
-                                if to_save.is_set() {
-                                    p.bindings.insert(edit_ref, to_save.clone());
-                                } else {
-                                    p.bindings.remove(&edit_ref);
-                                }
-                                d.bump_version();
-                            }
-                            let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
-                                crate::state::ToastKind::Success,
-                                format!(
-                                    "已为「{label}」{chan}通道设为 {}（待同步）",
-                                    to_save.label(),
-                                    chan = if channel == LAYER_BASE {
-                                        String::new()
-                                    } else {
-                                        format!("{channel_name} ")
-                                    }
-                                ),
-                            ));
-                        }
-                    }
-                    if ui.button("清除").clicked() {
-                        if let Some(edit_ref) = edit_ref {
-                            let mut d = handle.keymap_draft.lock().unwrap();
-                            let active = d.active_profile;
-                            if let Some(p) = d.profile_mut(active) {
-                                if p.bindings.remove(&edit_ref).is_some() {
-                                    d.bump_version();
-                                }
-                            }
-                        }
-                        st.draft_action = Some(KeyAction::None);
-                    }
-                    if ui.button("关闭").clicked() {
-                        let mut sel = handle.selected_key.lock().unwrap();
-                        *sel = None;
-                    }
-                });
-            }
         });
     });
 }

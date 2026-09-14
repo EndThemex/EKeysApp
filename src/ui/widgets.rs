@@ -67,7 +67,10 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
                             // 限定最大行宽）。
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
-                                ui.label(crate::ui::fonts::icon_rich(icon, 13.0).color(egui::Color32::WHITE));
+                                ui.label(
+                                    crate::ui::fonts::icon_rich(icon, 13.0)
+                                        .color(egui::Color32::WHITE),
+                                );
                                 ui.label(
                                     egui::RichText::new(&t.text)
                                         .font(egui::FontId::proportional(13.0))
@@ -190,10 +193,7 @@ pub fn show_local_settings(
                 let current = handle.theme();
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for t in [
-                        crate::config::Theme::Dark,
-                        crate::config::Theme::Light,
-                    ] {
+                    for t in [crate::config::Theme::Dark, crate::config::Theme::Light] {
                         let selected = current == t;
                         let mut btn = crate::ui::fonts::IconTextButton::new("", t.label(), 14.0)
                             .gap(0.0)
@@ -449,6 +449,16 @@ pub fn show_diff_bar(
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
+                    if mask.test(crate::protocol::F_WIFI_SWITCH) {
+                        ui.label(format!("wifi_switch={}", diff.wifi_switch));
+                    }
+                    if mask.test(crate::protocol::F_WIFI_SSID) {
+                        ui.label(format!("wifi_ssid={}", diff.wifi_ssid));
+                    }
+                    if mask.test(crate::protocol::F_WIFI_PASSWORD) {
+                        // 密码不下发明文到明细条，仅提示已修改。
+                        ui.label("wifi_password=******".to_string());
+                    }
                     if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
                         ui.label(format!("tft_brightness={}", diff.tft_brightness));
                     }
@@ -550,7 +560,9 @@ pub fn settings_panel_scaffold(
     match action {
         DiffAction::Apply => apply_diff(handle, &diff, mask),
         DiffAction::Discard => {
-            *handle.draft.lock().unwrap() = snapshot.clone();
+            // 本地 draft 也必须重置：函数末尾会无条件把 draft 写回 handle.draft，
+            // 若只重置 handle.draft 会被这里当帧覆盖，导致"放弃"按钮看似无效。
+            draft = snapshot.clone();
         }
         DiffAction::None => {}
     }
