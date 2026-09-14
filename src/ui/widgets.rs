@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::protocol::{DeviceSettings, FieldMask};
-use crate::state::{AppHandle, LogKind, ToastKind, UiEvent};
+use crate::state::{AppHandle, ToastKind};
 
 // ============ Toast ============
 
@@ -23,7 +23,8 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
         return;
     }
     egui::Area::new(egui::Id::new("toasts"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+        // 状态栏高度约 22-24px，再留 8px 间距，避免 Toast 挡住状态栏
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -36.0])
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 for t in toasts.iter() {
@@ -45,6 +46,9 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
                             crate::ui::icons::TOAST_ERROR,
                         ),
                     };
+                    // 宽度策略：min=160（保证短文本如"已应用"也有合理留白），
+                    // max=280（超过这个宽度就换行，避免单行 Toast 在窄窗口被截断
+                    // 或在宽窗口铺得过长、影响阅读节奏）。
                     egui::Frame::new()
                         .fill(color)
                         .corner_radius(egui::CornerRadius::same(8))
@@ -55,22 +59,21 @@ pub fn show_toasts(ctx: &egui::Context, toasts: &mut Vec<Toast>) {
                             bottom: 8,
                         })
                         .show(ui, |ui| {
-                            ui.set_max_width(360.0);
+                            ui.set_min_width(160.0);
+                            ui.set_max_width(280.0);
                             // 图标用 Phosphor 字体、文本用 Proportional，避免 icon
-                            // 字符被 Proportional 字体“吃掉”。
-                            let resp = ui.allocate_response(
-                                egui::vec2(ui.available_width(), 16.0),
-                                egui::Sense::hover(),
-                            );
-                            crate::ui::fonts::paint_icon_text_in(
-                                ui,
-                                resp.rect,
-                                icon,
-                                &t.text,
-                                13.0,
-                                egui::Color32::WHITE,
-                                6.0,
-                            );
+                            // 字符被 Proportional 字体"吃掉"。horizontal_wrapped
+                            // 让长文本在容器宽度内自然换行（`set_max_width` 已
+                            // 限定最大行宽）。
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(crate::ui::fonts::icon_rich(icon, 13.0).color(egui::Color32::WHITE));
+                                ui.label(
+                                    egui::RichText::new(&t.text)
+                                        .font(egui::FontId::proportional(13.0))
+                                        .color(egui::Color32::WHITE),
+                                );
+                            });
                         });
                 }
             });
@@ -105,6 +108,9 @@ pub fn show_confirm(
         .open(open)
         .collapsible(false)
         .resizable(false)
+        // 居中：固定锚点 + 显式 default_pos 避免 egui 记忆上次位置飘离屏幕中心。
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_pos([0.0, 0.0])
         .default_size([380.0, 180.0])
         .min_size([320.0, 140.0])
         .max_size([520.0, 320.0])
@@ -112,9 +118,10 @@ pub fn show_confirm(
             ui.label(body);
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary = egui::Button::new("继续")
-                    .fill(crate::ui::ACCENT)
-                    .corner_radius(egui::CornerRadius::same(6));
+                let primary =
+                    egui::Button::new(egui::RichText::new("继续").color(egui::Color32::WHITE))
+                        .fill(crate::ui::ACCENT)
+                        .corner_radius(egui::CornerRadius::same(6));
                 if ui.add(primary).clicked() {
                     outcome = ConfirmOutcome::Yes;
                 }
@@ -142,13 +149,19 @@ pub fn show_local_settings(
         .open(open)
         .collapsible(false)
         .resizable(false)
+        // 居中：固定锚点 + 显式 default_pos 避免 egui 记忆上次位置飘离屏幕中心。
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_pos([0.0, 0.0])
         .default_size([420.0, 360.0])
         .show(ctx, |ui| {
             // 1) 自动连接
             ui.group(|ui| {
                 ui.strong("连接");
                 let mut ac = *handle.auto_connect.lock().unwrap();
-                if ui.checkbox(&mut ac, "启动时自动连接上次端口").changed() {
+                if ui
+                    .checkbox(&mut ac, "启动时自动连接上次使用的端口")
+                    .changed()
+                {
                     *handle.auto_connect.lock().unwrap() = ac;
                 }
             });
@@ -167,34 +180,47 @@ pub fn show_local_settings(
                 if lang != handle.language() {
                     handle.local_config.lock().unwrap().language = lang;
                 }
-                ui.label("（阶段 04 仅中文生效；切换后 UI 文案尚未本地化）");
+                ui.label("（目前仅提供中文界面；切换到英文后部分文案暂未翻译）");
             });
 
-            // 3) 主题
+            // 3) 主题：两段式按钮，选中态填品牌色，与 Settings 页 tab 同款风格。
             ui.add_space(4.0);
             ui.group(|ui| {
                 ui.strong("主题");
-                let mut theme = handle.theme();
-                egui::ComboBox::from_id_salt("theme-combo")
-                    .selected_text(theme.label())
-                    .show_ui(ui, |cb| {
-                        cb.selectable_value(&mut theme, crate::config::Theme::Dark, "深色");
-                        cb.selectable_value(&mut theme, crate::config::Theme::Light, "浅色");
-                    });
-                if theme != handle.theme() {
-                    handle.local_config.lock().unwrap().theme = theme;
-                    let _ = handle.ui_tx.send(UiEvent::Toast(
-                        ToastKind::Info,
-                        "主题切换将在下次启动生效".to_string(),
-                    ));
-                }
+                let current = handle.theme();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for t in [
+                        crate::config::Theme::Dark,
+                        crate::config::Theme::Light,
+                    ] {
+                        let selected = current == t;
+                        let mut btn = crate::ui::fonts::IconTextButton::new("", t.label(), 14.0)
+                            .gap(0.0)
+                            .fill(if selected {
+                                crate::ui::ACCENT
+                            } else {
+                                ui.visuals().faint_bg_color
+                            })
+                            .corner_radius(egui::CornerRadius::same(8));
+                        if selected {
+                            btn = btn.fg(egui::Color32::WHITE);
+                        }
+                        if ui.add(btn).clicked() && !selected {
+                            handle.local_config.lock().unwrap().theme = t;
+                            // 即时切换 visuals：避免重启应用才能看到效果；
+                            // 退出时 on_exit 会把 LocalConfig 落盘，下次启动仍生效。
+                            crate::ui::apply_theme(ui.ctx(), t);
+                        }
+                    }
+                });
             });
 
             // 4) 窗口大小（只读展示）
             ui.add_space(4.0);
             ui.group(|ui| {
                 ui.strong("窗口");
-                ui.label("当前大小会在退出时自动保存，下次启动恢复。");
+                ui.label("当前窗口大小会在退出时自动保存，下次启动时恢复。");
             });
 
             ui.add_space(8.0);
@@ -372,7 +398,7 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
 }
 
 pub fn show_diff_bar(
-    handle: &AppHandle,
+    _handle: &AppHandle,
     ui: &mut egui::Ui,
     diff: &DeviceSettings,
     mask: FieldMask,
@@ -394,67 +420,73 @@ pub fn show_diff_bar(
             bottom: 8,
         })
         .show(ui, |ui| {
+            // 两行布局：标题 + 按钮固定在第一行（右对齐、不被内容挤压），
+            // 明细放在第二行自动换行。避免明细过长时把按钮挤出可视区，
+            // 导致点击"应用"时误点落到按钮位置上的明细文本，也避免撑出
+            // 父面板的横向滚动条。
             ui.horizontal(|ui| {
                 ui.strong(
                     egui::RichText::new(format!("待下发 {count} 项"))
                         .color(ui.visuals().warn_fg_color),
                 );
-                ui.separator();
-                egui::ScrollArea::horizontal()
-                    .max_width(420.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
-                            if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
-                                ui.label(format!("tft_brightness={}", diff.tft_brightness));
-                            }
-                            if mask.test(crate::protocol::F_TFT_THEME) {
-                                ui.label(format!("tft_theme={}", diff.tft_theme));
-                            }
-                            if mask.test(crate::protocol::F_WORK_MODE) {
-                                ui.label(format!("work_mode={}", diff.work_mode));
-                            }
-                            if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
-                                ui.label(format!(
-                                    "active_keymap_profile={}",
-                                    diff.active_keymap_profile
-                                ));
-                            }
-                            if mask.test(crate::protocol::F_DEVICE_VOLUME) {
-                                ui.label(format!("device_volume={}", diff.device_volume));
-                            }
-                            if mask.test(crate::protocol::F_AUDIO_ENABLE) {
-                                ui.label(format!("audio_enable={}", diff.audio_enable));
-                            }
-                            if mask.test(crate::protocol::F_POWER_MODE) {
-                                ui.label(format!("power_mode={}", diff.power_mode));
-                            }
-                            if mask.test(crate::protocol::F_RGB_MODE) {
-                                ui.label(format!("rgb_mode={}", diff.rgb_mode));
-                            }
-                            if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
-                                ui.label(format!("rgb_single_color={}", diff.rgb_single_color));
-                            }
-                            if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
-                                ui.label(format!("rgb_click_mode={}", diff.rgb_click_mode));
-                            }
-                            if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
-                                ui.label(format!("rgb_brightness={}", diff.rgb_brightness));
-                            }
-                        });
-                    });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("放弃 (Esc)").clicked() {
                         action = DiffAction::Discard;
                     }
-                    let apply_btn = egui::Button::new("应用 (Ctrl+Enter)")
-                        .fill(crate::ui::ACCENT)
-                        .corner_radius(egui::CornerRadius::same(6));
+                    let apply_btn = egui::Button::new(
+                        egui::RichText::new("应用 (Ctrl+Enter)").color(egui::Color32::WHITE),
+                    )
+                    .fill(crate::ui::ACCENT)
+                    .corner_radius(egui::CornerRadius::same(6));
                     if ui.add_enabled(can_apply, apply_btn).clicked() {
                         action = DiffAction::Apply;
                     }
                 });
             });
+            if count > 0 {
+                ui.add_space(4.0);
+                // 横向自动换行展示，不用 ScrollArea：内容永远不会超出面板宽度。
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
+                    if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
+                        ui.label(format!("tft_brightness={}", diff.tft_brightness));
+                    }
+                    if mask.test(crate::protocol::F_TFT_THEME) {
+                        ui.label(format!("tft_theme={}", diff.tft_theme));
+                    }
+                    if mask.test(crate::protocol::F_WORK_MODE) {
+                        ui.label(format!("work_mode={}", diff.work_mode));
+                    }
+                    if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
+                        ui.label(format!(
+                            "active_keymap_profile={}",
+                            diff.active_keymap_profile
+                        ));
+                    }
+                    if mask.test(crate::protocol::F_DEVICE_VOLUME) {
+                        ui.label(format!("device_volume={}", diff.device_volume));
+                    }
+                    if mask.test(crate::protocol::F_AUDIO_ENABLE) {
+                        ui.label(format!("audio_enable={}", diff.audio_enable));
+                    }
+                    if mask.test(crate::protocol::F_POWER_MODE) {
+                        ui.label(format!("power_mode={}", diff.power_mode));
+                    }
+                    if mask.test(crate::protocol::F_RGB_MODE) {
+                        ui.label(format!("rgb_mode={}", diff.rgb_mode));
+                    }
+                    if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
+                        ui.label(format!("rgb_single_color={}", diff.rgb_single_color));
+                    }
+                    if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
+                        ui.label(format!("rgb_click_mode={}", diff.rgb_click_mode));
+                    }
+                    if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
+                        ui.label(format!("rgb_brightness={}", diff.rgb_brightness));
+                    }
+                });
+            }
         });
     action
 }
@@ -487,20 +519,6 @@ fn secret_field_names(mask: FieldMask) -> Vec<&'static str> {
         names.push("SecretKey");
     }
     names
-}
-
-// ============ 简易 FieldEditor 辅助 ============
-
-/// 字段变更事件（面板 → AppHandle）
-#[derive(Debug, Clone)]
-pub enum FieldChange {
-    Set(DeviceSettings),
-}
-
-/// 占位：导出 LogKind 以便 panel_log 引用
-#[allow(dead_code)]
-pub fn _kind_marker() -> LogKind {
-    LogKind::App
 }
 
 // ============ Settings Panel 通用脚手架 ============

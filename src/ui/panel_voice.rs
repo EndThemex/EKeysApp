@@ -2,7 +2,7 @@
 //!
 //! 字段：voice_enable / voice_trigger_key / voice_max_record_ms / voice_auto_enter /
 //!       voice_cuid / voice_tencent_secret_id / voice_tencent_secret_key
-//! 阶段 06 生效；阶段 08 由百度短语音迁移为腾讯云一句话识别（SentenceRecognition）
+//! 阶段 08 由百度短语音迁移为腾讯云一句话识别（SentenceRecognition）
 
 use eframe::egui;
 
@@ -27,30 +27,37 @@ fn preview_mask(s: &str) -> String {
         return "*".repeat(len);
     }
     let prefix: String = s.chars().take(4).collect();
-    let suffix: String = s.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let suffix: String = s
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let mid = if len > 40 { "…" } else { "***" };
     format!("{prefix}{mid}{suffix}")
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
     ui.heading("语音识别");
-    ui.label("腾讯云一句话识别（SentenceRecognition，16k_zh）");
+    ui.label("腾讯云一句话识别服务（采样率 16 kHz，中文）");
     ui.add_space(4.0);
 
     settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {
         ui.group(|ui| {
-            ui.label("启用语音");
+            ui.label("语音功能开关");
             let mut on = if draft.voice_enable != 0 || snapshot.voice_enable != 0 {
                 draft.voice_enable != 0
             } else {
                 snapshot.voice_enable != 0
             };
-            if ui.checkbox(&mut on, "启用").changed() {
+            if ui.checkbox(&mut on, "启用语音识别").changed() {
                 draft.voice_enable = if on { 1 } else { 0 };
             }
 
             ui.add_space(6.0);
-            ui.label("触发键 ID");
+            ui.label("触发键编号");
             // 触发键 / 录音时长直接读 draft：未编辑时 draft 经 merge_push
             // 始终跟随 snapshot，不能取 max（否则低于快照值的修改会被
             // 立刻回显成旧值，只能调大不能调小）。
@@ -70,13 +77,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("自动进入识别");
+            ui.label("按触发键即启动识别");
             let mut ae = if draft.voice_auto_enter != 0 || snapshot.voice_auto_enter != 0 {
                 draft.voice_auto_enter != 0
             } else {
                 snapshot.voice_auto_enter != 0
             };
-            if ui.checkbox(&mut ae, "按下触发键后自动进入识别").changed() {
+            if ui.checkbox(&mut ae, "按下触发键后立即进入识别").changed() {
                 draft.voice_auto_enter = if ae { 1 } else { 0 };
             }
         });
@@ -85,7 +92,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             ui.label("腾讯云 API 配置");
 
             ui.add_space(4.0);
-            ui.label("SecretId（≤64 字节）");
+            ui.label("SecretId（最多 64 个字符）");
             // SecretId 与 SecretKey 一样，在设备回读时被 mask_sensitive
             // 统一替换为 "***"（协议 §7，App 不存储密钥明文）。
             // 编辑判断必须用"草稿 != 旧快照"而不是 is_empty()：
@@ -100,7 +107,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             } else {
                 snapshot.voice_tencent_secret_id.clone()
             };
-            let id_draft_modified = draft.voice_tencent_secret_id != snapshot.voice_tencent_secret_id;
+            let id_draft_modified =
+                draft.voice_tencent_secret_id != snapshot.voice_tencent_secret_id;
             let mut id_displayed = if id_draft_modified {
                 id_real.clone()
             } else {
@@ -118,7 +126,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("SecretKey（≤64 字节）");
+            ui.label("SecretKey（最多 64 个字符）");
             let mut sk = if draft.voice_tencent_secret_key.is_empty() {
                 snapshot.voice_tencent_secret_key.clone()
             } else {
@@ -133,28 +141,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
                 .changed()
             {
                 draft.voice_tencent_secret_key = sk;
-            }
-
-            ui.add_space(6.0);
-            ui.label("CUID（≤32 字节，腾讯协议不使用，保留）");
-            let cuid_real = if draft.voice_cuid != snapshot.voice_cuid {
-                draft.voice_cuid.clone()
-            } else {
-                snapshot.voice_cuid.clone()
-            };
-            let cuid_draft_modified = draft.voice_cuid != snapshot.voice_cuid;
-            let mut cuid_displayed = if cuid_draft_modified {
-                cuid_real.clone()
-            } else {
-                preview_mask(&cuid_real)
-            };
-            if ui
-                .add(egui::TextEdit::singleline(&mut cuid_displayed).desired_width(280.0))
-                .changed()
-            {
-                if cuid_draft_modified || cuid_displayed != preview_mask(&cuid_real) {
-                    draft.voice_cuid = cuid_displayed;
-                }
             }
         });
     });

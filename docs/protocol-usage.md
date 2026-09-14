@@ -8,6 +8,17 @@
 
 ---
 
+## 0. 协议版本与开放声明
+
+- **协议版本**：`v1.0`（见 [`src/protocol.rs` 顶部 `PROTOCOL_VERSION`](../src/protocol.rs)）
+- **协议开放**：本协议对**第三方实现完全开放**，欢迎第三方固件 / App 兼容实现。
+  在源码层面同时提供 Rust 端参考实现（`src/protocol.rs`）与本说明文档。
+- **兼容性**：在 `PROTOCOL_VERSION` 主版本号不变的前提下，新增字段 / 新增命令必须
+  保持向下兼容；任何破坏性变更必须先 bump 主版本号。
+- **变更检查表**：见 §12。
+
+---
+
 ## 1. 物理层与帧格式
 
 ### 1.1 传输
@@ -51,32 +62,65 @@ is_push(frame)   = is_response(frame.cmd) && frame.seq == 0
 
 App 端已声明全部 **18 个命令常量**（与固件 `SerialProtocol.h` 对齐），但**实际下发/接收逻辑**目前只覆盖：
 
-| 命令               | 常量                            | 值              | 方向       | App 当前状态                                                 |
-| ------------------ | ------------------------------- | --------------- | ---------- | ------------------------------------------------------------ |
-| 配置版本 GET / SET | `CMD_CONF_VERSION_GET` / `_SET` | `0x01` / `0x02` | App → 设备 | ✅ 数据结构定义完成；调用层未接入                            |
-| 设备信息 GET       | `CMD_DEVICE_INFO_GET`           | `0x03`          | App → 设备 | ✅ **已接入**（连接后 `auto_get` 拉取，顶栏 + About 页展示） |
-| 设备信息 SET       | `CMD_DEVICE_INFO_SET`           | `0x04`          | App → 设备 | ✅ 数据结构定义；调用未接入                                  |
-| 键映射 GET / SET   | `CMD_KEYMAP_GET` / `_SET`       | `0x05` / `0x06` | App → 设备 | ✅ **已接入**（键映射面板：重新加载 = GET，下发 = SET）      |
-| 配置 GET           | `CMD_CONFIG_GET`                | `0x07`          | App → 设备 | ✅ **已接入**                                                |
-| 配置 SET           | `CMD_CONFIG_SET`                | `0x08`          | App → 设备 | ✅ **已接入**                                                |
-| 物理按键上报       | `CMD_KEY_EVENT`                 | `0x09`          | 设备 → App | ❌ 固件侧未实现；App 暂不监听                                |
-| 心跳               | `CMD_HEARTBEAT`                 | `0x0a`          | 双向       | ✅ **已接入**                                                |
-| 固件信息 / OTA     | `CMD_FIRMWARE_INFO`             | `0x0b`          | 双向       | ✅ 数据结构定义；调用未接入                                  |
-| 语音文本推送       | `CMD_VOICE_TEXT`                | `0x0c`          | 设备 → App | ✅ 数据结构定义；UI 路由未接入                               |
-| PC 状态            | `CMD_PC_STATUS`                 | `0x0d`          | App → 设备 | ✅ 数据结构定义；调用未接入                                  |
-| 音乐状态           | `CMD_MUSIC_STATUS`              | `0x0e`          | App → 设备 | ✅ 同上                                                      |
-| 音乐控制           | `CMD_MUSIC_CONTROL`             | `0x0f`          | 设备 → App | ✅ 同上（固件 UI 链路未通）                                  |
-| Profile 状态       | `CMD_PROFILE_STATE`             | `0x10`          | 双向       | ✅ 数据结构定义；调用未接入；**异类响应**                    |
-| Profile 图标       | `CMD_PROFILE_ICON_SET`          | `0x11`          | App → 设备 | ✅ **已接入**（设置 → 键盘页：上传 / 清除图标）              |
-| HA 状态            | `CMD_HA_STATUS`                 | `0x12`          | 设备 → App | ❌ 固件侧未实现                                              |
+| 命令               | 常量                            | 值              | 方向       | App 当前状态                                                                 |
+| ------------------ | ------------------------------- | --------------- | ---------- | ---------------------------------------------------------------------------- |
+| 配置版本 GET / SET | `CMD_CONF_VERSION_GET` / `_SET` | `0x01` / `0x02` | App → 设备 | ✅ 数据结构定义完成；调用层未接入                                            |
+| 设备信息 GET       | `CMD_DEVICE_INFO_GET`           | `0x03`          | App → 设备 | ✅ **已接入**（连接后 `auto_get` 拉取，顶栏 + About 页展示）                 |
+| 设备信息 SET       | `CMD_DEVICE_INFO_SET`           | `0x04`          | App → 设备 | ✅ 数据结构定义；调用未接入                                                  |
+| 键映射 GET / SET   | `CMD_KEYMAP_GET` / `_SET`       | `0x05` / `0x06` | App → 设备 | ✅ **已接入**（键映射面板：重新加载 = GET，下发 = SET）                      |
+| 配置 GET           | `CMD_CONFIG_GET`                | `0x07`          | App → 设备 | ✅ **已接入**                                                                |
+| 配置 SET           | `CMD_CONFIG_SET`                | `0x08`          | App → 设备 | ✅ **已接入**                                                                |
+| 物理按键上报       | `CMD_KEY_EVENT`                 | `0x09`          | 设备 → App | ❌ 固件侧未实现；App 暂不监听                                                |
+| 心跳               | `CMD_HEARTBEAT`                 | `0x0a`          | 双向       | ✅ **已接入**                                                                |
+| 固件信息 / OTA     | `CMD_FIRMWARE_INFO`             | `0x0b`          | 双向       | ✅ 数据结构定义；调用未接入                                                  |
+| 语音文本推送       | `CMD_VOICE_TEXT`                | `0x0c`          | 设备 → App | ✅ 数据结构定义；UI 路由未接入                                               |
+| PC 状态            | `CMD_PC_STATUS`                 | `0x0d`          | App → 设备 | ✅ 数据结构定义；调用未接入                                                  |
+| 音乐状态           | `CMD_MUSIC_STATUS`              | `0x0e`          | App → 设备 | ✅ 同上                                                                      |
+| 音乐控制           | `CMD_MUSIC_CONTROL`             | `0x0f`          | 设备 → App | ✅ 同上（固件 UI 链路未通）                                                  |
+| Profile 状态       | `CMD_PROFILE_STATE`             | `0x10`          | 双向       | ✅ 数据结构定义；调用未接入；**异类响应**                                    |
+| Profile 图标       | `CMD_PROFILE_ICON_SET`          | `0x11`          | App → 设备 | ✅ **已接入**（设置 → 键盘页：上传 / 清除图标）                              |
+| HA 状态            | `CMD_HA_STATUS`                 | `0x12`          | 设备 → App | ❌ 固件侧未实现                                                              |
+| 时间设置           | `CMD_TIME_SET`                  | `0x13`          | App → 设备 | ✅ **已接入**（连接后 `auto_get` 同步本机 epoch + tz）                       |
+| 进入下载模式       | `CMD_FIRMWARE_DOWNLOAD`         | `0x14`          | App → 设备 | ✅ **已接入**（设置 → 固件升级 tab：烧录模式）                               |
+| Profile 名称       | `CMD_PROFILE_NAME_SET`          | `0x15`          | App → 设备 | ✅ **已接入**（设置 → 键盘页：Profile 重命名）                               |
+| 音效文件管理       | `CMD_AUDIO_FILE`                | `0x16`          | App → 设备 | ✅ **已接入**（音效页：list / begin / data / end / abort / delete，见 §9.5） |
+| 音效板绑定与播放   | `CMD_AUDIO_PAD`                 | `0x17`          | App → 设备 | ✅ **已接入**（音效页：get / set / play / stop，见 §9.5）                    |
 
 **响应帧**：`response_cmd(req) = req | 0x80`。**例外**：`CMD_PROFILE_STATE` 的响应帧 `cmd` 仍是 `0x10`（详见 §3.3 与 §5.6）。
+
+### 2.1 App TODO / Firmware TODO
+
+下面把「还没打通」的命令按责任侧拆开,方便两边各自认领。
+
+#### App TODO(App 侧需补完的链路)
+
+| 命令                           | 现状                                            | 期望                                                  |
+| ------------------------------ | ----------------------------------------------- | ----------------------------------------------------- |
+| `0x01/0x02` Config Ver         | 数据结构定义;调用层未接入                       | Settings → About / OTA 时拉取,展示 / 校验版本号       |
+| `0x04` Device Info SET         | 数据结构定义;调用未接入                         | Settings → 关于 → 重命名设备 / 改序列号               |
+| `0x0b` Firmware Info / OTA Req | 数据结构定义;调用未接入                         | About 页展示 `FirmwareInfo`;OTA 自动获取 checksum     |
+| `0x0c` Voice Text              | 数据结构定义;UI 路由未接入                      | 语音页 / Toast 弹识别文本(并写日志)                   |
+| `0x0d` PC Status Push          | App 已在 Settings 提供开关;**调用层未真正下发** | 打开开关后启动 `pc_status` 后台采集 + diff-based 推送 |
+| `0x0e` Music Status            | 数据结构定义;调用未接入                         | 顶栏 / 关于 展示当前播放(若固件侧提供)                |
+| `0x10` Profile State           | 数据结构定义;响应路由未接入                     | Keymap 页订阅 profile 切换,刷新 active profile        |
+| `0x12` HA Status               | 数据结构定义;UI 未展示                          | Settings 开关 + 卡片(等固件实现)                      |
+
+#### Firmware TODO(固件侧尚未实现)
+
+| 命令                            | 期望                                                         |
+| ------------------------------- | ------------------------------------------------------------ |
+| `0x09` Key Event                | App 已声明 `KeyEvent`,等固件实现键盘 → App 上报(可选)        |
+| `0x12` HA Status                | Home Assistant 状态推送通道未实现                            |
+| Profile / Voice Text 等已有命令 | 不在 TODO 列表,但若新增语义需同步 §9 类型表与 §11 兼容性矩阵 |
+
+> App 与固件是**两个独立仓库**,此处拆分仅用于明确责任侧;实际认领时各自由对应维护者
+> 在 issue / PR 中标记。
 
 ---
 
 ## 3. `DeviceSettings` 字段全集
 
-固件推送 `CONFIG_GET` 响应 / 全量 `CONFIG_SET` 时必须**完整填写以下全部 26 个字段**（可缺省则走 serde `Default`）。
+固件推送 `CONFIG_GET` 响应 / 全量 `CONFIG_SET` 时必须**完整填写以下全部 25 个字段**（可缺省则走 serde `Default`）。
 
 | #   | 字段                             | 类型   | 备注                                      |
 | --- | -------------------------------- | ------ | ----------------------------------------- |
@@ -161,16 +205,16 @@ App 内部 `diff()` / `apply()` 使用 `FieldMask` 显式标记"哪些字段有�
 
 ### 4.3 固件侧必须遵守的钳位规则
 
-| 字段                                                                 | 钳位规则                                         |
-| -------------------------------------------------------------------- | ------------------------------------------------ |
-| `tft_brightness`                                                     | `< 5 → 5`，`> 100 → 100`                         |
-| `work_mode`                                                          | 越界忽略该字段                                   |
-| `active_keymap_profile`                                              | 仅 `0~7`，越界忽略                               |
-| `wifi_switch` / `connect_host` / `voice_enable` / `voice_auto_enter` | 归一化为 `0/1`                                   |
-| `voice_trigger_key`                                                  | `< 0 → 0`，`> 11 → 11`                           |
-| `voice_max_record_ms`                                                | 钳制到 `1000~60000`                              |
+| 字段                                                                 | 钳位规则                                                                                |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `tft_brightness`                                                     | `< 5 → 5`，`> 100 → 100`                                                                |
+| `work_mode`                                                          | 越界忽略该字段                                                                          |
+| `active_keymap_profile`                                              | 仅 `0~7`，越界忽略                                                                      |
+| `wifi_switch` / `connect_host` / `voice_enable` / `voice_auto_enter` | 归一化为 `0/1`                                                                          |
+| `voice_trigger_key`                                                  | `< 0 → 0`，`> 11 → 11`                                                                  |
+| `voice_max_record_ms`                                                | 钳制到 `1000~60000`                                                                     |
 | 字符串                                                               | 超过容量时截断；WiFi 密码和腾讯云 SecretId/SecretKey 最大 64 字节，`voice_cuid` 32 字节 |
-| 未知字段                                                             | 忽略                                             |
+| 未知字段                                                             | 忽略                                                                                    |
 
 App 端 `DeviceSettings::clamp()` **已覆盖上表全部规则**（含字符串截断，按字节截断且不切断 UTF-8 字符边界）。App 在下发前对 diff 先做 `clamp()`，固件侧仍保留自己的钳位作为兜底。如果固件端将来修改钳位规则，需同步通知 App 维护者（钳位变更可能导致 diff 计算与实际下发值不同步）。
 
@@ -295,26 +339,31 @@ App 收到后：
 
 下表列出 `src/protocol.rs` 中所有命令的请求 / 响应 / 推送数据类型。这些类型**已定义且通过单测**，但目前**调用层未完全接入**（详见 §2 表格）。
 
-| 命令                          | 请求类型（App → 设备）                                                                                | 响应 / 推送类型（设备 → App）                                                   |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `0x01` `CMD_CONF_VERSION_GET` | （无 body）                                                                                           | `ConfVersionResp { version: u32 }`（位于 `data`）                               |
-| `0x02` `CMD_CONF_VERSION_SET` | `ConfVersionSetReq { version: u32 }`（位于 `data`）                                                   | `ConfVersionResp`                                                               |
-| `0x03` `CMD_DEVICE_INFO_GET`  | （无 body）                                                                                           | `DeviceInfo`（位于 `data.device_info`）                                         |
-| `0x04` `CMD_DEVICE_INFO_SET`  | `DeviceInfoSetReq { device_name?, serial? }`（位于 `data`，缺省字段应**省略**）                       | `DeviceInfoSetResp { device_name, serial }`                                     |
-| `0x05` `CMD_KEYMAP_GET`       | （无 body）                                                                                           | `keymap: Vec<FirmwareKeyEntry>`（**帧顶层**，存于 `Frame::extra`）              |
-| `0x06` `CMD_KEYMAP_SET`       | `KeymapSetReq { keymap: Vec<FirmwareKeyEntry> }`（位于 `data`）                                       | 标准响应（`status=0` 即可）                                                     |
-| `0x07` `CMD_CONFIG_GET`       | （无 body）                                                                                           | `DeviceSettings`（位于 `data`，26 字段）                                        |
-| `0x08` `CMD_CONFIG_SET`       | `ConfigSetPayload { config: DeviceSettings }`（详见 §4）                                              | 标准响应 + 可能 `0x87` 推送                                                     |
-| `0x09` `CMD_KEY_EVENT`        | —                                                                                                     | 固件未实现                                                                      |
-| `0x0a` `CMD_HEARTBEAT`        | （无 body）                                                                                           | `HeartbeatResp { timestamp, device }`                                           |
-| `0x0b` `CMD_FIRMWARE_INFO`    | 无 body（查询）/`FirmwareOtaReq { url, checksum }`（OTA）                                             | `FirmwareInfo { version, device, build_date, build_time }`                      |
-| `0x0c` `CMD_VOICE_TEXT`       | —                                                                                                     | `VoiceTextPush { text, timestamp }`（**顶层**）                                 |
-| `0x0d` `CMD_PC_STATUS`        | `PcStatusReq { pc_status: PcStatus }` 或 `PcStatusConfigReq { type="config", mask }`                  | 标准响应                                                                        |
-| `0x0e` `CMD_MUSIC_STATUS`     | `MusicStatusReq { music_status: MusicStatus }`                                                        | 标准响应                                                                        |
-| `0x0f` `CMD_MUSIC_CONTROL`    | —                                                                                                     | `MusicControl { action: MusicControlAction }`（**顶层**）                       |
-| `0x10` `CMD_PROFILE_STATE`    | （无 body）                                                                                           | `ProfileState { ... }`（**顶层**，**异类响应**）                                |
-| `0x11` `CMD_PROFILE_ICON_SET` | `ProfileIconSetPayload { profile_icon: ProfileIconSetReq }`（位于 `data`，**必须包 `profile_icon`**） | `ProfileIconSetResp { profile, profile_number, has_custom_icon, profile_name }` |
-| `0x12` `CMD_HA_STATUS`        | —                                                                                                     | 固件未实现                                                                      |
+| 命令                           | 请求类型（App → 设备）                                                                                | 响应 / 推送类型（设备 → App）                                                   |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `0x01` `CMD_CONF_VERSION_GET`  | （无 body）                                                                                           | `ConfVersionResp { version: u32 }`（位于 `data`）                               |
+| `0x02` `CMD_CONF_VERSION_SET`  | `ConfVersionSetReq { version: u32 }`（位于 `data`）                                                   | `ConfVersionResp`                                                               |
+| `0x03` `CMD_DEVICE_INFO_GET`   | （无 body）                                                                                           | `DeviceInfo`（位于 `data.device_info`）                                         |
+| `0x04` `CMD_DEVICE_INFO_SET`   | `DeviceInfoSetReq { device_name?, serial? }`（位于 `data`，缺省字段应**省略**）                       | `DeviceInfoSetResp { device_name, serial }`                                     |
+| `0x05` `CMD_KEYMAP_GET`        | （无 body）                                                                                           | `keymap: Vec<FirmwareKeyEntry>`（**帧顶层**，存于 `Frame::extra`）              |
+| `0x06` `CMD_KEYMAP_SET`        | `KeymapSetReq { keymap: Vec<FirmwareKeyEntry> }`（位于 `data`）                                       | 标准响应（`status=0` 即可）                                                     |
+| `0x07` `CMD_CONFIG_GET`        | （无 body）                                                                                           | `DeviceSettings`（位于 `data`，25 字段）                                        |
+| `0x08` `CMD_CONFIG_SET`        | `ConfigSetPayload { config: DeviceSettings }`（详见 §4）                                              | 标准响应 + 可能 `0x87` 推送                                                     |
+| `0x09` `CMD_KEY_EVENT`         | —                                                                                                     | 固件未实现                                                                      |
+| `0x0a` `CMD_HEARTBEAT`         | （无 body）                                                                                           | `HeartbeatResp { timestamp, device }`                                           |
+| `0x0b` `CMD_FIRMWARE_INFO`     | 无 body（查询）/`FirmwareOtaReq { url, checksum }`（OTA）                                             | `FirmwareInfo { version, device, build_date, build_time }`                      |
+| `0x0c` `CMD_VOICE_TEXT`        | —                                                                                                     | `VoiceTextPush { text, timestamp }`（**顶层**）                                 |
+| `0x0d` `CMD_PC_STATUS`         | `PcStatusReq { pc_status: PcStatus }` 或 `PcStatusConfigReq { type="config", mask }`                  | 标准响应                                                                        |
+| `0x0e` `CMD_MUSIC_STATUS`      | `MusicStatusReq { music_status: MusicStatus }`                                                        | 标准响应                                                                        |
+| `0x0f` `CMD_MUSIC_CONTROL`     | —                                                                                                     | `MusicControl { action: MusicControlAction }`（**顶层**）                       |
+| `0x10` `CMD_PROFILE_STATE`     | （无 body）                                                                                           | `ProfileState { ... }`（**顶层**，**异类响应**）                                |
+| `0x11` `CMD_PROFILE_ICON_SET`  | `ProfileIconSetPayload { profile_icon: ProfileIconSetReq }`（位于 `data`，**必须包 `profile_icon`**） | `ProfileIconSetResp { profile, profile_number, has_custom_icon, profile_name }` |
+| `0x12` `CMD_HA_STATUS`         | —                                                                                                     | 固件未实现                                                                      |
+| `0x13` `CMD_TIME_SET`          | `TimeSetReq { epoch, tz }`（位于 `data`）                                                             | 标准响应                                                                        |
+| `0x14` `CMD_FIRMWARE_DOWNLOAD` | （无 body）                                                                                           | 标准响应（确认后设备复位进下载模式）                                            |
+| `0x15` `CMD_PROFILE_NAME_SET`  | `ProfileNameSetReq { profile, name }`（位于 `data`）                                                  | 标准响应（`profile_name` 回显）                                                 |
+| `0x16` `CMD_AUDIO_FILE`        | `AudioOpReq { op, … }`（op 分发，见 §9.5）                                                            | op 各异，见 §9.5                                                                |
+| `0x17` `CMD_AUDIO_PAD`         | `AudioPadOpReq { op, … }`（op 分发，见 §9.5）                                                         | op 各异，见 §9.5                                                                |
 
 ### 9.1 字段序列化约定
 
@@ -350,6 +399,40 @@ App 的 `KeymapData`（4 层 × 槽位 × 绑定表）与固件"每 Profile 11 �
 - 单帧 ≤ 2048 字节：Base64 膨胀 4/3，App 上传前校验 PNG 签名 + `image` 解码 + Base64 长度 ≤ 1400，超限弹错误 Toast；
 - 固件**不校验 PNG 尺寸**（注释提到 48×48 但未强制），App 自行保证格式与大小；
 - 成功后固件会再推一条 `cmd=0x10, seq=0` 的 Profile 状态。
+
+### 9.5 音效板（0x16 / 0x17）
+
+两条命令均按 `data.op` 字符串分发。App 侧类型：`AudioFileInfo` / `AudioFileListResp`（0x16 list 响应）、`AudioPadBinding`（`{key, file}`，`file = ""` 表示未绑定）。约定常量：`AUDIO_NAME_BASE_MAX = 20`、`AUDIO_NAME_LEN_MAX = 24`、`AUDIO_FILE_MAX_BYTES = 2MB`、`AUDIO_UPLOAD_BLOCK_BYTES = 1024`、`AUDIO_PAD_KEY_COUNT = 11`。
+
+**0x16 音效文件管理**
+
+| op       | 请求 data            | 响应 data                                                            |
+| -------- | -------------------- | -------------------------------------------------------------------- |
+| `list`   | `{}`                 | `files:[{name,size}]`（≤64 条）+ `total_bytes/used_bytes/free_bytes` |
+| `begin`  | `{name, size}`       | `{received:0, free_bytes}`；固件建 `/name.part`                      |
+| `data`   | `{name, index, b64}` | `{received:N}`；`index` 从 0 严格递增，每块 1024B                    |
+| `end`    | `{name, size}`       | 大小校验一致 → `.part` 原子改名提交 → `{free_bytes}`                 |
+| `abort`  | `{name}`             | 删 `.part`（幂等）；App 失败 / 取消时回滚                            |
+| `delete` | `{name}`             | `{pads:[{key,file}], free_bytes}`；固件先清引用该文件的绑定          |
+
+约束（固件强校验，App 预检同名规则）：
+
+- 文件名白名单 `^[a-z0-9_]{1,20}\.(mp3|wav)$`（`valid_audio_name` 按字节判定；`sanitize_audio_name` 由本机文件名生成合法名），存 SPIFFS 根目录；
+- 单文件 ≤ 2MB；`begin` 要求 `free_bytes ≥ size + 64KB` headroom；
+- 同一时刻仅一个上传流（`begin` 互斥）；正在播放的同名文件拒绝 `delete`。
+
+App 上传在后台线程执行（`state::audio_upload_worker`，进度写 `AudioPadData.upload`，UI 每帧读）：`begin → data×N（逐块等响应）→ end`，任一步失败或用户取消 → `abort` 回滚 → 完成后自动 `list` 刷新。b64 用标准 alphabet（`base64::engine::general_purpose::STANDARD`），1024B 块编码后 1368 字符 < 固件 `kMaxB64Len = 1400`。
+
+**0x17 音效板绑定与播放**
+
+| op     | 请求 data                       | 响应 data                          |
+| ------ | ------------------------------- | ---------------------------------- |
+| `get`  | `{}`                            | `{pads:[{key,file}]}`（11 键全量） |
+| `set`  | `{key, file}`（`file=""` 清除） | `{key, file}`；先 ACK 再落盘       |
+| `play` | `{key}` 或 `{file}`（试播）     | `{playing:true}`                   |
+| `stop` | `{}`                            | `{playing:false}`                  |
+
+`set` 的 `file` 非空时固件校验白名单 + 文件存在；`play {key}` 走键位绑定（未绑定拒绝），`play {file}` 试播不亮键位高亮。**预留**：网络音频播放（固件 `Speaker::PlayRemoteAudio` 已具备）后续在 0x17 增加 op 或 `play.url` 字段，不动 0x16 语义。
 
 ---
 
@@ -390,6 +473,11 @@ CMD_MUSIC_CONTROL     // 0x0f
 CMD_PROFILE_STATE     // 0x10  // 异类响应：cmd 不带 0x80
 CMD_PROFILE_ICON_SET  // 0x11
 CMD_HA_STATUS         // 0x12
+CMD_TIME_SET          // 0x13
+CMD_FIRMWARE_DOWNLOAD // 0x14
+CMD_PROFILE_NAME_SET  // 0x15
+CMD_AUDIO_FILE        // 0x16  // op 分发：list/begin/data/end/abort/delete
+CMD_AUDIO_PAD         // 0x17  // op 分发：get/set/play/stop
 response_cmd(req) -> u8  // req | 0x80
 
 // 4. SET 请求体（仅 config，不带 mask）
@@ -437,7 +525,7 @@ ProfileIconSetPayload { profile_icon: ProfileIconSetReq { profile, clear, png_ba
 | 阶段 05  | + `pc_status_mask`（#22）；Keymap 命令**尚未**对接 | Keymap 数据当前仅本地 |
 | 阶段 06  | + WiFi（#0~3）+ Voice（#14~21）                    | 全部生效              |
 
-未到阶段的字段固件可忽略；`CONFIG_GET` 响应 / 主动推送仍应返回完整 26 字段（缺省走 `Default`），便于 App 端 UI 始终有合理初始值。
+未到阶段的字段固件可忽略；`CONFIG_GET` 响应 / 主动推送仍应返回完整 25 字段（缺省走 `Default`），便于 App 端 UI 始终有合理初始值。
 
 ---
 

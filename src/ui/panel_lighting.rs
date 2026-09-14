@@ -12,9 +12,9 @@ use crate::ui::widgets::settings_panel_scaffold;
 pub struct LightingPanelState;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState) {
-    ui.heading("灯效");
+    ui.heading("灯光效果");
     ui.label(
-        egui::RichText::new("设置键盘 RGB 灯效模式与点击高亮，改完点下方\"应用\"下发到设备。")
+        egui::RichText::new("调整背光模式与按下反馈，修改完成后点击下方「应用」同步到设备。")
             .weak()
             .size(12.0),
     );
@@ -81,8 +81,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             // 固件 uint8_t 接受 0~255，但 24 之外的索引会被 %24 兜底，
             // 这里把 UI 范围收紧到 0~23 与调色板 1:1 对齐，避免越界值被静默绕回。
             ui.horizontal(|ui| {
-                ui.label("单色（调色板 0~23，共 24 色）");
-                ui.label(egui::RichText::new("仅\"单色\"模式生效").weak().size(11.0));
+                ui.label("单色颜色（调色板 0~23，共 24 色）");
+                ui.label(egui::RichText::new("仅在「单色」灯效模式下生效").weak().size(11.0));
             });
             let mut color = draft.rgb_single_color.clamp(0, 23);
             // 当前索引对应的实际颜色（与固件 kPalette24 严格 1:1），提前取出供 hover 文本使用
@@ -108,14 +108,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
                 ui.label(format!("#{:02X}{:02X}{:02X}", r, g, b));
             });
             row.response
-                .on_hover_text(format!("调色板 #{}\nRGB({}, {}, {})", color, r, g, b));
+                .on_hover_text(format!("调色板 {}\nRGB（{r}, {g}, {b}）", color));
 
             ui.add_space(8.0);
             // 与固件 ClickHighlight.h:34 严格 1:1
             ui.horizontal(|ui| {
-                ui.label("点击按键时点亮");
+                ui.label("按下按键时的灯光反馈");
                 ui.label(
-                    egui::RichText::new("在灯效之上叠加按键反馈")
+                    egui::RichText::new("在灯效之上叠加按下时的反馈")
                         .weak()
                         .size(11.0),
                 );
@@ -144,7 +144,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("整体亮度");
-                ui.label(egui::RichText::new("0~100").weak().size(11.0));
+                ui.label(egui::RichText::new("范围 0~100").weak().size(11.0));
             });
             let mut bri = draft.rgb_brightness.clamp(0, 100);
             if ui

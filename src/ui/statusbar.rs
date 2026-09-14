@@ -41,7 +41,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     let rx = handle.rx_count.load(Ordering::Relaxed);
     let uptime = format_uptime(*handle.uptime_start.lock().unwrap());
 
-    egui::menu::bar(ui, |ui| {
+    egui::MenuBar::new().ui(ui, |ui| {
         ui.style_mut().spacing.item_spacing.x = 14.0;
         icon_label(ui, crate::ui::icons::UPTIME, &format!("运行时长 {uptime}"));
         icon_label(ui, crate::ui::icons::TX, &format!("已发送 {tx}"));

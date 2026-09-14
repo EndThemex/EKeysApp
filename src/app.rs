@@ -4,23 +4,25 @@ use eframe::egui;
 
 use crate::link::LinkEvent;
 use crate::protocol::{
-    CMD_CONFIG_GET, CMD_PROFILE_STATE, DeviceSettings, ProfileState, response_cmd, top_level,
+    CMD_CONFIG_GET, CMD_PC_STATUS, CMD_PROFILE_STATE, DeviceSettings, ProfileState, response_cmd,
+    top_level,
 };
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
-    panel_about, panel_connection, panel_keymap, panel_lighting, panel_log, panel_settings,
+    panel_about, panel_audio, panel_keymap, panel_lighting, panel_log, panel_settings,
     panel_voice, panel_wifi, sidenav, statusbar, topbar,
     widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_local_settings, show_toasts},
 };
 
 pub struct WxiApp {
     pub handle: AppHandle,
-    pub connect_st: panel_connection::ConnectPanelState,
+    pub connect_st: topbar::ConnectPanelState,
     pub settings_st: panel_settings::SettingsPanelState,
     pub keymap_st: panel_keymap::KeymapPanelState,
     pub lighting_st: panel_lighting::LightingPanelState,
     pub wifi_st: panel_wifi::WifiPanelState,
     pub voice_st: panel_voice::VoicePanelState,
+    pub audio_st: panel_audio::AudioPanelState,
     pub log_st: panel_log::LogPanelState,
     pub toasts: Vec<Toast>,
     pub confirm_open: bool,
@@ -30,6 +32,10 @@ pub struct WxiApp {
     pub current_port: Option<String>,
     pub local_settings_open: bool,
     pub last_inner_size: [f32; 2],
+    /// 上一次渲染的页面：用于检测"切到按键映射页"边沿，
+    /// 进入时主动拉一次当前激活 Profile 的键映射，避免出现
+    /// "设置页切了 Profile 但 Keymap 页仍展示旧数据"的视图不同步。
+    pub last_page: Option<Page>,
 }
 
 impl WxiApp {
@@ -37,18 +43,14 @@ impl WxiApp {
         crate::ui::fonts::install(&cc.egui_ctx);
         // 启动时应用主题（语言/主题由本地配置驱动）
         crate::ui::apply_theme(&cc.egui_ctx, handle.theme());
-        let mut connect_st = panel_connection::ConnectPanelState::default();
+        let mut connect_st = topbar::ConnectPanelState::default();
         connect_st.refresh();
-        let log_st = panel_log::LogPanelState {
-            show_tx: true,
-            show_rx: true,
-            show_fw: true,
-            show_app: true,
-            level: panel_log::LevelFilter::All,
-            search: String::new(),
-            follow: true,
-            jump_to_latest: false,
-        };
+        let mut log_st = panel_log::LogPanelState::default();
+        log_st.show_tx = true;
+        log_st.show_rx = true;
+        log_st.show_fw = true;
+        log_st.show_app = true;
+        log_st.follow = true;
         Self {
             handle,
             connect_st,
@@ -57,6 +59,7 @@ impl WxiApp {
             lighting_st: panel_lighting::LightingPanelState::default(),
             wifi_st: panel_wifi::WifiPanelState::default(),
             voice_st: panel_voice::VoicePanelState::default(),
+            audio_st: panel_audio::AudioPanelState::default(),
             log_st,
             toasts: vec![],
             confirm_open: false,
@@ -66,6 +69,7 @@ impl WxiApp {
             current_port: None,
             local_settings_open: false,
             last_inner_size: [960.0, 600.0],
+            last_page: None,
         }
     }
 
@@ -90,23 +94,38 @@ impl WxiApp {
                 if crate::protocol::is_top_level_cmd(f.cmd) {
                     self.handle_top_level_frame(f);
                 } else if f.is_push() {
-                    // 设备主动推送的全量配置快照（0x87 seq=0）
-                    match f.data.as_ref() {
-                        Some(data) => {
-                            match serde_json::from_value::<DeviceSettings>(data.clone()) {
-                                Ok(mut new_snap) => {
-                                    self.handle.apply_settings_snapshot(&mut new_snap);
-                                    self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
-                                }
-                                Err(e) => {
-                                    self.handle
-                                        .log_kind(LogKind::App, format!("推送快照解析失败: {e}"));
+                    // seq=0 的响应帧统称"推送"，但只有 0x87（CONFIG_GET 的响应 cmd）
+                    // 才是全量配置快照。其它 cmd（如 0x8D PC 状态回执——App 发
+                    // 0x0D 用 seq=0，固件回显 seq=0）的 data 里没有 config 字段，
+                    // 若也走 DeviceSettings 解析，serde 会把所有缺省字段填成
+                    // Default，把刚从 0x07 拿到的正确快照覆盖成默认值
+                    //（表现为：开启 PC 状态推送后，连接后背光滑块错误显示 5）。
+                    if f.cmd == response_cmd(CMD_CONFIG_GET) {
+                        match f.data.as_ref() {
+                            Some(data) => {
+                                match serde_json::from_value::<DeviceSettings>(data.clone()) {
+                                    Ok(mut new_snap) => {
+                                        self.handle.apply_settings_snapshot(&mut new_snap);
+                                        self.handle.log_kind(LogKind::Rx, "PUSH ← 全量快照");
+                                    }
+                                    Err(e) => {
+                                        self.handle.log_kind(
+                                            LogKind::App,
+                                            format!("推送快照解析失败: {e}"),
+                                        );
+                                    }
                                 }
                             }
+                            None => {
+                                self.handle.log_kind(LogKind::App, "推送快照缺 data 字段");
+                            }
                         }
-                        None => {
-                            self.handle.log_kind(LogKind::App, "推送快照缺 data 字段");
-                        }
+                    } else if f.cmd == response_cmd(CMD_PC_STATUS) {
+                        // PC 状态推送回执（0x8D seq=0）：无需处理；静默避免
+                        // 每次推送都刷一条日志。
+                    } else {
+                        self.handle
+                            .log_kind(LogKind::Rx, format!("PUSH ← cmd=0x{:02X}（未处理）", f.cmd));
                     }
                 } else {
                     if f.status() == Some(0) {
@@ -158,12 +177,21 @@ impl WxiApp {
                     && self.handle.link.lock().unwrap().is_some()
                 {
                     self.handle.detach_link();
+                    // 烧录模式：设备已复位进下载模式等 esptool 接管串口，
+                    // schedule_reconnect 内部会再次拦截，这里只保留端口信息，
+                    // 不做任何重连调度。
+                    let armed = self
+                        .handle
+                        .download_mode_armed
+                        .load(std::sync::atomic::Ordering::Acquire);
                     // 先取出端口释放锁再调度：if let 的 scrutinee 临时 MutexGuard
                     // 会存活到块尾，schedule_reconnect 内部再锁其它互斥体时
                     // 极易形成同类自死锁（参照 panel_connection 的教训）。
                     let last_port = self.handle.last_port.lock().unwrap().clone();
                     if let Some(port) = last_port {
-                        self.handle.schedule_reconnect(port);
+                        if !armed {
+                            self.handle.schedule_reconnect(port);
+                        }
                     }
                 }
             }
@@ -188,8 +216,10 @@ impl WxiApp {
                     self.handle.log_kind(
                         LogKind::Rx,
                         format!(
-                            "Rx ← Profile: #{} \"{}\"",
-                            ps.active_profile, ps.profile_name
+                            "Rx ← Profile: #{} \"{}\"（{} 个方案）",
+                            ps.active_profile,
+                            ps.profile_name,
+                            ps.profiles.len()
                         ),
                     );
                     // 设备端切了 Profile（0x06/0x08 只作用于激活 Profile）→
@@ -236,11 +266,16 @@ impl WxiApp {
                         self.confirm_kind = Some(kind);
                         self.confirm_open = true;
                     }
+                    UiConfirmKind::EnterDownloadMode => {
+                        self.confirm_title = "进入烧录模式".into();
+                        self.confirm_body = "设备将立即复位进入烧录（下载）模式，当前连接会断开，\
+                                             之后可用 idf.py flash / esptool 烧录固件。\
+                                             烧录完成后请在「连接」页手动重连。是否继续？"
+                            .into();
+                        self.confirm_kind = Some(kind);
+                        self.confirm_open = true;
+                    }
                 },
-                UiEvent::ConfirmNo(_) => {
-                    self.confirm_open = false;
-                    self.confirm_kind = None;
-                }
                 UiEvent::OpenLocalSettings => {
                     self.local_settings_open = true;
                 }
@@ -254,7 +289,7 @@ impl WxiApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // Keymap 面板处于"按下任意键捕获"模式时，全局快捷键必须让路，
-        // 否则 Ctrl+1~8 / Esc 会被吃掉，捕获不到用户实际按的键。
+        // 否则 Ctrl+1~9 / Esc 会被吃掉，捕获不到用户实际按的键。
         let capturing = *self.handle.capture_keyboard.lock().unwrap();
         if capturing {
             return;
@@ -269,15 +304,15 @@ impl WxiApp {
             if !i.modifiers.ctrl {
                 None
             } else if i.key_pressed(egui::Key::Num1) {
-                Some(Page::Connect)
-            } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Settings)
-            } else if i.key_pressed(egui::Key::Num3) {
+            } else if i.key_pressed(egui::Key::Num2) {
                 Some(Page::Keymap)
-            } else if i.key_pressed(egui::Key::Num4) {
+            } else if i.key_pressed(egui::Key::Num3) {
                 Some(Page::Lighting)
-            } else if i.key_pressed(egui::Key::Num5) {
+            } else if i.key_pressed(egui::Key::Num4) {
                 Some(Page::Wifi)
+            } else if i.key_pressed(egui::Key::Num5) {
+                Some(Page::Audio)
             } else if i.key_pressed(egui::Key::Num6) {
                 Some(Page::Voice)
             } else if i.key_pressed(egui::Key::Num7) {
@@ -304,6 +339,12 @@ impl eframe::App for WxiApp {
             window_size: Some(self.last_inner_size),
             language: lc.language,
             theme: lc.theme,
+            // 主机侧 PC 状态推送开关：与 local_config 同步写入磁盘，
+            // 下次启动由 main.rs 读回。
+            pc_status_push: self
+                .handle
+                .pc_status_push_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
         };
         crate::config::save(&cfg);
     }
@@ -313,6 +354,11 @@ impl eframe::App for WxiApp {
         self.drain_ui_events();
         // 重连状态机：每帧驱动；time-to-next-try 之前直接 return
         self.handle.tick_reconnect();
+        // 音效上传收尾：finished 置位后 Toast + 清理（任何页面都生效）
+        panel_audio::tick_upload(&self.handle);
+        // PC 状态周期推送：Online 时每 1s 通过 0x0D 推给设备一次。
+        // tick 内部自带节流，未到节拍时直接 return，CPU 开销可忽略。
+        self.handle.tick_pc_status_push();
         self.handle_shortcuts(ctx);
 
         // chrome（顶栏/侧栏/底栏）统一底色，与内容区形成清晰分区
@@ -326,7 +372,12 @@ impl eframe::App for WxiApp {
                 bottom: 6,
             }))
             .show(ctx, |ui| {
-                topbar::show(&self.handle, ui, self.current_port.as_deref());
+                topbar::show(
+                    &self.handle,
+                    ui,
+                    self.current_port.as_deref(),
+                    &mut self.connect_st,
+                );
             });
 
         egui::SidePanel::left("sidenav")
@@ -353,33 +404,60 @@ impl eframe::App for WxiApp {
                 statusbar::show(&self.handle, ui);
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // 外层统一加垂直滚动：保证任何面板在窗口缩到很窄 / 很高时都不会
-            // 被截断——页面内部已经自带 ScrollArea 的（Settings/WiFi/Voice/
-            // Lighting/Log）会被两层滚动自然组合；其它面板的内容超出可视区
-            // 时直接滚动显示。
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let page = *self.handle.page.lock().unwrap();
-                    match page {
-                        Page::Connect => {
-                            panel_connection::show(&self.handle, ui, &mut self.connect_st)
-                        }
+        // Keymap 页面自带 top/central/bottom 三段（同步下发区固定在状态栏上方），
+        // 必须在最外层 ctx 上注册面板，不能套在 CentralPanel + ScrollArea 里。
+        let current_page = *self.handle.page.lock().unwrap();
+        // 进入 Keymap 页面时主动拉一次当前激活 Profile 的键映射：
+        // 设置页切换 Profile 后，0x10 推送可能因设备侧时序（不推送 /
+        // 推送被丢）导致 keymap.active_profile 与 settings.active_keymap_profile
+        // 不一致；进入页面时按需补拉，保证首帧展示的就是设备当前方案。
+        // 失败静默（离线 / 旧固件），UI 会继续使用本地缓存。
+        if current_page == Page::Keymap && self.last_page != Some(Page::Keymap) {
+            if let Err(e) = self.handle.refresh_keymap_from_device() {
+                self.handle
+                    .log_kind(LogKind::App, format!("进入按键映射页拉取当前方案失败: {e}"));
+            }
+        }
+        // 进入音效页边沿：拉一次文件列表 + 键位绑定（离线 / 旧固件失败静默，
+        // 页面内「刷新」按钮可手动重试）。
+        if current_page == Page::Audio && self.last_page != Some(Page::Audio) {
+            if let Err(e) = self
+                .handle
+                .refresh_audio_files()
+                .and_then(|_| self.handle.refresh_audio_pads())
+            {
+                self.handle
+                    .log_kind(LogKind::App, format!("进入音效页拉取失败: {e}"));
+            }
+        }
+        self.last_page = Some(current_page);
+
+        if matches!(current_page, Page::Keymap) {
+            panel_keymap::show(ctx, &self.handle, &mut self.keymap_st);
+        } else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // 外层统一加垂直滚动：保证任何面板在窗口缩到很窄 / 很高时都不会
+                // 被截断——页面内部已经自带 ScrollArea 的（Settings/WiFi/Voice/
+                // Lighting/Log）会被两层滚动自然组合；其它面板的内容超出可视区
+                // 时直接滚动显示。
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match current_page {
                         Page::Settings => {
                             panel_settings::show(&self.handle, ui, &mut self.settings_st)
                         }
-                        Page::Keymap => panel_keymap::show(&self.handle, ui, &mut self.keymap_st),
+                        Page::Keymap => unreachable!(),
                         Page::Lighting => {
                             panel_lighting::show(&self.handle, ui, &mut self.lighting_st)
                         }
                         Page::Wifi => panel_wifi::show(&self.handle, ui, &mut self.wifi_st),
                         Page::Voice => panel_voice::show(&self.handle, ui, &mut self.voice_st),
+                        Page::Audio => panel_audio::show(&self.handle, ui, &mut self.audio_st),
                         Page::Log => panel_log::show(&self.handle, ui, &mut self.log_st),
-                        Page::About => panel_about::show(&self.handle, ui),
-                    }
-                });
-        });
+                        Page::About => panel_about::show(&self.handle, ui, &self.connect_st),
+                    });
+            });
+        }
 
         if self.confirm_open {
             let outcome = show_confirm(
@@ -392,7 +470,7 @@ impl eframe::App for WxiApp {
                 ConfirmOutcome::Yes => {
                     if let Some(k) = self.confirm_kind.take() {
                         match k {
-                            UiConfirmKind::SwitchWorkMode => {
+                            UiConfirmKind::SwitchWorkMode | UiConfirmKind::EnterDownloadMode => {
                                 self.settings_st.pending_confirm = Some(k);
                             }
                         }
@@ -400,7 +478,12 @@ impl eframe::App for WxiApp {
                     self.confirm_open = false;
                 }
                 ConfirmOutcome::No => {
-                    self.confirm_kind = None;
+                    if let Some(k) = self.confirm_kind.take() {
+                        if k == UiConfirmKind::SwitchWorkMode {
+                            // 用户取消：丢弃暂存选择，组合框下次渲染回到设备当前值
+                            self.settings_st.pending_work_mode = None;
+                        }
+                    }
                     self.confirm_open = false;
                 }
                 ConfirmOutcome::None => {}
@@ -415,7 +498,7 @@ impl eframe::App for WxiApp {
         }
 
         show_toasts(ctx, &mut self.toasts);
-        let size = ctx.input(|i| i.screen_rect().size());
+        let size = ctx.input(|i| i.content_rect().size());
         self.last_inner_size = [size.x, size.y];
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }

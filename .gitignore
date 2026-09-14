@@ -1,1 +1,20 @@
+# ── Rust build artifacts ───────────────────────────────────────
 /target
+
+# ── Editor / OS ────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs / crash dumps ────────────────────────────────────────
+*.log
+*.dmp
+
+# ── Local-only scratch (uncomment if you create these) ────────
+# /tmp/
+# /scratch/

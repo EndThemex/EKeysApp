@@ -5,12 +5,12 @@ pub use egui_phosphor::regular as r;
 
 // 品牌 / 导航
 pub const BRAND_KEYBOARD: &str = r::KEYBOARD;
-pub const NAV_CONNECT: &str = r::PLUG;
 pub const NAV_SETTINGS: &str = r::SLIDERS_HORIZONTAL;
 pub const NAV_KEYMAP: &str = r::KEYBOARD;
 pub const NAV_LIGHTING: &str = r::LIGHTBULB;
 pub const NAV_WIFI: &str = r::WIFI_HIGH;
 pub const NAV_VOICE: &str = r::MICROPHONE_STAGE;
+pub const NAV_AUDIO: &str = r::MUSIC_NOTE;
 pub const NAV_LOG: &str = r::SCROLL;
 pub const NAV_ABOUT: &str = r::INFO;
 
@@ -42,17 +42,24 @@ pub const TAB_DISPLAY: &str = r::MONITOR;
 pub const TAB_KEYBOARD: &str = r::KEYBOARD;
 pub const TAB_AUDIO: &str = r::SPEAKER_HIGH;
 pub const TAB_POWER: &str = r::LIGHTNING;
+/// Settings 页 → PC 状态 tab（与 TAB_DISPLAY 同用桌面意象，但用 tower
+/// 避免和"显示"（显示器）撞视觉）。
+pub const TAB_PC: &str = r::DESKTOP_TOWER;
+/// Settings 页 → 固件升级 tab（芯片意象）。
+pub const TAB_FIRMWARE: &str = r::CPU;
 pub const CUSTOM_ICON: &str = r::IMAGE;
 
 // Keymap
 pub const KEYMAP_CONFIRM: &str = r::CHECK;
 pub const KEYMAP_RENAME_EDIT: &str = r::NOTE_PENCIL;
 pub const KEYMAP_RENAME_CLOSE: &str = r::X;
-pub const KEYMAP_APPLIED: &str = r::CHECK_CIRCLE;
-pub const KEYMAP_PENDING: &str = r::CIRCLE;
 pub const KEYMAP_RELOAD: &str = r::ARROW_CLOCKWISE;
 pub const KEYMAP_EXPORT: &str = r::DOWNLOAD_SIMPLE;
 pub const KEYMAP_CAPTURE: &str = r::KEYBOARD;
+
+// Log 工具栏
+pub const LOG_COPY: &str = r::COPY;
+pub const LOG_CLEAR: &str = r::TRASH;
 
 // Lighting — 与固件 RGBMode 0~7 + ClickHighlight 0~2 严格对齐
 // （RGBLightControl.h: RGB_NONE/SINGLE/RAINBOW/RAINBOWWARE/COLORCYCLE/METER/FIRE/PULSE）

@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{Language, LocalConfig, Theme};
-use crate::link::{ConnectionState, LinkManager};
+use crate::link::{ConnectionState, LinkManager, LinkRequester};
 use crate::protocol::{
-    DeviceInfo, DeviceSettings, FieldMask, FirmwareKeyEntry, KeyAction, KeyRef, KeymapData,
-    ProfileState,
+    AUDIO_FILE_MAX_BYTES, AUDIO_PAD_KEY_COUNT, AUDIO_UPLOAD_BLOCK_BYTES, AudioFileInfo,
+    AudioFileListResp, AudioPadBinding, CMD_AUDIO_FILE, CMD_AUDIO_PAD, DeviceInfo, DeviceSettings,
+    FieldMask, FirmwareKeyEntry, Frame, KeyAction, KeyRef, KeymapData, ProfileState,
+    valid_audio_name,
 };
 use crate::util::log::SharedLog;
 
@@ -35,6 +37,9 @@ pub enum LogKind {
 pub struct LogBuffer {
     cap: usize,
     inner: VecDeque<LogEntry>,
+    /// 修订号：`push` / `clear` 自动 +1。`SharedLog` 借此判断是否需要重建
+    /// `Arc<Vec<LogEntry>>` 快照，避免 UI 每帧 deep-clone 全部条目。
+    version: u64,
 }
 
 impl LogBuffer {
@@ -42,6 +47,7 @@ impl LogBuffer {
         Self {
             cap,
             inner: VecDeque::with_capacity(cap),
+            version: 0,
         }
     }
     pub fn push(&mut self, e: LogEntry) {
@@ -49,12 +55,18 @@ impl LogBuffer {
             self.inner.pop_front();
         }
         self.inner.push_back(e);
+        self.version = self.version.wrapping_add(1);
     }
     pub fn clear(&mut self) {
         self.inner.clear();
+        self.version = self.version.wrapping_add(1);
     }
     pub fn snapshot(&self) -> Vec<LogEntry> {
         self.inner.iter().cloned().collect()
+    }
+    /// 当前修订号；调用方与上次缓存的 version 对比，相等即可复用快照。
+    pub fn version(&self) -> u64 {
+        self.version
     }
 }
 
@@ -65,7 +77,6 @@ pub enum UiEvent {
     Navigate(Page),
     OpenLocalSettings,
     ConfirmYes(UiConfirmKind),
-    ConfirmNo(UiConfirmKind),
     /// 当前连接端口变化（顶栏显示 + 切换页面时保持显示）
     CurrentPort(String),
 }
@@ -81,18 +92,49 @@ pub enum ToastKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UiConfirmKind {
     SwitchWorkMode,
+    /// 进入烧录模式（0x14）：设备复位进下载模式前断开串口
+    EnterDownloadMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
-    Connect,
     Settings,
     Keymap,
     Lighting,
     Wifi,
     Voice,
+    Audio,
     Log,
     About,
+}
+
+/// 音效上传进度（后台线程写，UI 每帧读；`finished` 置位后由 UI 收尾）。
+#[derive(Debug, Clone)]
+pub struct AudioUploadProgress {
+    pub name: String,
+    pub sent: usize,
+    pub total: usize,
+    /// 上传线程已结束（成功或失败）；UI 读到后负责 Toast + 刷新 + 清理。
+    pub finished: bool,
+    /// `finished = true` 时的错误信息；None = 成功。
+    pub error: Option<String>,
+    /// UI 置位 → 后台线程在下一个分块前中止并向设备发 abort 回滚。
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// 音效板共享状态（Audio 页）：文件列表 / 存储占用 / 键位绑定 / 上传进度。
+///
+/// 连接后 `auto_get` 刷新文件与绑定；上传线程写 `upload`；
+/// set/delete/play 等即改即发操作成功后同步更新本地缓存。
+#[derive(Debug, Clone, Default)]
+pub struct AudioPadData {
+    pub files: Vec<AudioFileInfo>,
+    pub total_bytes: u32,
+    pub used_bytes: u32,
+    pub free_bytes: u32,
+    /// `pads[k-1]` = 键 k 绑定的设备端文件名（空串 = 未绑定）。
+    pub pads: [String; AUDIO_PAD_KEY_COUNT],
+    pub upload: Option<AudioUploadProgress>,
 }
 
 /// 应用共享状态
@@ -107,8 +149,6 @@ pub struct AppHandle {
     pub ui_tx: Sender<UiEvent>,
     pub ui_rx: Receiver<UiEvent>,
     pub link: Mutex<Option<LinkManager>>,
-    /// Settings 待下发的 diff
-    pub pending_diff: Arc<Mutex<DeviceSettings>>,
     /// 上次连接的端口名（用于"启动自动连接"）
     pub last_port: Arc<Mutex<Option<String>>>,
     /// 自动连接开关
@@ -143,7 +183,37 @@ pub struct AppHandle {
     /// 用 `Mutex<Option<Instant>>` 是为了断开后能可靠判 None（避免 `Instant::now() - 0`
     /// 出现在断线状态下的 UI 中）。
     pub uptime_start: Arc<Mutex<Option<Instant>>>,
+    /// PC 状态周期推送的上次发送时刻（用于节流）。每帧 tick 读取；首次进入
+    /// 时由 `tick_pc_status_push` 立即补发一次，确保 UI 上线后第一秒设备
+    /// 就能看到 Lock 状态指示灯。
+    /// 断开连接时由 `detach_link` 清零。
+    pub last_pc_status_sent_at: Arc<Mutex<Option<Instant>>>,
+    /// 上一次成功推送给设备的 PC 状态快照。
+    /// 用于做 diff-based 推送：仅当本次采集与上次有"显著差异"时才发帧。
+    /// `None` 表示尚未发过首拍，强制发送一次让设备建立基线。
+    /// 断开连接时由 `detach_link` 清零，重连后第一帧会重发基线。
+    pub last_pc_status_sent: Arc<Mutex<Option<crate::protocol::PcStatus>>>,
+    /// 是否启用 PC 状态向设备的周期推送（`0x0D CMD_PC_STATUS`）。
+    /// 与设备 `DeviceSettings` 解耦——这是主机侧行为开关。
+    /// 默认关闭（避免用户不清楚时主动暴露 Lock / 网络状态到固件），
+    /// 由 Settings 页 → PC 状态 tab 切换；退出时由 `on_exit` 持久化到
+    /// `LocalConfig::pc_status_push`，启动时由 `main.rs` 注入。
+    pub pc_status_push_enabled: Arc<AtomicBool>,
+    /// 设备已进入（或正在进入）烧录模式。置位后跳过所有自动重连，
+    /// 避免重连逻辑占用串口导致 esptool / idf.py 无法烧录。
+    /// 置位时机：用户确认进入烧录模式、0x14 请求发出之前；
+    /// 清除时机：下一次连接成功（attach_link）。
+    pub download_mode_armed: Arc<AtomicBool>,
+    /// 音效板共享状态（Audio 页；连接后 auto_get 刷新，上传线程写进度）。
+    pub audio: Arc<Mutex<AudioPadData>>,
 }
+
+/// PC 状态周期性推送间隔。1 秒一拍，与心跳同节拍，确保固件 Lock 灯指示
+/// 与系统实际状态最多有 1s 延迟；UI 拖动时不会产生肉眼可感的卡顿。
+pub const PC_STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// 浮点字段（CPU% / 内存%）"显著变化"阈值。差值 ≤ 该值视为抖动、不推送。
+/// 0.5% 对应 OS 资源管理器刷新粒度，足以避免每秒都重发相同数据。
+pub const PC_STATUS_FLOAT_EPS: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct ReconnectJob {
@@ -164,11 +234,17 @@ pub struct ReconnectorHandle {
     /// 与 schedule_reconnect 同一约束的开关：未勾选自动连接时不兜底重连，
     /// 否则会出现"弹了开始重连 Toast 又被 tick 取消"的混乱行为。
     pub auto_connect: Arc<Mutex<bool>>,
+    /// 烧录模式抑制标记：与 `AppHandle::download_mode_armed` 同一 Arc
+    pub download_mode_armed: Arc<AtomicBool>,
 }
 
 impl ReconnectorHandle {
     /// 触发兜底重连调度：仅在 router 没机会转 Disconnected 的极端场景下使用。
     pub fn trigger(&self) {
+        // 烧录模式抑制：与 schedule_reconnect 一致
+        if self.download_mode_armed.load(Ordering::Acquire) {
+            return;
+        }
         // 未启用自动连接：与 schedule_reconnect 保持一致，静默放弃
         if !*self.auto_connect.lock().unwrap() {
             return;
@@ -221,11 +297,10 @@ impl AppHandle {
             draft: Arc::new(Mutex::new(DeviceSettings::default())),
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             log: SharedLog::new(),
-            page: Arc::new(Mutex::new(Page::Connect)),
+            page: Arc::new(Mutex::new(Page::Settings)),
             ui_tx,
             ui_rx,
             link: Mutex::new(None),
-            pending_diff: Arc::new(Mutex::new(DeviceSettings::default())),
             last_port: Arc::new(Mutex::new(None)),
             auto_connect: Arc::new(Mutex::new(false)),
             pending_reconnect: Arc::new(Mutex::new(None)),
@@ -240,6 +315,13 @@ impl AppHandle {
             tx_count: Arc::new(AtomicU64::new(0)),
             rx_count: Arc::new(AtomicU64::new(0)),
             uptime_start: Arc::new(Mutex::new(None)),
+            last_pc_status_sent_at: Arc::new(Mutex::new(None)),
+            last_pc_status_sent: Arc::new(Mutex::new(None)),
+            // 默认关闭：避免用户不察觉时主动暴露 Lock / 网络状态到固件。
+            // Settings → PC 状态 tab 可勾选打开。
+            pc_status_push_enabled: Arc::new(AtomicBool::new(false)),
+            download_mode_armed: Arc::new(AtomicBool::new(false)),
+            audio: Arc::new(Mutex::new(AudioPadData::default())),
         }
     }
 
@@ -259,6 +341,8 @@ impl AppHandle {
         self.tx_count.store(0, Ordering::Relaxed);
         self.rx_count.store(0, Ordering::Relaxed);
         *self.uptime_start.lock().unwrap() = Some(Instant::now());
+        // 连接成功 = 设备已离开烧录模式（或用户换了设备）：解除重连抑制
+        self.download_mode_armed.store(false, Ordering::Release);
 
         // 同步共享 state：UI 顶栏/侧栏/连接页都从这里读
         *self.state.lock().unwrap() = ConnectionState::Online;
@@ -270,7 +354,9 @@ impl AppHandle {
     /// 自动 GET：连接成功后拉取设备信息 + 全量设置。
     /// 失败只写日志，不弹 Toast（避免断线后连刷错误）。
     pub fn auto_get(&self) {
-        use crate::protocol::{CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, CMD_TIME_SET, DeviceSettings};
+        use crate::protocol::{
+            CMD_CONFIG_GET, CMD_DEVICE_INFO_GET, CMD_PROFILE_STATE, CMD_TIME_SET, DeviceSettings,
+        };
         // 0) 同步本地时间到设备
         //
         // 协议 §9.4：连接后先下发 `0x13 CMD_TIME_SET`，写入 epoch + tz。
@@ -375,9 +461,48 @@ impl AppHandle {
                 }
             }
         });
-        // 3) 当前 Profile 的键映射（0x05；失败仅记日志，键映射页可手动"重新加载"）
-        if let Err(e) = self.refresh_keymap_from_device() {
-            self.log_kind(LogKind::App, format!("GET 键映射失败: {e}"));
+        // 3) Profile 状态 + 方案列表（0x10；TCP 连接时固件会主动推送，
+        //    串口无推送，这里统一拉一次兜底。失败仅记日志。）
+        //    连接期只需要方案名称 + 图标（响应顶层 profiles 数组），具体
+        //    11 键映射不在这里拉。实测部分固件刚连上时处理 0x10 需要
+        //    ~2s（串行处理 + NVS 读取），1s 会误报超时，放宽到 3s。
+        let _ = self.with_link(|lm| {
+            match lm.request(CMD_PROFILE_STATE, None, Duration::from_millis(3000)) {
+                Ok(frame) => {
+                    // ProfileState 的自定义 Deserialize 接受整帧形状
+                    // （profile_state / profiles 都在顶层）。
+                    match serde_json::to_value(&frame)
+                        .map_err(|e| e.to_string())
+                        .and_then(|v| {
+                            serde_json::from_value::<ProfileState>(v).map_err(|e| e.to_string())
+                        }) {
+                        Ok(ps) => {
+                            self.apply_profile_state(&ps);
+                            self.log_kind(
+                                LogKind::Rx,
+                                format!("GET → Profile 列表（{} 个方案）", ps.profiles.len()),
+                            );
+                        }
+                        Err(e) => {
+                            self.log_kind(LogKind::App, format!("GET Profile 解析失败: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.log_kind(LogKind::App, format!("GET Profile 状态失败: {e}"));
+                }
+            }
+        });
+        // 4) 键映射（0x05）不在连接期拉取：连接只需要方案名称/图标（0x10
+        //    已带回），具体 11 键映射在进入键映射页 / 切换方案时按需获取
+        //    （app.rs 页面边沿拉取 + panel_keymap「重新加载」按钮）。
+        // 5) 音效板：文件列表 + 键位绑定（0x16 list / 0x17 get；失败仅记日志，
+        //    与 0x03/0x07 同策略，Audio 页可手动刷新）
+        if let Err(e) = self.refresh_audio_files() {
+            self.log_kind(LogKind::App, format!("GET 音效文件失败: {e}"));
+        }
+        if let Err(e) = self.refresh_audio_pads() {
+            self.log_kind(LogKind::App, format!("GET 音效绑定失败: {e}"));
         }
     }
 
@@ -401,6 +526,11 @@ impl AppHandle {
 
     /// 应用设备推送的 Profile 状态（0x10）：更新快照与草稿中的 Profile 展示字段。
     /// 草稿未被编辑的字段跟随新值（与 merge_push 同语义）。
+    ///
+    /// 新固件会在帧顶层携带 `profiles` 数组（全部方案的名称+图标元数据），
+    /// 这里同步进 keymap 快照/草稿的 profile 名称与图标标记，键映射页的
+    /// ComboBox 直接显示设备端名称（UTF-8 中文）。旧固件无此字段时
+    /// （空向量）保留本地名称不动。
     pub fn apply_profile_state(&self, ps: &ProfileState) {
         let old = {
             let s = self.settings.lock().unwrap();
@@ -426,6 +556,27 @@ impl AppHandle {
         if d.active_profile_has_custom_icon == old.2 {
             d.active_profile_has_custom_icon = ps.has_custom_icon;
         }
+        drop(d);
+
+        // 方案名称/图标列表同步：设备是名称的唯一权威（0x15 改名后固件持久化）。
+        // 未自定义名称的方案显示 "P{profile_number}"（与设备 UI Conf%u 对齐）。
+        if ps.profiles.is_empty() {
+            return;
+        }
+        for km in [&self.keymap, &self.keymap_draft] {
+            let mut data = km.lock().unwrap();
+            for entry in &ps.profiles {
+                let Some(p) = data.profile_mut(entry.profile) else {
+                    continue;
+                };
+                if entry.is_custom_name {
+                    p.name = entry.profile_name.clone();
+                } else if entry.profile_number > 0 {
+                    p.name = format!("P{}", entry.profile_number);
+                }
+                p.icon_set = entry.has_custom_icon;
+            }
+        }
     }
 
     /// 本次连接是否已成功读取全量配置
@@ -440,11 +591,25 @@ impl AppHandle {
     /// （settings.active_keymap_profile），保证条目写入正确的 Profile。
     /// 返回 Ok(条目数) / Err(原因)。
     pub fn refresh_keymap_from_device(&self) -> Result<usize, String> {
+        self.refresh_keymap_from_device_impl(None)
+    }
+
+    /// 按方案拉取（0x05 + `data.profile`）：键盘设置页选中某方案时单独
+    /// 获取该方案的具体配置，写入快照/草稿中对应的 profile 槽位。
+    /// **不改动** `active_profile`（切换激活仍走 0x08），只填充数据。
+    /// 旧固件不回显 `profile`（不支持按方案拉取）时返回 Err，
+    /// 不会向任何槽位写入数据。
+    pub fn refresh_keymap_from_device_profile(&self, profile: u8) -> Result<usize, String> {
+        self.refresh_keymap_from_device_impl(Some(profile))
+    }
+
+    fn refresh_keymap_from_device_impl(&self, profile: Option<u8>) -> Result<usize, String> {
+        let data = profile.map(|p| serde_json::json!({ "profile": p }));
         self.with_link(|lm| {
             let frame = lm
                 .request(
                     crate::protocol::CMD_KEYMAP_GET,
-                    None,
+                    data,
                     Duration::from_millis(1000),
                 )
                 .map_err(|e| format!("0x05 请求失败: {e}"))?;
@@ -456,28 +621,360 @@ impl AppHandle {
             })?;
             let entries = serde_json::from_value::<Vec<FirmwareKeyEntry>>(v.clone())
                 .map_err(|e| format!("0x05 keymap 解析失败: {e}"))?;
+            // FUN 组合键分配（顶层可选字段，0 = 未配置；越界按未配置处理）
+            let fun_key1 = frame
+                .extra_value("fun_key1")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.min(11) as u8)
+                .unwrap_or(0);
+            let fun_key2 = frame
+                .extra_value("fun_key2")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.min(11) as u8)
+                .unwrap_or(0);
             let n = entries.len();
-            let dev_profile = self.settings.lock().unwrap().active_keymap_profile as u8;
+            // 目标 profile：优先用响应的 `profile` 字段（固件回显实际返回的
+            // 方案）。旧固件不支持按方案拉取（忽略 data.profile，永远返回
+            // 设备激活方案）且不回显：此时若按请求的 profile 落槽，会把
+            // 激活方案的数据覆盖进目标方案的槽位（切方案后显示别的方案的
+            // 配置）。必须显式报错让 UI 提示升级固件，而不是静默写错。
+            let echoed = frame
+                .extra_value("profile")
+                .and_then(|x| x.as_u64())
+                .map(|n| n as u8);
+            let dev_profile = match (profile, echoed) {
+                (Some(_), None) => {
+                    return Err(
+                        "设备固件不支持按方案拉取键映射（0x05 无 profile 回显），请升级固件".into(),
+                    );
+                }
+                (_, Some(e)) => e,
+                (None, None) => self.settings.lock().unwrap().active_keymap_profile as u8,
+            };
             {
                 let mut snap = self.keymap.lock().unwrap();
-                if snap.profile(dev_profile).is_some() {
+                if profile.is_none() && snap.profile(dev_profile).is_some() {
+                    // 拉激活方案时对齐 active_profile（保持原行为）
                     snap.active_profile = dev_profile;
+                    snap.bump_version();
                 }
-                snap.apply_firmware_entries(&entries);
+                let fun_changed = snap.fun_key1 != fun_key1 || snap.fun_key2 != fun_key2;
+                snap.fun_key1 = fun_key1;
+                snap.fun_key2 = fun_key2;
+                if fun_changed {
+                    snap.bump_version();
+                }
+                snap.apply_firmware_entries_to(dev_profile, &entries);
             }
             {
                 let mut draft = self.keymap_draft.lock().unwrap();
-                if draft.profile(dev_profile).is_some() {
+                if profile.is_none() && draft.profile(dev_profile).is_some() {
                     draft.active_profile = dev_profile;
+                    draft.bump_version();
                 }
-                draft.apply_firmware_entries(&entries);
+                let fun_changed = draft.fun_key1 != fun_key1 || draft.fun_key2 != fun_key2;
+                draft.fun_key1 = fun_key1;
+                draft.fun_key2 = fun_key2;
+                if fun_changed {
+                    draft.bump_version();
+                }
+                draft.apply_firmware_entries_to(dev_profile, &entries);
             }
             // 选中键引用可能属于旧 Profile，直接清掉避免误导
             *self.selected_key.lock().unwrap() = None;
-            self.log_kind(LogKind::Rx, format!("GET → 键映射（{n} 键）"));
+            match profile {
+                Some(p) => {
+                    self.log_kind(LogKind::Rx, format!("GET → 键映射（P{}，{n} 键）", p + 1))
+                }
+                None => self.log_kind(LogKind::Rx, format!("GET → 键映射（{n} 键）")),
+            }
             Ok(n)
         })
         .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 设置 Profile 名称（0x15 CMD_PROFILE_NAME_SET）：name="" 表示清除，
+    /// 回退设备默认名。成功后固件持久化并推送 0x10 列表，本端名称随之
+    /// 由 apply_profile_state 对齐；这里返回 Ok(设备回传名称)。
+    pub fn set_profile_name(&self, profile: u8, name: &str) -> Result<String, String> {
+        let req = crate::protocol::ProfileNameSetReq {
+            profile,
+            name: name.to_string(),
+        };
+        let data = serde_json::to_value(&req).map_err(|e| e.to_string())?;
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    crate::protocol::CMD_PROFILE_NAME_SET,
+                    Some(data),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x15 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| "设备未接受新名称".to_string()));
+            }
+            let name = frame
+                .data
+                .as_ref()
+                .and_then(|d| d.get("profile_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.log_kind(
+                LogKind::Tx,
+                format!("SET → Profile 名称（P{}，\"{name}\"）", profile + 1),
+            );
+            Ok(name)
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    // ==================== 音效板（Sound Pad，0x16/0x17） ====================
+
+    /// 发放音效上传用的跨线程请求句柄（未连接返回 None）。
+    pub fn audio_requester(&self) -> Option<LinkRequester> {
+        self.with_link(|lm| lm.requester())
+    }
+
+    /// 拉取设备音效文件列表与存储占用（0x16 list）。
+    pub fn refresh_audio_files(&self) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_FILE,
+                    Some(serde_json::json!({ "op": "list" })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x16 list 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let data = frame.data.ok_or("0x16 list 响应缺 data 字段")?;
+            let resp: AudioFileListResp =
+                serde_json::from_value(data).map_err(|e| format!("0x16 list 解析失败: {e}"))?;
+            let mut a = self.audio.lock().unwrap();
+            a.files = resp.files;
+            a.total_bytes = resp.total_bytes;
+            a.used_bytes = resp.used_bytes;
+            a.free_bytes = resp.free_bytes;
+            self.log_kind(
+                LogKind::Rx,
+                format!(
+                    "GET → 音效文件（{} 个，剩 {} KB）",
+                    a.files.len(),
+                    a.free_bytes / 1024
+                ),
+            );
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 拉取设备键位绑定表（0x17 get）。设备返回全量 11 键，空绑定文件名为空串。
+    pub fn refresh_audio_pads(&self) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_PAD,
+                    Some(serde_json::json!({ "op": "get" })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x17 get 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let data = frame.data.ok_or("0x17 get 响应缺 data 字段")?;
+            let pads_raw = data
+                .get("pads")
+                .cloned()
+                .ok_or("0x17 get 响应缺 pads 字段")?;
+            let pads: Vec<AudioPadBinding> =
+                serde_json::from_value(pads_raw).map_err(|e| format!("0x17 get 解析失败: {e}"))?;
+            let mut a = self.audio.lock().unwrap();
+            // 设备是绑定表的唯一权威：先清空再填充，避免残留陈旧条目
+            a.pads = Default::default();
+            for p in pads {
+                let k = p.key as usize;
+                if k >= 1 && k <= a.pads.len() {
+                    a.pads[k - 1] = p.file;
+                }
+            }
+            self.log_kind(LogKind::Rx, "GET → 音效键位绑定");
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 设置单键绑定（0x17 set）；`file = ""` 清除。成功后同步本地缓存。
+    pub fn set_audio_pad(&self, key: u8, file: &str) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_PAD,
+                    Some(serde_json::json!({ "op": "set", "key": key, "file": file })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x17 set 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let k = key as usize;
+            if k >= 1 && k <= self.audio.lock().unwrap().pads.len() {
+                self.audio.lock().unwrap().pads[k - 1] = file.to_string();
+            }
+            self.log_kind(
+                LogKind::Tx,
+                if file.is_empty() {
+                    format!("SET → 音效绑定 K{key}=（清除）")
+                } else {
+                    format!("SET → 音效绑定 K{key}={file}")
+                },
+            );
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 试播键位绑定文件（0x17 play + key）。
+    pub fn audio_play_key(&self, key: u8) -> Result<(), String> {
+        self.audio_play(serde_json::json!({ "op": "play", "key": key }))
+    }
+
+    /// 试播指定文件（0x17 play + file；不改变键位高亮）。
+    pub fn audio_play_file(&self, file: &str) -> Result<(), String> {
+        self.audio_play(serde_json::json!({ "op": "play", "file": file }))
+    }
+
+    fn audio_play(&self, data: serde_json::Value) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(CMD_AUDIO_PAD, Some(data), Duration::from_millis(1000))
+                .map_err(|e| format!("0x17 play 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "播放被拒绝".into()));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 停止播放（0x17 stop）。
+    pub fn audio_stop(&self) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_PAD,
+                    Some(serde_json::json!({ "op": "stop" })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x17 stop 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 删除设备音效文件（0x16 delete）。固件会先清除引用该文件的键位绑定；
+    /// 响应带回最新 pads 与剩余空间，这里同步本地缓存并移除列表条目。
+    pub fn delete_audio_file(&self, name: &str) -> Result<(), String> {
+        self.with_link(|lm| {
+            let frame = lm
+                .request(
+                    CMD_AUDIO_FILE,
+                    Some(serde_json::json!({ "op": "delete", "name": name })),
+                    Duration::from_millis(1000),
+                )
+                .map_err(|e| format!("0x16 delete 请求失败: {e}"))?;
+            if frame.status() != Some(0) {
+                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+            }
+            let mut a = self.audio.lock().unwrap();
+            if let Some(data) = frame.data.as_ref() {
+                if let Some(free) = data.get("free_bytes").and_then(|v| v.as_u64()) {
+                    a.free_bytes = free as u32;
+                    if a.total_bytes > 0 {
+                        a.used_bytes = a.total_bytes.saturating_sub(a.free_bytes);
+                    }
+                }
+                if let Some(list) = data
+                    .get("pads")
+                    .and_then(|v| serde_json::from_value::<Vec<AudioPadBinding>>(v.clone()).ok())
+                {
+                    a.pads = Default::default();
+                    for p in list {
+                        let k = p.key as usize;
+                        if k >= 1 && k <= a.pads.len() {
+                            a.pads[k - 1] = p.file;
+                        }
+                    }
+                }
+            }
+            a.files.retain(|f| f.name != name);
+            self.log_kind(LogKind::Tx, format!("DEL → 音效文件 {name}"));
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("未连接".into()))
+    }
+
+    /// 启动音效文件上传（0x16 begin → data×N → end，1024B/块）。
+    ///
+    /// 前置校验：文件名白名单、大小 1B..2MB、无进行中任务、已连接。
+    /// 上传在后台线程执行（进度写 `audio.upload`，UI 每帧读），
+    /// 失败/取消会向设备发 abort 回滚 `.part` 文件。
+    pub fn start_audio_upload(&self, device_name: String, bytes: Vec<u8>) -> Result<(), String> {
+        if !valid_audio_name(&device_name) {
+            return Err(format!(
+                "文件名不合法（a-z0-9_ + .mp3/.wav）: {device_name}"
+            ));
+        }
+        if bytes.is_empty() || bytes.len() as u32 > AUDIO_FILE_MAX_BYTES {
+            return Err(format!(
+                "文件大小超出范围（上限 {} KB）",
+                AUDIO_FILE_MAX_BYTES / 1024
+            ));
+        }
+        {
+            let a = self.audio.lock().unwrap();
+            if a.upload.is_some() {
+                return Err("已有上传任务进行中".into());
+            }
+        }
+        let Some(req) = self.audio_requester() else {
+            return Err("未连接".into());
+        };
+        self.audio.lock().unwrap().upload = Some(AudioUploadProgress {
+            name: device_name.clone(),
+            sent: 0,
+            total: bytes.len(),
+            finished: false,
+            error: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let audio = Arc::clone(&self.audio);
+        let log = self.log.clone();
+        let name = device_name.clone();
+        let total_kb = bytes.len() / 1024;
+        let spawned = std::thread::Builder::new()
+            .name("audio-upload".into())
+            .spawn(move || audio_upload_worker(req, audio, log, name, bytes));
+        match spawned {
+            Ok(_) => {
+                self.log_kind(
+                    LogKind::Tx,
+                    format!("开始上传音效 {device_name}（{total_kb} KB）"),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // 线程没起来：清掉进度，避免 UI 永远卡在上传态
+                self.audio.lock().unwrap().upload = None;
+                Err(format!("启动上传线程失败: {e}"))
+            }
+        }
     }
 
     /// 关闭连接
@@ -493,6 +990,12 @@ impl AppHandle {
         self.tx_count.store(0, Ordering::Relaxed);
         self.rx_count.store(0, Ordering::Relaxed);
         *self.uptime_start.lock().unwrap() = None;
+        // PC 状态推送节流基线清零：重连后第一帧立即补发一次，
+        // 避免设备侧 Lock 灯在断开期间错位显示老状态。
+        *self.last_pc_status_sent_at.lock().unwrap() = None;
+        // diff 基线也清零：断开期间 PC 状态可能改变（用户切了输入法、
+        // 网络断了），重连后必须重发最新快照而非与"几秒前的旧值"对比。
+        *self.last_pc_status_sent.lock().unwrap() = None;
         // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
         *self.pending_reconnect.lock().unwrap() = None;
         if let Some(p) = prev_port {
@@ -563,6 +1066,15 @@ impl AppHandle {
     /// 用户主动断开（点击断开按钮）或勾选后又取消勾选，都应进入真正的"未连接"
     /// 状态、不再被定时重连拖死。
     pub fn schedule_reconnect(&self, port_name: String) {
+        // 烧录模式抑制：设备正在下载模式等 esptool 接管串口，重连必然失败
+        // 且会占用 COM 口；烧录完成手动重连时由 attach_link 解除抑制。
+        if self.download_mode_armed.load(Ordering::Acquire) {
+            self.log_kind(
+                LogKind::App,
+                format!("跳过自动重连 {port_name}：设备处于烧录模式"),
+            );
+            return;
+        }
         // 没开自动连接就别调度重连——这是用户手动断开后被定时任务"卡死"的根因。
         if !*self.auto_connect.lock().unwrap() {
             self.log_kind(
@@ -714,12 +1226,8 @@ impl AppHandle {
             ui_tx: self.ui_tx.clone(),
             pending_reconnect: Arc::clone(&self.pending_reconnect),
             auto_connect: Arc::clone(&self.auto_connect),
+            download_mode_armed: Arc::clone(&self.download_mode_armed),
         }
-    }
-
-    /// 推一条应用日志
-    pub fn log_app(&self, text: impl Into<String>) {
-        self.log.push(LogKind::App, text);
     }
 
     /// 便捷访问当前语言设置（避免每次 clone Arc）
@@ -736,10 +1244,401 @@ impl AppHandle {
     pub fn log_kind(&self, kind: LogKind, text: impl Into<String>) {
         self.log.push(kind, text);
     }
+
+    /// 立即向设备推送一次 PC 状态（`0x0D CMD_PC_STATUS`，单向不等待响应）。
+    ///
+    /// 协议 `docs/protocol-usage.md` §9：body 包在 `data.pc_status` 里；序列化
+    /// 时 `PcStatus` 内 `None` 字段自动跳过，所以扩展后只发非 None 的字段。
+    ///
+    /// 返回：
+    /// - `Ok(())`：成功入队 writer 线程（不等设备 ack，单向）
+    /// - `Err("未连接")`：当前无 LinkManager
+    /// - `Err(reason)`：序列化失败等
+    ///
+    /// 不在调用处弹 Toast：本方法主要用于周期性推送（每帧调用），UI 噪声敏感；
+    /// 失败仅写 App 日志，由底栏 / 日志面板自然反馈。
+    pub fn send_pc_status(&self, snap: &crate::protocol::PcStatus) -> Result<(), String> {
+        let data = serde_json::to_value(serde_json::json!({ "pc_status": snap }))
+            .map_err(|e| format!("PC 状态序列化失败: {e}"))?;
+        self.with_link(|lm| {
+            // 0x0D 用 seq=0 表示"主动推送"，不挂在 pending map 上，避免 router
+            // 误把设备 ACK 当成"未配对响应"上报给 UI（固件当前不返 ACK，
+            // 但即便返了 seq=0 也不会被 is_push 误判——详见 protocol.rs）。
+            // 这里走 lm.send() 直接入队 writer，绕过 request 的 seq 自增。
+            let frame = Frame::request(crate::protocol::CMD_PC_STATUS, 0, Some(data));
+            lm.send(frame);
+        })
+        .ok_or_else(|| "未连接".to_string())
+    }
+
+    /// 判断两份 PcStatus 是否"显著差异"——用于 diff-based 推送。
+    ///
+    /// 比较语义：
+    /// - `Option<bool>` 字段：值不等即变化（None ↔ Some 任意一边也算）。
+    /// - `Option<f32>` 字段：差值 > [`PC_STATUS_FLOAT_EPS`] 才算变化；
+    ///   抖动 ≤ 阈值视为相等（避免每秒重发相同数据）。
+    /// - 字段两侧都 `None` 时不算变化（保持协议侧 `skip_serializing_if` 一致）。
+    ///
+    /// 字段全集与 `protocol::PcStatus` 保持一致；新增字段时同步追加。
+    pub fn pc_status_has_changed(
+        old: &crate::protocol::PcStatus,
+        new: &crate::protocol::PcStatus,
+    ) -> bool {
+        // bool 字段：值不等 → 变化
+        if old.caps_lock != new.caps_lock {
+            return true;
+        }
+        if old.num_lock != new.num_lock {
+            return true;
+        }
+        if old.scroll_lock != new.scroll_lock {
+            return true;
+        }
+        if old.network_connected != new.network_connected {
+            return true;
+        }
+        // f32 字段：用阈值比较
+        if pc_status_float_changed(old.cpu_usage_percent, new.cpu_usage_percent) {
+            return true;
+        }
+        if pc_status_float_changed(old.memory_usage_percent, new.memory_usage_percent) {
+            return true;
+        }
+        // 暂未采集的扩展字段（cpu_temp_c / disk_io_percent / network_*_kbps）：
+        // 两侧通常都是 None，相等即不变；将来真接上采集后此函数需要再追加。
+        false
+    }
+
+    /// 每帧调用一次：检查是否到了 PC 状态推送节拍；到了就采集 + diff + 发送。
+    ///
+    /// 节流策略：
+    /// - 首次进入（`last_pc_status_sent == None`）→ 强制发一次基线；
+    /// - 后续每 `PC_STATUS_PUSH_INTERVAL` 检查一次；只有"显著变化"才发；
+    /// - 断开后 `detach_link` 把两个基线都清零，重连后第一帧会再补发基线。
+    ///
+    /// 与心跳独立：本方法**不依赖**心跳 ack —— 即使设备暂时不应答 PC 状态
+    /// 推送，链路层仍然保持稳定。
+    pub fn tick_pc_status_push(&self) {
+        // 用户开关：未启用时不采集、不发送，避免无意义的 GetAsyncKeyState
+        // 调用与日志噪声。`pc_status_push_enabled` 默认 false（见
+        // `AppHandle::new`），由 Settings → PC 状态 tab 切换。
+        if !self.pc_status_push_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        // 仅在 Online 时推送；其它状态（Connecting/Reconnecting/Disconnected）
+        // 下不浪费带宽，writer 也会因 link=Some 但未 Online 仍能写入——这里
+        // 显式按 state 过滤避免无意义帧。
+        let online = matches!(
+            *self.state.lock().unwrap(),
+            crate::link::ConnectionState::Online
+        );
+        if !online {
+            return;
+        }
+        // 节流：1s 节拍
+        let last_at = self.last_pc_status_sent_at.lock().unwrap();
+        let due = last_at
+            .map(|t| t.elapsed() >= PC_STATUS_PUSH_INTERVAL)
+            .unwrap_or(true);
+        drop(last_at);
+        if !due {
+            return;
+        }
+
+        // 采集
+        let new_snap = crate::pc_status::snapshot();
+
+        // diff：与上次推送对比
+        let last_snap = self.last_pc_status_sent.lock().unwrap().clone();
+        let changed = match &last_snap {
+            None => true, // 首拍：必须发基线
+            Some(prev) => Self::pc_status_has_changed(prev, &new_snap),
+        };
+        if !changed {
+            // 即使不发送也要刷新节流时刻，否则下一拍立刻又会重做采集 +
+            // 比较；下一拍会再次因 elapsed>=INTERVAL 而进入到这里。
+            // 这里**不**更新 last_at（保持原有节流节奏），让下一拍正常
+            // 1s 后再尝试——避免抖动场景下"持续判无变化 → 永远不发但持续采集"。
+            return;
+        }
+
+        // 发送（不持任何锁，避免嵌套互斥）
+        match self.send_pc_status(&new_snap) {
+            Ok(()) => {
+                *self.last_pc_status_sent.lock().unwrap() = Some(new_snap);
+                *self.last_pc_status_sent_at.lock().unwrap() = Some(Instant::now());
+            }
+            Err(e) => {
+                // 失败只记 App 日志，不弹 Toast；下一拍再尝试。
+                self.log_kind(LogKind::App, format!("PC 状态推送失败: {e}"));
+            }
+        }
+    }
 }
 
 impl Default for AppHandle {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// f32 字段差异判定：
+/// - 任一侧为 `None`：视为变化（与 `Some → Some` 完全相等才视为不变一致）。
+/// - 两侧都 `Some` 且差值 ≤ eps：视为相等。
+/// - 其余：视为变化。
+fn pc_status_float_changed(old: Option<f32>, new: Option<f32>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(a), Some(b)) => (a - b).abs() > PC_STATUS_FLOAT_EPS,
+    }
+}
+
+/// 音效上传后台线程：`begin → data×N → end`，失败/取消发 `abort` 回滚 `.part`。
+///
+/// 协议与固件 `cmd_audio.cpp` 对齐：块 index 从 0 起严格递增，每块 1024B
+/// b64 后 1368 字符 < 固件 kMaxB64Len=1400；`end` 校验总大小一致才提交。
+///
+/// 进度写 `audio.upload`（`sent` 每块更新，`finished`/`error` 收尾置位）；
+/// UI 每帧读进度，`finished = true` 后负责 Toast + 清理（`upload = None`）。
+/// 取消：UI 置位 `cancel`，本线程在下一个分块前检测并回滚，`error = "已取消"`。
+/// 收尾后尽力刷新一次 0x16 list（成功出现新文件、失败恢复剩余空间）。
+fn audio_upload_worker(
+    req: LinkRequester,
+    audio: Arc<Mutex<AudioPadData>>,
+    log: SharedLog,
+    name: String,
+    bytes: Vec<u8>,
+) {
+    use base64::Engine as _;
+    const REQ_TIMEOUT: Duration = Duration::from_millis(2000);
+
+    let total = bytes.len();
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut sent = 0usize;
+    let mut err: Option<String> = None;
+    let mut cancelled = false;
+
+    // begin：声明文件名与总大小
+    let begin = serde_json::json!({ "op": "begin", "name": name, "size": total });
+    match req.request(CMD_AUDIO_FILE, Some(begin), REQ_TIMEOUT) {
+        Ok(f) if f.status() == Some(0) => {}
+        Ok(f) => err = Some(format!("begin 被拒绝: {}", f.error.unwrap_or_default())),
+        Err(e) => err = Some(format!("begin 请求失败: {e}")),
+    }
+
+    // data×N：每块等响应（固件按 index 严格递增校验）
+    if err.is_none() {
+        for (index, chunk) in bytes.chunks(AUDIO_UPLOAD_BLOCK_BYTES).enumerate() {
+            let cancel_now = audio
+                .lock()
+                .unwrap()
+                .upload
+                .as_ref()
+                .map(|u| u.cancel.load(Ordering::Acquire))
+                .unwrap_or(true);
+            if cancel_now {
+                cancelled = true;
+                break;
+            }
+            let data = serde_json::json!({
+                "op": "data",
+                "name": name,
+                "index": index,
+                "b64": engine.encode(chunk),
+            });
+            match req.request(CMD_AUDIO_FILE, Some(data), REQ_TIMEOUT) {
+                Ok(f) if f.status() == Some(0) => {
+                    sent += chunk.len();
+                    if let Ok(mut a) = audio.lock() {
+                        if let Some(u) = a.upload.as_mut() {
+                            u.sent = sent;
+                        }
+                    }
+                }
+                Ok(f) => {
+                    err = Some(format!(
+                        "第 {index} 块被拒绝: {}",
+                        f.error.unwrap_or_default()
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    err = Some(format!("第 {index} 块请求失败: {e}"));
+                    break;
+                }
+            }
+        }
+    }
+
+    // end 提交 / abort 回滚（固件 abort 幂等，残留 .part 一并清理）
+    if err.is_none() && !cancelled {
+        let end = serde_json::json!({ "op": "end", "name": name, "size": total });
+        match req.request(CMD_AUDIO_FILE, Some(end), REQ_TIMEOUT) {
+            Ok(f) if f.status() == Some(0) => {}
+            Ok(f) => err = Some(format!("end 被拒绝: {}", f.error.unwrap_or_default())),
+            Err(e) => err = Some(format!("end 请求失败: {e}")),
+        }
+    } else {
+        let abort = serde_json::json!({ "op": "abort", "name": name });
+        let _ = req.request(CMD_AUDIO_FILE, Some(abort), REQ_TIMEOUT);
+    }
+
+    let final_err = if cancelled {
+        Some("已取消".to_string())
+    } else {
+        err
+    };
+    {
+        let mut a = audio.lock().unwrap();
+        if let Some(u) = a.upload.as_mut() {
+            u.sent = sent;
+            u.finished = true;
+            u.error = final_err.clone();
+        }
+    }
+    // 尽力刷新文件列表：成功后新文件出现，失败/取消后剩余空间恢复
+    let list = req.request(
+        CMD_AUDIO_FILE,
+        Some(serde_json::json!({ "op": "list" })),
+        REQ_TIMEOUT,
+    );
+    if let Ok(f) = list {
+        if f.status() == Some(0) {
+            if let Some(data) = f.data {
+                if let Ok(resp) = serde_json::from_value::<AudioFileListResp>(data) {
+                    let mut a = audio.lock().unwrap();
+                    a.files = resp.files;
+                    a.total_bytes = resp.total_bytes;
+                    a.used_bytes = resp.used_bytes;
+                    a.free_bytes = resp.free_bytes;
+                }
+            }
+        }
+    }
+    log.push(
+        LogKind::App,
+        match &final_err {
+            Some(e) => format!("音效上传 {name} 结束: {e}"),
+            None => format!("音效上传 {name} 完成（{} KB）", total / 1024),
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    // 测试代码故意 `let mut x = T::default(); x.field = ...;` 写法便于表达
+    // diff 场景,不让新版 clippy lint 把每条用例改成 struct literal。
+    #![allow(clippy::field_reassign_with_default)]
+
+    use super::*;
+    use crate::protocol::PcStatus;
+
+    fn snap(
+        caps: bool,
+        num: bool,
+        scroll: bool,
+        net: bool,
+        cpu: Option<f32>,
+        mem: Option<f32>,
+    ) -> PcStatus {
+        PcStatus {
+            caps_lock: Some(caps),
+            num_lock: Some(num),
+            scroll_lock: Some(scroll),
+            network_connected: Some(net),
+            cpu_usage_percent: cpu,
+            memory_usage_percent: mem,
+            cpu_temp_c: None,
+            disk_io_percent: None,
+            network_up_kbps: None,
+            network_down_kbps: None,
+        }
+    }
+
+    /// 完全相同 → 不算变化
+    #[test]
+    fn pc_status_identical_no_change() {
+        let a = snap(true, false, false, true, Some(50.0), Some(60.0));
+        let b = snap(true, false, false, true, Some(50.0), Some(60.0));
+        assert!(!AppHandle::pc_status_has_changed(&a, &b));
+    }
+
+    /// 浮点抖动（差值 ≤ 0.5） → 不算变化
+    #[test]
+    fn pc_status_float_jitter_no_change() {
+        let a = snap(false, false, false, true, Some(50.0), Some(60.0));
+        let b = snap(false, false, false, true, Some(50.3), Some(60.4));
+        assert!(!AppHandle::pc_status_has_changed(&a, &b));
+    }
+
+    /// 浮点超出阈值 → 算变化
+    #[test]
+    fn pc_status_float_exceeds_eps_change() {
+        let a = snap(false, false, false, true, Some(50.0), Some(60.0));
+        let b = snap(false, false, false, true, Some(50.6), Some(60.0));
+        assert!(AppHandle::pc_status_has_changed(&a, &b));
+        let c = snap(false, false, false, true, Some(50.0), Some(60.6));
+        assert!(AppHandle::pc_status_has_changed(&a, &c));
+    }
+
+    /// 浮点 None ↔ Some → 算变化
+    #[test]
+    fn pc_status_float_none_to_some_change() {
+        let a = snap(false, false, false, true, None, None);
+        let b = snap(false, false, false, true, Some(1.0), None);
+        assert!(AppHandle::pc_status_has_changed(&a, &b));
+        let c = snap(false, false, false, true, None, Some(1.0));
+        assert!(AppHandle::pc_status_has_changed(&a, &c));
+    }
+
+    /// bool 字段翻转 → 算变化
+    #[test]
+    fn pc_status_bool_change() {
+        let a = snap(true, false, false, true, Some(50.0), Some(60.0));
+        // caps: true→false
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(false, false, false, true, Some(50.0), Some(60.0))
+        ));
+        // num: false→true
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(true, true, false, true, Some(50.0), Some(60.0))
+        ));
+        // scroll: false→true
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(true, false, true, true, Some(50.0), Some(60.0))
+        ));
+        // net: true→false
+        assert!(AppHandle::pc_status_has_changed(
+            &a,
+            &snap(true, false, false, false, Some(50.0), Some(60.0))
+        ));
+    }
+
+    /// bool 字段 None ↔ Some → 算变化
+    #[test]
+    fn pc_status_bool_none_to_some_change() {
+        let mut a = PcStatus::default();
+        a.cpu_usage_percent = Some(1.0);
+        a.memory_usage_percent = Some(1.0);
+        let mut b = a.clone();
+        b.caps_lock = Some(true);
+        assert!(AppHandle::pc_status_has_changed(&a, &b));
+        b.caps_lock = None;
+        assert!(!AppHandle::pc_status_has_changed(&a, &b));
+    }
+
+    /// 辅助函数直接覆盖 None/None / None/Some / Some/Some 全部分支。
+    #[test]
+    fn float_changed_branches() {
+        assert!(!pc_status_float_changed(None, None));
+        assert!(pc_status_float_changed(None, Some(0.0)));
+        assert!(pc_status_float_changed(Some(0.0), None));
+        assert!(!pc_status_float_changed(Some(50.0), Some(50.0)));
+        assert!(!pc_status_float_changed(Some(50.0), Some(50.4)));
+        assert!(pc_status_float_changed(Some(50.0), Some(50.6)));
     }
 }

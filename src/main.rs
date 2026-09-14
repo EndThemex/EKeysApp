@@ -5,6 +5,8 @@
 mod app;
 mod config;
 mod link;
+mod ota;
+mod pc_status;
 mod protocol;
 mod state;
 mod ui;
@@ -16,7 +18,7 @@ use std::sync::Arc;
 /// 直接用编译期嵌入 exe 的 `img/ekeys.ico` 生成窗口/程序图标。
 /// `include_bytes!` 把图标字节打包进二进制，运行时无需外部文件。
 fn load_icon() -> Option<Arc<IconData>> {
-    const ICO_BYTES: &[u8] = include_bytes!("../img/icon.png");
+    const ICO_BYTES: &[u8] = include_bytes!("../img/icon.ico");
 
     if let Ok(img) = image::load_from_memory(ICO_BYTES) {
         let rgba = img.to_rgba8();
@@ -51,12 +53,23 @@ fn main() -> eframe::Result {
     *handle.last_port.lock().unwrap() = cfg.last_port.clone();
     *handle.auto_connect.lock().unwrap() = cfg.auto_connect;
     *handle.local_config.lock().unwrap() = cfg.clone();
+    // PC 状态推送开关：默认关闭；持久化字段，跨启动保留用户选择。
+    handle
+        .pc_status_push_enabled
+        .store(cfg.pc_status_push, std::sync::atomic::Ordering::Relaxed);
 
     let mut options = eframe::NativeOptions::default();
     if let Some([w, h]) = cfg.window_size {
         options.viewport.inner_size = Some(Vec2::new(w, h));
     }
+    // 最小尺寸：保留原 960x600 不变；最大尺寸限制在 1600x1000，
+    // 避免 Drawer 自适应宽度后窗口被无限拉大（左侧键盘图有 MAX_LEFT_W=560
+    // 上限，过大的窗口会让 Drawer 内的内容反而显得空旷）。
     options.viewport.min_inner_size = Some(Vec2::new(960.0, 600.0));
+    options.viewport.max_inner_size = Some(Vec2::new(1600.0, 1000.0));
+    // 启动时窗口居中（基于屏幕工作区）。仅影响初始化位置，
+    // 用户后续拖动 / 最大化都会保留系统记忆。
+    options.centered = true;
     options.viewport.icon = load_icon();
 
     eframe::run_native(

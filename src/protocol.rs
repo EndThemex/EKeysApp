@@ -3,8 +3,27 @@
 //! 纯函数模块，不允许任何 IO。所有 JSON 编解码都在这里完成，
 //! 便于单测。详细字段定义见 `docs/desktop-app-protocol.md`。
 
+// 协议常量 / 请求体 / 响应体集中定义在本模块，即使当前 App 端尚未实现
+// 所有命令的收发链路，也要保留完整协议面。新增或下线命令时同步维护本模块。
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+// ---------- 协议版本 ----------
+
+/// 协议层版本号(单一来源)。
+///
+/// 这是 `docs/protocol-usage.md` 顶部声明的协议版本号在代码侧的唯一来源,
+/// 也是 `CMD_CONF_VERSION_GET` / `CMD_CONF_VERSION_SET` 实际比对的值。
+///
+/// 升级策略:
+/// - PATCH / MINOR:仅协议层字段钳位、文案或可选字段扩展,**保持向下兼容**;
+/// - MAJOR:任何破坏性变更(字段含义改变、命令语义调整、cmd ID 复用等),
+///   必须先在 `docs/protocol-usage.md` 顶部明确写出"协议不兼容"并 bump 此常量。
+///
+/// 当前版本:**v1.0**
+pub const PROTOCOL_VERSION: u32 = 1;
 
 // ---------- 字段变更位掩码 ----------
 //
@@ -137,6 +156,14 @@ pub const CMD_PROFILE_ICON_SET: u8 = 0x11;
 pub const CMD_HA_STATUS: u8 = 0x12;
 /// 系统时间注入（App → 固件，写入 epoch + tz）
 pub const CMD_TIME_SET: u8 = 0x13;
+/// 进入烧录模式（App → 固件，设备回复后立即复位进 USB-Serial-JTAG 下载模式）
+pub const CMD_FIRMWARE_DOWNLOAD: u8 = 0x14;
+/// Profile 名称设置（App → 固件；name="" 表示清除，回退设备默认名）
+pub const CMD_PROFILE_NAME_SET: u8 = 0x15;
+/// 音效文件管理（App → 固件，data.op 分发：list/begin/data/end/abort/delete）
+pub const CMD_AUDIO_FILE: u8 = 0x16;
+/// 音效板绑定与播放（App → 固件，data.op 分发：get/set/play/stop）
+pub const CMD_AUDIO_PAD: u8 = 0x17;
 
 /// 响应帧命令 ID = 请求命令 ID | 0x80
 ///
@@ -175,8 +202,6 @@ pub const fn is_response_like(cmd: u8) -> bool {
 pub enum ProtocolError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("unknown command: {0}")]
-    UnknownCommand(u8),
 }
 
 // ---------- Frame ----------
@@ -280,7 +305,6 @@ fn truncate_bytes(s: &mut String, max_bytes: usize) -> bool {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceSettings {
-    // WiFi（阶段 06 生效）
     #[serde(default)]
     pub wifi_switch: i32,
     #[serde(default)]
@@ -312,7 +336,6 @@ pub struct DeviceSettings {
     #[serde(default)]
     pub power_mode: i32,
 
-    // Voice（阶段 06 生效；阶段 08 迁移为腾讯云一句话识别）
     #[serde(default)]
     pub voice_enable: i32,
     #[serde(default)]
@@ -653,32 +676,50 @@ pub struct DeviceInfoSetResp {
 /// 单个物理键的固件侧表示（最大 11 键）。
 ///
 /// 固件优先级：`function` > `text` > `normal` > `macro`（cmd_keymap.cpp）。
+/// `combo1_*` / `combo2_*` 为 FUN 组合层输出通道（按住 FUN 键 1/2 时该键的
+/// 触发行为），通道内优先级与单击一致（function > text > normal）。
+///
+/// 字符串字段序列化时跳过空串：固件 0x06 行缓冲上限 2048 字节（一行装下
+/// 11 键整表），字段缺失与空串语义等价（解析层 `is<const char*>` 不命中
+/// 即留空），跳过空串可把典型负载从 ~2.0KB 压到 <1KB。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct FirmwareKeyEntry {
     pub physical: u8, // 1~11
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub normal: String,
-    #[serde(rename = "macro", default)]
+    #[serde(rename = "macro", default, skip_serializing_if = "String::is_empty")]
     pub macro_: String, // C++ 字段名 macro；Rust 保留字所以改 macro_
     /// 文本注入串（ASCII ≤128；按键触发整串输出一次）
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub function: String,
-}
-
-/// `0x05 CMD_KEYMAP_GET` 响应（位于 `data.keymap`）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct KeymapGetResp {
-    #[serde(default)]
-    pub keymap: Vec<FirmwareKeyEntry>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo1_normal: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo1_text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo1_function: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo2_normal: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo2_text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub combo2_function: String,
 }
 
 /// `0x06 CMD_KEYMAP_SET` 请求。
+///
+/// `fun_key1` / `fun_key2` 为可选字段（`0~11`，`0` = 未配置）：仅在有改动时
+/// 携带下发，避免旧固件 / 解析缺失时把设备端配置误清为 0。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeymapSetReq {
     #[serde(default)]
     pub keymap: Vec<FirmwareKeyEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fun_key1: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fun_key2: Option<u8>,
 }
 
 // ---------- 0x0B 固件信息 / OTA ----------
@@ -692,18 +733,32 @@ pub struct FirmwareInfo {
     pub build_time: String,
 }
 
-/// `0x0B` OTA 触发请求。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FirmwareOtaReq {
-    pub url: String,
-    /// MD5 十六进制字符串，长度 32
-    pub checksum: String,
-}
-
 // ---------- 0x10 Profile State（异类响应） ----------
 //
 // ⚠️ 例外：响应帧 `cmd = 0x10`（不是 `0x90`），不带 `status`，body 在**顶层**
 // 而非 `data.profile_state`。解析时需走单独路径。
+
+/// 0x10 帧顶层 `profiles` 数组的一个条目：方案名称 + 图标元数据，
+/// **不含键映射内容**（键映射用 0x05 + `data.profile` 按需拉取）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    /// Profile 索引（0~7，与 0x05/0x06 的 profile 一致）
+    pub profile: u8,
+    /// 1 基编号（设备 UI 显示 Conf{profile_number}）
+    #[serde(default)]
+    pub profile_number: u8,
+    /// 方案名称（UTF-8 中文；未自定义时固件回传内置符号文本，
+    /// App 侧用 `is_custom_name == false` 判断并显示 "P{profile_number}"）
+    #[serde(default)]
+    pub profile_name: String,
+    /// 是否设置了自定义名称（0x15 下发过）
+    #[serde(default)]
+    pub is_custom_name: bool,
+    #[serde(default)]
+    pub has_custom_icon: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon_path: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProfileState {
@@ -712,26 +767,24 @@ pub struct ProfileState {
     pub profile_name: String,
     pub has_custom_icon: bool,
     pub icon_path: String,
+    /// 全部方案列表（名称+图标元数据）。旧固件无此字段 → 空向量，
+    /// 调用方需按"空 = 设备不支持列表"处理，不要清空本地已有名称。
+    pub profiles: Vec<ProfileEntry>,
 }
 
-/// 帧 wrapper：`ProfileState` 在固件 JSON 顶层 `profile_state` 字段里。
-#[derive(Debug, Deserialize)]
-struct ProfileStateFrame {
-    #[serde(default)]
-    profile_state: Option<ProfileState>,
-}
-
+/// 帧 wrapper：`ProfileState` 在固件 JSON 顶层 `profile_state` 字段里，
+/// 新增的 `profiles` 数组在**帧顶层**（与 `profile_state` 平级）。
 impl<'de> serde::Deserialize<'de> for ProfileState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         // 接受两种格式：
-        // 1) 整行 JSON: { "cmd":.., "seq":.., "profile_state": {...} }
+        // 1) 整行 JSON: { "cmd":.., "seq":.., "profile_state": {...}, "profiles": [...] }
         // 2) 直接 body: { "active_profile":.., "profile_number":.., ... }
         // 注意：必须**避免**在自定义 Deserialize 里再次调用 from_value::<Self>，会无限递归。
         let v = serde_json::Value::deserialize(deserializer)?;
-        let inner = v.get("profile_state").cloned().unwrap_or(v);
+        let inner = v.get("profile_state").cloned().unwrap_or(v.clone());
         #[derive(serde::Deserialize)]
         struct Body {
             #[serde(default)]
@@ -746,12 +799,21 @@ impl<'de> serde::Deserialize<'de> for ProfileState {
             icon_path: String,
         }
         let b: Body = serde_json::from_value(inner).map_err(serde::de::Error::custom)?;
+        // `profiles` 数组在帧顶层（直接 body 形状时就在本层）
+        let profiles = v
+            .get("profiles")
+            .cloned()
+            .map(|p| serde_json::from_value::<Vec<ProfileEntry>>(p))
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
         Ok(ProfileState {
             active_profile: b.active_profile,
             profile_number: b.profile_number,
             profile_name: b.profile_name,
             has_custom_icon: b.has_custom_icon,
             icon_path: b.icon_path,
+            profiles,
         })
     }
 }
@@ -763,12 +825,13 @@ impl Serialize for ProfileState {
     {
         // 序列化时直接走普通结构体字段（用于 App 内部传递 / 测试）。
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("ProfileState", 5)?;
+        let mut s = serializer.serialize_struct("ProfileState", 6)?;
         s.serialize_field("active_profile", &self.active_profile)?;
         s.serialize_field("profile_number", &self.profile_number)?;
         s.serialize_field("profile_name", &self.profile_name)?;
         s.serialize_field("has_custom_icon", &self.has_custom_icon)?;
         s.serialize_field("icon_path", &self.icon_path)?;
+        s.serialize_field("profiles", &self.profiles)?;
         s.end()
     }
 }
@@ -791,13 +854,21 @@ pub struct ProfileIconSetPayload {
     pub profile_icon: ProfileIconSetReq,
 }
 
-/// `0x11` 响应（位于 `data`，注意与固件 profile 状态可能略有差异）。
+/// `0x15 CMD_PROFILE_NAME_SET` 请求：`data` 直接就是本结构
+/// （固件读 `data.profile` / `data.name`，无包裹字段）。
+/// `name` 为空串 = 清除自定义名称，回退设备默认名。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProfileIconSetResp {
+pub struct ProfileNameSetReq {
+    /// 0~7；缺省时固件作用于当前激活 Profile
+    #[serde(skip_serializing_if = "is_zero")]
     pub profile: u8,
-    pub profile_number: u8,
-    pub has_custom_icon: bool,
-    pub profile_name: String,
+    /// UTF-8 中文名称（≤31 字节，固件按字符边界截断）；"" = 清除
+    pub name: String,
+}
+
+/// serde skip 助手：0 序列化为缺省（固件按缺省=激活 Profile 处理）
+fn is_zero(v: &u8) -> bool {
+    *v == 0
 }
 
 // ---------- 0x0C 语音文本（推送） ----------
@@ -846,7 +917,10 @@ impl Serialize for VoiceTextPush {
 // ---------- 0x0D PC 状态（App → 固件） ----------
 
 /// `0x0D CMD_PC_STATUS` 请求：`pc_status` 顶层位于 `data`。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// 字段均为 `Option<…>`，序列化时通过 `skip_serializing_if = "Option::is_none"`
+/// 自动跳过未填字段；采集器未实现某项时保持 `None` 即可。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PcStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps_lock: Option<bool>,
@@ -868,62 +942,6 @@ pub struct PcStatus {
     pub network_up_kbps: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_down_kbps: Option<f32>,
-}
-
-/// `0x0D` 请求体。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PcStatusReq {
-    #[serde(default)]
-    pub pc_status: PcStatus,
-}
-
-/// `0x0D` 也支持配置 PC 状态显示掩码：`{ "type": "config", "mask": u32 }`。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PcStatusConfigReq {
-    /// 字面量 `"config"`，用于在固件侧区分数据 / 配置两种用途。
-    #[serde(default = "default_pc_config_type")]
-    pub r#type: String,
-    pub mask: u32,
-}
-
-fn default_pc_config_type() -> String {
-    "config".into()
-}
-
-// ---------- 0x0E 音乐状态（App → 固件） ----------
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MusicStatus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connected: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_playing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_paused: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_prev: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_next: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artist: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub player: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lyric_current: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lyric_next: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MusicStatusReq {
-    #[serde(default)]
-    pub music_status: MusicStatus,
 }
 
 // ---------- 0x0F 音乐控制（固件 → App） ----------
@@ -987,22 +1005,212 @@ pub struct HeartbeatResp {
     pub device: String,
 }
 
-// ---------- 解析辅助 ----------
+// ---------- 0x16 音效文件管理 / 0x17 音效板绑定 ----------
 
-/// 从 `Frame::data` 取 Owned 类型；data 为 None 时返回 Default。
-pub fn data_or_default<T: Default + serde::de::DeserializeOwned>(
-    f: &Frame,
-) -> Result<T, ProtocolError> {
-    match &f.data {
-        Some(v) => serde_json::from_value(v.clone()).map_err(ProtocolError::from),
-        None => Ok(T::default()),
+/// 文件名基段上限（不含 '.' 和扩展名；与固件 `kNameBaseMax` 同步维护）
+pub const AUDIO_NAME_BASE_MAX: usize = 20;
+/// 完整文件名上限：20 基名 + '.' + 3 扩展 = 24 字符（与固件 `kNameLenMax` 一致）
+pub const AUDIO_NAME_LEN_MAX: usize = AUDIO_NAME_BASE_MAX + 4;
+/// 单文件大小上限 2MB（固件 begin/data 双重校验；free 还要求 ≥ size + 64KB）
+pub const AUDIO_FILE_MAX_BYTES: u32 = 2 * 1024 * 1024;
+/// 上传分块二进制大小（b64 后 1368 字符 < 固件 2048 行缓冲）
+pub const AUDIO_UPLOAD_BLOCK_BYTES: usize = 1024;
+/// 音效板键位数（矩阵键 1~11）
+pub const AUDIO_PAD_KEY_COUNT: usize = 11;
+
+/// 音效文件名白名单校验：`^[a-z0-9_]{1,20}\.(mp3|wav)$`
+///
+/// 与固件 `cmd_audio.cpp::validAudioName` **字节级一致**：按字节而非字符判断，
+/// 避免多字节 UTF-8 文件名在两侧边界判定不同。
+pub fn valid_audio_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    if !(5..=AUDIO_NAME_LEN_MAX).contains(&b.len()) {
+        return false;
+    }
+    let (base, ext) = b.split_at(b.len() - 4);
+    if ext != b".mp3" && ext != b".wav" {
+        return false;
+    }
+    base.iter()
+        .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+}
+
+/// 由本机文件名生成合法的设备端文件名：
+/// 扩展名强制小写（非 mp3/wav 返回 None）、基段非法字符替换为 `_`、
+/// 截断到 20 字符、空基段回退 "audio"。
+pub fn sanitize_audio_name(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    let dot = lower.rfind('.')?;
+    let ext = &lower[dot + 1..];
+    if ext != "mp3" && ext != "wav" {
+        return None;
+    }
+    let mut base: String = lower[..dot]
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if base.is_empty() {
+        base = "audio".to_string();
+    }
+    base.truncate(AUDIO_NAME_BASE_MAX);
+    Some(format!("{base}.{ext}"))
+}
+
+/// 音频文件内容预检：按扩展名核对文件魔数，拦截两类问题——
+/// ① 改扩展名伪装（下载站 ".wav" 实为 MP4 容器，2026-09-11 实测事故）：
+///    固件按扩展名选解码器，RIFF 校验失败后会把整个文件当裸 PCM 播出
+///    （表现为"呲"一声噪声即停）；② 设备解码库不支持的 WAV 编码
+///    （IEEE float / WAVE_FORMAT_EXTENSIBLE / 非 16bit，见库
+///    read_WAV_Header）。失败时返回可直接展示给用户的中文错误。
+pub fn validate_audio_content(ext: &str, bytes: &[u8]) -> Result<(), String> {
+    match ext {
+        "wav" => validate_wav(bytes),
+        "mp3" => validate_mp3(bytes),
+        _ => Ok(()), // 扩展名白名单由 valid_audio_name 负责
     }
 }
+
+/// 通过魔数猜测真实容器格式（用于错误提示）。
+fn sniff_audio_container(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some("MP4/M4A 容器（可能是改了扩展名的视频/音频文件）");
+    }
+    if bytes.len() >= 4 {
+        match &bytes[0..4] {
+            b"RIFF" => return Some("RIFF（WAV）"),
+            b"OggS" => return Some("OGG"),
+            b"fLaC" => return Some("FLAC"),
+            _ => {}
+        }
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"ID3" {
+        return Some("MP3");
+    }
+    // MPEG 帧同步：0xFF + 0b111xxxxx
+    if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
+        return Some("MP3");
+    }
+    None
+}
+
+fn validate_wav(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        let actual = sniff_audio_container(bytes).unwrap_or("无法识别的格式");
+        return Err(format!(
+            "文件内容不是 WAV（实际为{actual}）。设备按扩展名选解码器，\
+             伪装文件会被播放成噪声。请转码后上传：\
+             ffmpeg -i 输入 -vn -acodec pcm_s16le 输出.wav"
+        ));
+    }
+    let (code, ch, _sr, bits) = wav_format_params(bytes)
+        .ok_or_else(|| "WAV 缺少 fmt 块（文件头损坏），设备无法解码".to_string())?;
+    if code != 1 {
+        let codec_name = match code {
+            3 => "IEEE float",
+            6 => "A-law",
+            7 => "μ-law",
+            0xFFFE => "WAVE_FORMAT_EXTENSIBLE",
+            _ => "非 PCM 编码",
+        };
+        return Err(format!(
+            "WAV 编码为格式码 {code}（{codec_name}），设备仅支持 PCM（格式码 1）。\
+             请转码：ffmpeg -i 输入 -acodec pcm_s16le 输出.wav"
+        ));
+    }
+    if bits != 16 {
+        return Err(format!(
+            "WAV 位深 {bits}bit，设备仅支持 16bit PCM。\
+             请转码：ffmpeg -i 输入 -acodec pcm_s16le 输出.wav"
+        ));
+    }
+    if ch != 1 && ch != 2 {
+        return Err(format!("WAV 声道数 {ch}，设备仅支持单声道/立体声"));
+    }
+    Ok(())
+}
+
+fn validate_mp3(bytes: &[u8]) -> Result<(), String> {
+    let is_id3 = bytes.len() >= 3 && &bytes[0..3] == b"ID3";
+    let is_frame_sync = bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0;
+    if is_id3 || is_frame_sync {
+        return Ok(());
+    }
+    let actual = sniff_audio_container(bytes).unwrap_or("无法识别的格式");
+    Err(format!(
+        "文件内容不是 MP3（实际为{actual}）。请转码后上传：\
+         ffmpeg -i 输入 -acodec libmp3lame 输出.mp3"
+    ))
+}
+
+/// 解析 WAV 的 fmt 块：返回 (格式码, 声道数, 采样率, 位深)。
+/// 从 offset 12 起按 RIFF chunk 规则逐块查找 "fmt "（跳过 LIST/JUNK 等）。
+fn wav_format_params(bytes: &[u8]) -> Option<(u16, u16, u32, u16)> {
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        if id == b"fmt " {
+            if pos + 8 + 16 > bytes.len() {
+                return None;
+            }
+            let p = pos + 8;
+            let code = u16::from_le_bytes([bytes[p], bytes[p + 1]]);
+            let ch = u16::from_le_bytes([bytes[p + 2], bytes[p + 3]]);
+            let sr = u32::from_le_bytes([bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]]);
+            let bits = u16::from_le_bytes([bytes[p + 14], bytes[p + 15]]);
+            return Some((code, ch, sr, bits));
+        }
+        // RIFF 规范：chunk payload 按 2 字节对齐
+        pos += 8 + size + (size & 1);
+    }
+    None
+}
+
+/// `0x16 list` 响应的单个文件条目（data.files[]）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFileInfo {
+    pub name: String,
+    pub size: u32,
+}
+
+/// `0x16 list` 响应（data）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AudioFileListResp {
+    #[serde(default)]
+    pub files: Vec<AudioFileInfo>,
+    #[serde(default)]
+    pub total_bytes: u32,
+    #[serde(default)]
+    pub used_bytes: u32,
+    #[serde(default)]
+    pub free_bytes: u32,
+}
+
+/// `0x17 get` / `0x16 delete` 响应的单个键位绑定（pads[]；file 为空串 = 未绑定）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioPadBinding {
+    pub key: u8,
+    #[serde(default)]
+    pub file: String,
+}
+
+// ---------- 解析辅助 ----------
 
 /// 把一整行 JSON（包括异类响应字段）解析为目标类型。
 ///
 /// 用于 `0x10` Profile State / `0x0C` Voice Text 这类 body 在**帧顶层**的命令：
-/// 它们的字段不在 `Frame::data` 里，因此不能用 `data_or_default`。
+/// 它们的字段不在 `Frame::data` 里。
 pub fn parse_top_level<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
     serde_json::from_str::<T>(line.trim()).map_err(ProtocolError::from)
 }
@@ -1267,9 +1475,8 @@ fn parse_normal_string(n: &str) -> KeyAction {
             };
         }
         // 修饰前缀 + 单末段
-        if let Some(m) = modifier_name_to_mod(seg) {
+        if modifier_name_to_mod(seg).is_some() {
             // "Ctrl+Shift" 全修饰：同按两个修饰键
-            mods |= m;
             return KeyAction::Chord(
                 segments[..idx + 1]
                     .iter()
@@ -1510,15 +1717,146 @@ pub struct KeyRef {
 }
 
 /// 整把键盘的键映射数据
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeymapData {
     pub active_profile: u8,
     pub profiles: Vec<KeymapProfile>,
+    /// FUN 组合键 1：触发 FUN1 组合层的物理键编号（`0~11`，`0` = 未配置）。
+    /// 编号与 0x06 keymap 的 `physical` 一致（Key 槽位按 (row,col) 升序 1~11）。
+    #[serde(default)]
+    pub fun_key1: u8,
+    /// FUN 组合键 2：触发 FUN2 组合层的物理键编号（`0~11`，`0` = 未配置）。
+    #[serde(default)]
+    pub fun_key2: u8,
+    /// 修订号：每次 `&mut self` 公开变更（`apply_diff` / `apply_firmware_entries*` /
+    /// `bump_version`）自动 +1。`PartialEq` 不参与（serde 跳过、不落盘），
+    /// 用于 panel_keymap 缓存 diff：双侧版本与上次相等即直接复用缓存。
+    #[serde(skip)]
+    pub version: u64,
 }
+
+/// 组合层（KeyRef.layer 取值）：0 = 单击，1 = FUN1 组合层，2 = FUN2 组合层。
+pub const LAYER_BASE: u8 = 0;
+pub const LAYER_FUN1: u8 = 1;
+pub const LAYER_FUN2: u8 = 2;
 
 impl Default for KeymapData {
     fn default() -> Self {
         Self::demo_60()
+    }
+}
+
+impl PartialEq for KeymapData {
+    fn eq(&self, other: &Self) -> bool {
+        // `version` 仅用于缓存判定，不参与内容比较
+        self.active_profile == other.active_profile
+            && self.fun_key1 == other.fun_key1
+            && self.fun_key2 == other.fun_key2
+            && self.profiles == other.profiles
+    }
+}
+
+impl KeymapData {
+    /// 通知修订号 +1。直接修改字段（profile 切换 / fun 分配 / 草稿批量赋值等）
+    /// 没有现成 mutator 时由调用方显式调用一次，保证版本号与实际内容同步。
+    pub fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
+    }
+
+    /// 分配 / 取消 FUN 键（`phys` = 0 表示取消）。写入草稿顶层，进入
+    /// DiffPreviewBar，由「同步到设备」统一随 0x06 下发（fun_key 字段仅在
+    /// FUN 分配变更时携带）。同侧冲突自动清掉另一侧的分配。
+    ///
+    /// 集中在这里是为了：
+    /// - 内部统一 bump_version，避免 panel_keymap 调用方各自手动维护；
+    /// - 复用组合层清理逻辑（取消 FUN 键时清孤儿绑定）。
+    pub fn set_fun_key(&mut self, side: u8, phys: u8) {
+        let mut changed = false;
+        // 组合层依赖对应 FUN 键才可触发：取消分配时清空该层全部孤儿绑定，
+        // 避免重新分配后残留的旧行为突然生效。
+        let unassign = |draft: &mut KeymapData, layer: u8| -> bool {
+            let mut any = false;
+            for p in &mut draft.profiles {
+                let before = p.bindings.len();
+                p.bindings.retain(|k, _| k.layer != layer);
+                if p.bindings.len() != before {
+                    any = true;
+                }
+            }
+            any
+        };
+        if phys == 0 {
+            // 仅当当前有分配时才需要 unassign（避免对未配置状态产生空 diff 噪声）
+            let cur = if side == 1 {
+                self.fun_key1
+            } else {
+                self.fun_key2
+            };
+            if cur != 0 {
+                let layer = if side == 1 { LAYER_FUN1 } else { LAYER_FUN2 };
+                if unassign(self, layer) {
+                    changed = true;
+                }
+            }
+        }
+        let mut conflict_side = 0u8;
+        match side {
+            1 => {
+                if self.fun_key1 != phys {
+                    self.fun_key1 = phys;
+                    changed = true;
+                }
+                if phys != 0 && self.fun_key2 == phys {
+                    self.fun_key2 = 0;
+                    conflict_side = 2;
+                    changed = true;
+                }
+            }
+            2 => {
+                if self.fun_key2 != phys {
+                    self.fun_key2 = phys;
+                    changed = true;
+                }
+                if phys != 0 && self.fun_key1 == phys {
+                    self.fun_key1 = 0;
+                    conflict_side = 1;
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+        if conflict_side != 0 {
+            let layer = if conflict_side == 1 {
+                LAYER_FUN1
+            } else {
+                LAYER_FUN2
+            };
+            if unassign(self, layer) {
+                changed = true;
+            }
+        }
+        // 键成为 FUN 键后按住不再产生输出，其自身的组合层绑定一并清除。
+        if phys != 0 {
+            if let Some((r, c)) = self.fun_key_slot(phys) {
+                for p in &mut self.profiles {
+                    for layer in [LAYER_FUN1, LAYER_FUN2] {
+                        if p.bindings
+                            .remove(&KeyRef {
+                                layer,
+                                row: r,
+                                col: c,
+                            })
+                            .is_some()
+                        {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.bump_version();
+        }
     }
 }
 
@@ -1534,11 +1872,23 @@ impl KeymapData {
             out.push(KeymapDiffEntry::ActiveProfile(active));
         }
 
-        // 2. 当前 profile 的 bindings 差异
+        // 1.5 FUN 组合键分配
+        if self.fun_key1 != other.fun_key1 || self.fun_key2 != other.fun_key2 {
+            out.push(KeymapDiffEntry::FunKeys {
+                f1: self.fun_key1,
+                f2: self.fun_key2,
+            });
+        }
+
+        // 2. 当前 profile 的 bindings 差异：两侧必须取**同一个**方案的槽位。
+        // 下发语义是"切到 draft.active 并整表写入该方案"，基线应为快照里
+        // 同一方案的槽位。若各自取 active（草稿已切方案、快照仍停在旧方案，
+        // 典型：本页 ComboBox 刚切了 Profile、0x08 尚未下发），会把两个不同
+        // 方案的映射互相比对，diff 出一堆假"待同步"项并污染 Apply 落槽。
         let Some(profile) = self.profile(active) else {
             return out;
         };
-        let Some(other_profile) = other.profile(other_active) else {
+        let Some(other_profile) = other.profile(active) else {
             return out;
         };
 
@@ -1570,6 +1920,42 @@ impl KeymapData {
         self.profiles.iter().find(|p| p.index == idx)
     }
 
+    /// 当前 active profile 的 Key 型槽位按 `(row, col)` 升序的物理编号列表：
+    /// 返回 `(physical 1~11, row, col, label)`。与 0x05/0x06 的 `physical`
+    /// 编号规则一致，供 FUN 键分配 UI 使用。
+    pub fn physical_key_slots(&self) -> Vec<(u8, u8, u8, String)> {
+        let Some(profile) = self.profile(self.active_profile) else {
+            return Vec::new();
+        };
+        let Some(base) = profile.layers.iter().find(|l| l.index == 0) else {
+            return Vec::new();
+        };
+        let mut slots: Vec<&KeySlot> = base
+            .slots
+            .iter()
+            .filter(|s| s.kind == SlotKind::Key)
+            .collect();
+        slots.sort_by_key(|s| (s.row, s.col));
+        slots
+            .iter()
+            .take(11)
+            .enumerate()
+            .map(|(i, s)| (i as u8 + 1, s.row, s.col, s.label.clone()))
+            .collect()
+    }
+
+    /// FUN 键编号（`1~11`）→ active profile 中对应槽位的 `(row, col)`。
+    /// `0`（未配置）或越界返回 `None`。
+    pub fn fun_key_slot(&self, n: u8) -> Option<(u8, u8)> {
+        if n == 0 {
+            return None;
+        }
+        self.physical_key_slots()
+            .into_iter()
+            .find(|(p, _, _, _)| *p == n)
+            .map(|(_, r, c, _)| (r, c))
+    }
+
     /// 应用一个 diff 列表（合并到自身）；返回是否有变化
     pub fn apply_diff(&mut self, diff: &[KeymapDiffEntry]) -> bool {
         let mut changed = false;
@@ -1578,6 +1964,13 @@ impl KeymapData {
                 KeymapDiffEntry::ActiveProfile(idx) => {
                     if self.active_profile != *idx {
                         self.active_profile = *idx;
+                        changed = true;
+                    }
+                }
+                KeymapDiffEntry::FunKeys { f1, f2 } => {
+                    if self.fun_key1 != *f1 || self.fun_key2 != *f2 {
+                        self.fun_key1 = *f1;
+                        self.fun_key2 = *f2;
                         changed = true;
                     }
                 }
@@ -1598,62 +1991,14 @@ impl KeymapData {
                 }
             }
         }
+        if changed {
+            self.bump_version();
+        }
         changed
     }
 
     pub fn profile_mut(&mut self, idx: u8) -> Option<&mut KeymapProfile> {
         self.profiles.iter_mut().find(|p| p.index == idx)
-    }
-
-    /// 与 Settings::merge_push 对齐：草稿优先，未修改字段用新值刷新。
-    pub fn merge_push(
-        new_snapshot: &KeymapData,
-        old_snapshot: &KeymapData,
-        draft: &mut KeymapData,
-    ) {
-        // 1. active_profile：草稿与旧一致才用新值
-        if draft.active_profile == old_snapshot.active_profile {
-            draft.active_profile = new_snapshot.active_profile;
-        }
-        // 2. bindings：仅当 profile 结构存在时合并。
-        //    先把所有需要"未改"→ 用推送值替换的项收集出来，再统一写入，
-        //    避免在 `iter_mut` 中再次借用 `draft`。
-        let mut to_overwrite: Vec<(
-            u8,
-            std::collections::HashMap<crate::protocol::KeyRef, KeyAction>,
-        )> = Vec::new();
-        for profile in draft.profiles.iter() {
-            let Some(old_p) = old_snapshot.profile(profile.index) else {
-                continue;
-            };
-            let Some(new_p) = new_snapshot.profile(profile.index) else {
-                continue;
-            };
-            let mut overlay = std::collections::HashMap::new();
-            for (k, v) in &new_p.bindings {
-                let prev_in_old = old_p.bindings.get(k);
-                let prev_in_draft = profile.bindings.get(k);
-                // 草稿与旧一致（包含"两边都没有"）→ 用推送值
-                let draft_unmodified = match (prev_in_old, prev_in_draft) {
-                    (Some(o), Some(d)) => o == d,
-                    (None, None) => true,
-                    _ => false,
-                };
-                if draft_unmodified {
-                    overlay.insert(*k, v.clone());
-                }
-            }
-            if !overlay.is_empty() {
-                to_overwrite.push((profile.index, overlay));
-            }
-        }
-        for (idx, overlay) in to_overwrite {
-            if let Some(p) = draft.profile_mut(idx) {
-                for (k, v) in overlay {
-                    p.bindings.insert(k, v);
-                }
-            }
-        }
     }
 }
 
@@ -1662,6 +2007,8 @@ impl KeymapData {
 pub enum KeymapDiffEntry {
     /// 切换活动 Profile
     ActiveProfile(u8),
+    /// FUN 组合键分配变更（`0` = 未配置）
+    FunKeys { f1: u8, f2: u8 },
     /// 某个槽位的绑定变更
     Binding {
         key: KeyRef,
@@ -1681,7 +2028,8 @@ impl KeymapData {
     /// - 只取 **layer 0（Base）** 的槽位（固件每 Profile 只有 11 个物理键）；
     /// - 跳过旋钮槽（`SlotKind::Encoder`，固件不支持）；
     /// - 剩余按键按 `(row, col)` 升序编号为 `physical` 1~11（与 App 4×3
-    ///   布局和固件 `kMatrixKeyCount = 11` 一致）。
+    ///   布局和固件 `kMatrixKeyCount = 11` 一致）；
+    /// - layer 1 / 2 的绑定分别写入 `combo1_*` / `combo2_*`（FUN 组合层）。
     pub fn to_firmware_entries(&self) -> Vec<FirmwareKeyEntry> {
         let Some(profile) = self.profile(self.active_profile) else {
             return Vec::new();
@@ -1700,27 +2048,48 @@ impl KeymapData {
             .take(11)
             .enumerate()
             .map(|(i, s)| {
-                let action = profile
-                    .bindings
-                    .get(&KeyRef {
-                        layer: 0,
-                        row: s.row,
-                        col: s.col,
-                    })
-                    .cloned()
-                    .unwrap_or(KeyAction::None);
-                action.to_firmware_entry(i as u8 + 1)
+                let get = |layer: u8| {
+                    profile
+                        .bindings
+                        .get(&KeyRef {
+                            layer,
+                            row: s.row,
+                            col: s.col,
+                        })
+                        .cloned()
+                        .unwrap_or(KeyAction::None)
+                };
+                let mut e = get(LAYER_BASE).to_firmware_entry(i as u8 + 1);
+                // FUN 组合层：借用 to_firmware_entry 的通道编码，拷进 combo 字段
+                let c1 = get(LAYER_FUN1).to_firmware_entry(e.physical);
+                e.combo1_normal = c1.normal;
+                e.combo1_text = c1.text;
+                e.combo1_function = c1.function;
+                let c2 = get(LAYER_FUN2).to_firmware_entry(e.physical);
+                e.combo2_normal = c2.normal;
+                e.combo2_text = c2.text;
+                e.combo2_function = c2.function;
+                e
             })
             .collect()
     }
 
-    /// 把固件 `0x05` 返回的 11 键写回当前 active profile 的 layer 0。
+    /// 把固件 `0x05` 返回的 11 键写回当前 active profile。
     ///
     /// 槽位顺序与 `to_firmware_entries` 相同（按键按 `(row, col)` 升序），
-    /// `entries` 下标 i ↔ physical i+1。返回是否有变化。
+    /// `entries` 下标 i ↔ physical i+1。单击通道写入 layer 0；
+    /// `combo1_*` / `combo2_*` 分别写入 layer 1 / 2（FUN 组合层）。
+    /// 返回是否有变化。
     pub fn apply_firmware_entries(&mut self, entries: &[FirmwareKeyEntry]) -> bool {
+        let idx = self.active_profile;
+        self.apply_firmware_entries_to(idx, entries)
+    }
+
+    /// 同 [Self::apply_firmware_entries]，但写入**指定** profile
+    /// （0x05 + `data.profile` 按方案拉取时，目标方案 ≠ 激活方案）。
+    pub fn apply_firmware_entries_to(&mut self, idx: u8, entries: &[FirmwareKeyEntry]) -> bool {
         let mut changed = false;
-        let Some(profile) = self.profile_mut(self.active_profile) else {
+        let Some(profile) = self.profile_mut(idx) else {
             return false;
         };
         let Some(base) = profile.layers.iter().find(|l| l.index == 0) else {
@@ -1737,21 +2106,47 @@ impl KeymapData {
             let Some(&(row, col)) = slots.get(i) else {
                 break;
             };
-            let key = KeyRef { layer: 0, row, col };
-            let action = KeyAction::from_firmware_entry(e);
-            let is_set = action.is_set();
-            let prev = profile.bindings.get(&key).cloned();
-            match (&prev, is_set) {
-                (None, false) => continue,
-                (Some(p), true) if *p == action => continue,
-                _ => {}
+            // 三个通道：单击 / FUN1 组合层 / FUN2 组合层
+            let channels = [
+                (LAYER_BASE, KeyAction::from_firmware_entry(e)),
+                (
+                    LAYER_FUN1,
+                    KeyAction::from_firmware_entry(&FirmwareKeyEntry {
+                        normal: e.combo1_normal.clone(),
+                        text: e.combo1_text.clone(),
+                        function: e.combo1_function.clone(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    LAYER_FUN2,
+                    KeyAction::from_firmware_entry(&FirmwareKeyEntry {
+                        normal: e.combo2_normal.clone(),
+                        text: e.combo2_text.clone(),
+                        function: e.combo2_function.clone(),
+                        ..Default::default()
+                    }),
+                ),
+            ];
+            for (layer, action) in channels {
+                let key = KeyRef { layer, row, col };
+                let is_set = action.is_set();
+                let prev = profile.bindings.get(&key).cloned();
+                match (&prev, is_set) {
+                    (None, false) => continue,
+                    (Some(p), true) if *p == action => continue,
+                    _ => {}
+                }
+                if is_set {
+                    profile.bindings.insert(key, action);
+                } else {
+                    profile.bindings.remove(&key);
+                }
+                changed = true;
             }
-            if is_set {
-                profile.bindings.insert(key, action);
-            } else {
-                profile.bindings.remove(&key);
-            }
-            changed = true;
+        }
+        if changed {
+            self.bump_version();
         }
         changed
     }
@@ -1759,11 +2154,15 @@ impl KeymapData {
     pub fn demo_60() -> Self {
         let mut profiles = Vec::with_capacity(8);
         for i in 0..8u8 {
-            profiles.push(Self::make_demo_profile(i, format!("P{i}")));
+            // 默认名 P1~P8（1 基，与设备 UI Conf1~Conf8 对齐）
+            profiles.push(Self::make_demo_profile(i, format!("P{}", i + 1)));
         }
         Self {
             active_profile: 0,
             profiles,
+            fun_key1: 0,
+            fun_key2: 0,
+            version: 0,
         }
     }
 
@@ -1878,6 +2277,10 @@ fn demo_base_4x3() -> Vec<KeySlot> {
 
 #[cfg(test)]
 mod tests {
+    // 测试代码故意 `let mut x = T::default(); x.field = ...;` 写法便于表达
+    // diff 场景,不让新版 clippy lint 把每条用例改成 struct literal。
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
 
     /// 把 `Result` / `Option` 在测试里 unwrap 时附带上下文标签，
@@ -2332,6 +2735,7 @@ mod tests {
             macro_: "Ctrl+c".into(),
             text: String::new(),
             function: String::new(),
+            ..Default::default()
         };
         let s = serde_json::to_string(&e).to("s");
         assert!(s.contains("physical"));
@@ -2373,6 +2777,48 @@ mod tests {
         let ps: ProfileState = serde_json::from_str(body).to("ps");
         assert_eq!(ps.active_profile, 2);
         assert_eq!(ps.profile_number, 3);
+    }
+
+    /// 0x10 推送（新固件）：顶层 `profiles` 数组解析进 `ProfileState.profiles`；
+    /// 中文名与 is_custom_name 逐字保留。
+    #[test]
+    fn profile_state_with_profiles_list() {
+        let raw = r#"{"cmd":16,"seq":0,"profile_state":{"active_profile":1,"profile_number":2,"profile_name":"P2","has_custom_icon":false},"profiles":[{"profile":0,"profile_number":1,"profile_name":"办公","is_custom_name":true,"has_custom_icon":false},{"profile":1,"profile_number":2,"profile_name":"","is_custom_name":false,"has_custom_icon":true,"icon_path":"/icon2.png"}]}"#;
+        let ps: ProfileState = serde_json::from_str(raw).to("ps");
+        assert_eq!(ps.active_profile, 1);
+        assert_eq!(ps.profiles.len(), 2);
+        assert_eq!(ps.profiles[0].profile, 0);
+        assert_eq!(ps.profiles[0].profile_name, "办公");
+        assert!(ps.profiles[0].is_custom_name);
+        assert!(!ps.profiles[1].is_custom_name);
+        assert_eq!(ps.profiles[1].icon_path, "/icon2.png");
+    }
+
+    /// 旧固件 0x10 无 `profiles` 字段 → 空向量（调用方按"无列表"处理）。
+    #[test]
+    fn profile_state_without_profiles_defaults_empty() {
+        let raw = r#"{"cmd":16,"seq":3,"profile_state":{"active_profile":0,"profile_number":1,"profile_name":"P1","has_custom_icon":false}}"#;
+        let ps: ProfileState = serde_json::from_str(raw).to("ps");
+        assert!(ps.profiles.is_empty());
+    }
+
+    /// 0x15 请求：data 直接是 {profile, name}，profile=0 缺省（固件按激活方案处理）。
+    #[test]
+    fn profile_name_set_req_shape() {
+        let req = ProfileNameSetReq {
+            profile: 0,
+            name: "游戏方案".into(),
+        };
+        let v = serde_json::to_value(&req).to("v");
+        assert_eq!(v["name"], "游戏方案");
+        assert!(v.get("profile").is_none(), "profile=0 应缺省序列化");
+        let req2 = ProfileNameSetReq {
+            profile: 3,
+            name: String::new(),
+        };
+        let v2 = serde_json::to_value(&req2).to("v2");
+        assert_eq!(v2["profile"], 3);
+        assert_eq!(v2["name"], "");
     }
 
     #[test]
@@ -2594,6 +3040,137 @@ mod tests {
         );
     }
 
+    /// FUN 组合层：combo1_*/combo2_* 字段 + fun_key1/2 的往返与 diff。
+    #[test]
+    fn fun_key_combo_roundtrip() {
+        let mut kd = KeymapData::demo_60();
+        kd.active_profile = 0;
+        kd.fun_key1 = 1; // K1 作为 FUN 键 1
+        kd.fun_key2 = 0;
+        {
+            let p = kd.profile_mut(0).unwrap();
+            // K2（row0 col1）FUN1 层 → Ctrl+c；FUN2 层 → 文本注入
+            p.bindings.insert(
+                KeyRef {
+                    layer: LAYER_FUN1,
+                    row: 0,
+                    col: 1,
+                },
+                KeyAction::Combo {
+                    mods: MOD_CTRL,
+                    code: 0x06,
+                },
+            );
+            p.bindings.insert(
+                KeyRef {
+                    layer: LAYER_FUN2,
+                    row: 0,
+                    col: 1,
+                },
+                KeyAction::Text("hi".into()),
+            );
+        }
+
+        // 编码：combo 字段写入固件条目
+        let entries = kd.to_firmware_entries();
+        assert_eq!(entries[1].combo1_normal, "Ctrl+0x06");
+        assert_eq!(entries[1].combo2_text, "hi");
+        assert_eq!(entries[0].combo1_normal, "", "未绑定的 FUN 层保持为空");
+
+        // SET 请求带 fun_key 字段
+        let req = KeymapSetReq {
+            keymap: entries.clone(),
+            fun_key1: Some(1),
+            fun_key2: Some(0),
+        };
+        let v = serde_json::to_value(&req).to("req");
+        assert_eq!(v["fun_key1"], 1);
+        assert_eq!(v["fun_key2"], 0);
+
+        // 解码：combo 字段还原为 layer 1/2 绑定
+        let mut kd2 = KeymapData::demo_60();
+        kd2.active_profile = 0;
+        kd2.fun_key1 = 0;
+        assert!(kd2.apply_firmware_entries(&entries));
+        let p = kd2.profile(0).unwrap();
+        assert_eq!(
+            p.bindings.get(&KeyRef {
+                layer: LAYER_FUN1,
+                row: 0,
+                col: 1
+            }),
+            Some(&KeyAction::Combo {
+                mods: MOD_CTRL,
+                code: 0x06
+            })
+        );
+        assert_eq!(
+            p.bindings.get(&KeyRef {
+                layer: LAYER_FUN2,
+                row: 0,
+                col: 1
+            }),
+            Some(&KeyAction::Text("hi".into()))
+        );
+
+        // diff：fun_key 分配变化生成 FunKeys 条目，apply 可回放
+        kd2.fun_key1 = 2;
+        let diff = kd2.diff_bindings(&kd);
+        assert!(
+            diff.contains(&KeymapDiffEntry::FunKeys { f1: 2, f2: 0 }),
+            "应有 FunKeys 差异: {diff:?}"
+        );
+        let mut back = kd.clone();
+        assert!(back.apply_diff(&diff));
+        assert_eq!(back.fun_key1, 2);
+
+        // fun_key 编号 → 槽位映射
+        assert_eq!(kd.fun_key_slot(1), Some((0, 0)), "K1 在 (row0, col0)");
+        assert_eq!(kd.fun_key_slot(0), None);
+        assert_eq!(kd.fun_key_slot(12), None);
+    }
+
+    /// 0x06 请求整行（含帧包装）必须短于固件行缓冲 2048 字节，
+    /// 否则 SerialProtocol 直接丢弃整行，App 侧永远收不到 ACK。
+    #[test]
+    fn keymap_set_req_under_firmware_line_limit() {
+        let mut kd = KeymapData::demo_60();
+        kd.active_profile = 0;
+        kd.fun_key1 = 1;
+        kd.fun_key2 = 2;
+        {
+            let p = kd.profile_mut(0).unwrap();
+            // 全部 11 键三通道都填上（最坏情况）
+            for l in [LAYER_BASE, LAYER_FUN1, LAYER_FUN2] {
+                for i in 0..11 {
+                    p.bindings.insert(
+                        KeyRef {
+                            layer: l,
+                            row: i / 3,
+                            col: i % 3,
+                        },
+                        KeyAction::Combo {
+                            mods: MOD_CTRL | MOD_SHIFT,
+                            code: 0x04 + (i as u16),
+                        },
+                    );
+                }
+            }
+        }
+        let req = KeymapSetReq {
+            keymap: kd.to_firmware_entries(),
+            fun_key1: Some(1),
+            fun_key2: Some(2),
+        };
+        let line = serde_json::to_string(&req).expect("serialize");
+        let full = format!("{{\"cmd\":6,\"seq\":123,\"data\":{line}}}\n");
+        assert!(
+            full.len() < 2048,
+            "0x06 整行 {} 字节，超过固件 2048 字节行缓冲",
+            full.len()
+        );
+    }
+
     #[test]
     fn voice_text_push_top_level() {
         // 0x0C 的 text/timestamp 在顶层，不在 data。
@@ -2678,10 +3255,191 @@ mod tests {
         assert_eq!(CMD_PROFILE_STATE, 0x10);
         assert_eq!(CMD_PROFILE_ICON_SET, 0x11);
         assert_eq!(CMD_HA_STATUS, 0x12);
+        assert_eq!(CMD_AUDIO_FILE, 0x16);
+        assert_eq!(CMD_AUDIO_PAD, 0x17);
         // 标准响应关系
         assert_eq!(response_cmd(CMD_CONFIG_SET), 0x88);
         assert_eq!(response_cmd(CMD_CONFIG_GET), 0x87);
         // 0x10 例外：响应就是自己
         assert_eq!(response_cmd(CMD_PROFILE_STATE), 0x90);
+    }
+
+    /// 音效文件名白名单：与固件 validAudioName 字节级一致。
+    #[test]
+    fn valid_audio_name_whitelist() {
+        // 合法
+        assert!(valid_audio_name("a.mp3"));
+        assert!(valid_audio_name("kick_01.wav"));
+        assert!(
+            valid_audio_name(&("a".repeat(20) + ".mp3")),
+            "基段恰好 20 字符"
+        );
+        assert!(valid_audio_name("0123456789.wav"));
+        // 非法：太长 / 大写 / 特殊字符 / 错误扩展名
+        assert!(!valid_audio_name("a.wav2"));
+        assert!(
+            valid_audio_name("ab.mp3"),
+            "基段 2 字符合法（白名单 {{1,20}}）"
+        );
+        assert!(!valid_audio_name(&("a".repeat(21) + ".mp3")));
+        assert!(!valid_audio_name("Kick.mp3"));
+        assert!(!valid_audio_name("kick.flac"));
+        assert!(!valid_audio_name("kick"));
+        assert!(!valid_audio_name("ki-ck.mp3"));
+        assert!(!valid_audio_name("kick .mp3"));
+        // UTF-8 多字节：按字节判断时总长可能达标但基段字节不在白名单
+        assert!(!valid_audio_name("鼓.mp3"));
+        // 空串 / 超长全链
+        assert!(!valid_audio_name(""));
+        assert!(!valid_audio_name(".mp3"));
+    }
+
+    /// sanitize_audio_name：本机文件名 → 合法设备名。
+    #[test]
+    fn sanitize_audio_name_rules() {
+        assert_eq!(
+            sanitize_audio_name("Kick Drum 01.MP3").as_deref(),
+            Some("kick_drum_01.mp3")
+        );
+        assert_eq!(
+            sanitize_audio_name("坏/名字:测试.wav").as_deref(),
+            Some("_______.wav"),
+            "非 ASCII 全部替换为 _"
+        );
+        assert_eq!(sanitize_audio_name("song.flac"), None);
+        assert_eq!(sanitize_audio_name("noext"), None);
+        // 基段截断到 20 字符
+        let long = sanitize_audio_name("abcdefghijklmnopqrstuvwxyz1234567890.mp3").to("name");
+        assert_eq!(long, "abcdefghijklmnopqrst.mp3");
+        // 空基段（".mp3"）回退 audio
+        assert_eq!(sanitize_audio_name(".mp3").as_deref(), Some("audio.mp3"));
+        // 生成结果必须通过白名单
+        for raw in ["A B(1).mp3", "音效-01.WAV", "x.wav"] {
+            let n = sanitize_audio_name(raw).to("n");
+            assert!(valid_audio_name(&n), "{raw} → {n} 应通过白名单");
+        }
+    }
+
+    /// 构造最小 WAV 头（44 字节标准布局）便于测试。
+    fn pcm_wav(code: u16, ch: u16, bits: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&36u32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&code.to_le_bytes());
+        v.extend_from_slice(&ch.to_le_bytes());
+        v.extend_from_slice(&44100u32.to_le_bytes());
+        v.extend_from_slice(&(44100u32 * u32::from(ch) * u32::from(bits) / 8).to_le_bytes());
+        v.extend_from_slice(&(ch * bits / 8).to_le_bytes());
+        v.extend_from_slice(&bits.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v
+    }
+
+    /// 构造 MP4 容器头（ftyp isom，与 2026-09-11 下载站假 wav 同构）。
+    fn mp4_bytes() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        v.extend_from_slice(b"ftypisom");
+        v.extend_from_slice(&[0x00, 0x00, 0x02, 0x00]);
+        v.extend_from_slice(b"isomiso2avc1mp41");
+        v.resize(64, 0);
+        v
+    }
+
+    /// 内容预检：拦截伪装扩展名与设备不支持的 WAV 编码。
+    #[test]
+    fn validate_audio_content_rules() {
+        // 下载站"假 wav"：MP4 容器改扩展名（2026-09-11 实测事故）
+        let err = validate_audio_content("wav", &mp4_bytes()).unwrap_err();
+        assert!(err.contains("不是 WAV"), "{err}");
+        assert!(err.contains("MP4"), "{err}");
+
+        // 真 WAV：PCM 16bit 单声道/立体声 → 放行
+        assert!(validate_audio_content("wav", &pcm_wav(1, 1, 16)).is_ok());
+        assert!(validate_audio_content("wav", &pcm_wav(1, 2, 16)).is_ok());
+
+        // 设备解码库不支持的编码 → 明确报错（对齐 read_WAV_Header 能力）
+        assert!(
+            validate_audio_content("wav", &pcm_wav(3, 2, 32)).is_err(),
+            "IEEE float"
+        );
+        assert!(
+            validate_audio_content("wav", &pcm_wav(0xFFFE, 2, 16)).is_err(),
+            "WAVE_FORMAT_EXTENSIBLE"
+        );
+        assert!(
+            validate_audio_content("wav", &pcm_wav(1, 2, 24)).is_err(),
+            "24bit"
+        );
+        // 8bit：库头解析虽放行，但输出通路失真（幅度 ~0.8%），按不支持处理
+        assert!(
+            validate_audio_content("wav", &pcm_wav(1, 1, 8)).is_err(),
+            "8bit"
+        );
+
+        // MP3：ID3 头 / 帧同步 0xFFEx 都是合法内容
+        let mut id3 = b"ID3\x03".to_vec();
+        id3.resize(64, 0);
+        assert!(validate_audio_content("mp3", &id3).is_ok());
+        assert!(validate_audio_content("mp3", &[0xFF, 0xFB, 0x90, 0x00]).is_ok());
+
+        // 伪装 MP3：RIFF（WAV）→ 报错并提示真实格式
+        let err = validate_audio_content("mp3", &pcm_wav(1, 2, 16)).unwrap_err();
+        assert!(err.contains("不是 MP3"), "{err}");
+        assert!(err.contains("RIFF"), "{err}");
+        let err = validate_audio_content("mp3", &mp4_bytes()).unwrap_err();
+        assert!(err.contains("MP4"), "{err}");
+    }
+
+    /// 0x16 list / 0x17 get 响应解析（与固件响应字段对齐）。
+    #[test]
+    fn audio_resp_parsing() {
+        let list_raw = serde_json::json!({
+            "files": [
+                {"name": "kick.mp3", "size": 10240},
+                {"name": "hat.wav", "size": 2048}
+            ],
+            "total_bytes": 4063232,
+            "used_bytes": 12288,
+            "free_bytes": 4050944
+        });
+        let list: AudioFileListResp = serde_json::from_value(list_raw).to("list");
+        assert_eq!(list.files.len(), 2);
+        assert_eq!(list.files[0].name, "kick.mp3");
+        assert_eq!(list.files[1].size, 2048);
+        assert_eq!(list.free_bytes, 4050944);
+
+        // 空列表 / 缺字段都能解析（Default 兜底）
+        let empty: AudioFileListResp = serde_json::from_value(serde_json::json!({})).to("empty");
+        assert!(empty.files.is_empty());
+
+        let pads_raw = serde_json::json!({
+            "pads": [
+                {"key": 1, "file": "kick.mp3"},
+                {"key": 2, "file": ""},
+                {"key": 11, "file": "hat.wav"}
+            ]
+        });
+        let pads: Vec<AudioPadBinding> =
+            serde_json::from_value(pads_raw["pads"].clone()).to("pads");
+        assert_eq!(pads.len(), 3);
+        assert_eq!(pads[2].key, 11);
+        assert_eq!(pads[1].file, "");
+    }
+
+    /// 上传分块：2MB 上限文件按 1024B 分块的 b64 长度必须 < 固件 1400 字符上限
+    /// （kMaxB64Len），否则固件会拒绝该块。
+    #[test]
+    fn audio_block_b64_under_firmware_limit() {
+        use base64::Engine as _;
+        let block = vec![0xABu8; AUDIO_UPLOAD_BLOCK_BYTES];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&block);
+        // 1024B → ceil(1024/3)*4 = 1368 字符
+        assert_eq!(b64.len(), 1368);
+        assert!(b64.len() <= 1400, "b64 长度必须 ≤ 固件 kMaxB64Len=1400");
     }
 }

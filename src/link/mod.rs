@@ -26,10 +26,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::protocol::{self, DeviceSettings, Frame, HeartbeatResp};
+use crate::protocol::{self, Frame, HeartbeatResp};
 use crate::state::LogKind;
 use crate::util::log::SharedLog;
-use heartbeat::{HeartbeatHandle, WriterMsg};
+use heartbeat::{HEARTBEAT_LOG_BATCH, HeartbeatHandle, WriterMsg};
 pub use serial::PortInfo;
 
 /// 连接状态机
@@ -39,7 +39,6 @@ pub enum ConnectionState {
     Connecting,
     Online,
     Reconnecting,
-    Error(String),
 }
 
 impl ConnectionState {
@@ -64,6 +63,83 @@ pub enum LinkEvent {
 /// seq → 等待该响应的 oneshot Sender
 type PendingMap = Arc<Mutex<HashMap<u32, Sender<Frame>>>>;
 
+/// 请求 seq 分配（LinkManager 与 LinkRequester 共用，连接内唯一）
+static REQ_SEQ: AtomicU32 = AtomicU32::new(1);
+
+fn alloc_seq() -> u32 {
+    REQ_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// request 的实质逻辑：writer 通道 + pending 表 + 日志即可完成，
+/// 与 LinkManager 本体解耦，供 [`LinkRequester`] 在后台线程复用。
+fn request_via(
+    write_tx: &Sender<WriterMsg>,
+    pending: &PendingMap,
+    log: &SharedLog,
+    cmd: u8,
+    data: Option<serde_json::Value>,
+    timeout: Duration,
+) -> Result<Frame, String> {
+    let seq = alloc_seq();
+    let (tx, rx) = channel::<Frame>();
+    pending.lock().unwrap().insert(seq, tx);
+    let frame = Frame::request(cmd, seq, data);
+    if write_tx.send(WriterMsg::Frame(frame)).is_err() {
+        // writer 已退出（连接关闭）：清掉 pending 避免泄漏，按断线处理
+        pending.lock().unwrap().remove(&seq);
+        log.push(
+            LogKind::App,
+            format!("request cmd=0x{cmd:02X} seq={seq}: disconnected"),
+        );
+        return Err("disconnected".to_string());
+    }
+
+    match rx.recv_timeout(timeout) {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            // sender 已被 router 回收（断线） vs 超时，区分开来便于上层决定
+            // 是立刻放弃还是继续等待。
+            let still_pending = pending.lock().unwrap().remove(&seq).is_some();
+            if !still_pending {
+                log.push(
+                    LogKind::App,
+                    format!("request cmd=0x{cmd:02X} seq={seq}: disconnected"),
+                );
+                return Err("disconnected".to_string());
+            }
+            log.push(
+                LogKind::App,
+                format!("request cmd=0x{cmd:02X} seq={seq}: timeout ({e})"),
+            );
+            Err(format!("timeout: {e}"))
+        }
+    }
+}
+
+/// 可跨线程克隆的请求句柄（音效文件上传等后台长流程用）。
+///
+/// LinkManager 因持有 `Receiver` 不是 Sync，无法把 `&LinkManager` 交给
+/// 后台线程；但请求的实质依赖只有 writer 通道 + pending 表 + 日志，
+/// 三者均可共享。断线时 router 清空 pending / writer 关闭，句柄上的
+/// request 会立即 `Err("disconnected")`，与 LinkManager 语义一致。
+#[derive(Clone)]
+pub struct LinkRequester {
+    write_tx: Sender<WriterMsg>,
+    pending: PendingMap,
+    log: SharedLog,
+}
+
+impl LinkRequester {
+    pub fn request(
+        &self,
+        cmd: u8,
+        data: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<Frame, String> {
+        request_via(&self.write_tx, &self.pending, &self.log, cmd, data, timeout)
+    }
+}
+
 /// reader 退出回调类型
 type OnReaderExit = Arc<dyn Fn() + Send + Sync>;
 
@@ -76,7 +152,6 @@ type Counters = (Arc<AtomicU64>, Arc<AtomicU64>, Arc<Mutex<Option<Instant>>>);
 pub struct LinkManager {
     /// 共享日志缓冲；request() 失败时也会在这里推 App 日志。
     log: SharedLog,
-    port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     /// UI 侧事件接收端（由 router 线程投递）；`poll_events` 每帧拉取
     ui_rx_slot: Option<Receiver<LinkEvent>>,
     /// 内部事件通道发送端（reader / heartbeat → router）
@@ -87,16 +162,10 @@ pub struct LinkManager {
     hb: HeartbeatHandle,
     stop: Arc<AtomicBool>,
     port_name: String,
-    /// reader 线程退出兜底回调：reader 异常退出 → router 也挂了的最后一道保险，
-    /// 通知 AppHandle 调度重连。正常路径上由 router 转发的 State(Disconnected)
-    /// 已经能完成这件事，这个回调只是双保险。
-    on_reader_exit: OnReaderExit,
     _reader: Option<JoinHandle<()>>,
     _writer: Option<JoinHandle<()>>,
     _router: Option<JoinHandle<()>>,
     _heartbeat: Option<JoinHandle<()>>,
-    /// Tx/Rx 计数 + uptime 起点（与 AppHandle 共享）。close() 时 take 走。
-    counters: Option<Counters>,
 }
 
 impl LinkManager {
@@ -133,7 +202,7 @@ impl LinkManager {
         let stop = Arc::new(AtomicBool::new(false));
         let state: Arc<Mutex<ConnectionState>> = Arc::new(Mutex::new(ConnectionState::Online));
 
-        let (tx_counter, rx_counter, uptime_start) = counters;
+        let (tx_counter, rx_counter, _uptime_start) = counters;
 
         let port: Arc<Mutex<Box<dyn serialport::SerialPort>>> = Arc::new(Mutex::new(port));
 
@@ -234,6 +303,17 @@ impl LinkManager {
         let rx_counter_r = Arc::clone(&rx_counter);
         let router = thread::spawn(move || {
             log_for_router.push(LogKind::App, "router 线程启动".to_string());
+            // 心跳 Rx 聚合窗口：与 heartbeat.rs 的 HEARTBEAT_LOG_BATCH 同步使用。
+            // 仅在累计 N 次心跳 ack 后写一条汇总日志，避免每秒一条心跳 Rx
+            // 噪声；需要逐帧抓包时临时改阈值为 1 即可。
+            // 额外保留 last_ack_at_ms 字段以便聚合时附"最近一次 ack 距今多久"。
+            // `#[allow(unused_assignments)]`：rx_batch / last_ts 实际在
+            // 循环内被读（format!），但 borrow checker 跨 while 闭包看不到
+            // 使用点，标记消除误报。
+            #[allow(unused_assignments)]
+            let mut hb_rx_batch: u32 = 0;
+            #[allow(unused_assignments)]
+            let mut hb_rx_last_ts: Option<String> = None;
             loop {
                 match event_rx.recv() {
                     Ok(LinkEvent::Frame(f)) => {
@@ -242,30 +322,40 @@ impl LinkManager {
                         // 心跳响应 → mark_ack
                         if f.cmd == protocol::response_cmd(protocol::CMD_HEARTBEAT) {
                             hb_for_router.mark_ack(f.seq as u64);
-                            // 心跳专属 Rx 日志：解析完整 data（timestamp + device），
-                            // 便于面板直接判断设备是否重启 / 数据是否齐全。
-                            match f.data.as_ref().and_then(|v| {
-                                serde_json::from_value::<HeartbeatResp>(v.clone()).ok()
-                            }) {
-                                Some(hb) => {
-                                    log_for_router.push(
-                                        LogKind::Rx,
-                                        format!(
-                                            "Rx ← cmd=0x{:02X} seq={} data={{\"timestamp\":{},\"device\":\"{}\"}}",
-                                            f.cmd, f.seq, hb.timestamp, hb.device
-                                        ),
-                                    );
-                                }
-                                None => {
-                                    log_for_router.push(
-                                        LogKind::Rx,
-                                        format!(
-                                            "Rx ← cmd=0x{:02X} seq={} (heartbeat, data parse failed: {:?})",
-                                            f.cmd, f.seq, f.data
-                                        ),
-                                    );
-                                }
+                            hb_rx_batch = hb_rx_batch.saturating_add(1);
+                            // 解析 timestamp（仅用来在汇总日志里附"最近一次 ack 时间"，
+                            // 失败就退化为 None，长时间连不上时由 heartbeat.rs 的
+                            // "心跳超时" 兜底日志体现）。
+                            hb_rx_last_ts = f
+                                .data
+                                .as_ref()
+                                .and_then(|v| {
+                                    serde_json::from_value::<HeartbeatResp>(v.clone()).ok()
+                                })
+                                .map(|hb| hb.timestamp.to_string());
+                            // 达到聚合窗口：把累计 N 次心跳 ack 合并成一条 Rx 汇总日志。
+                            // 与 heartbeat.rs 的 Tx 汇总语义对齐（HEARTBEAT_LOG_BATCH 帧）。
+                            // 每个 batch 的首帧单独写一条 App 日志，便于
+                            // 排查设备刚启动 / 固件时间字段异常等异常路径。
+                            if hb_rx_batch == 1 {
+                                log_for_router.push(
+                                    LogKind::App,
+                                    format!("心跳 Rx 新批次 首帧 seq={}", f.seq),
+                                );
                             }
+                            if hb_rx_batch >= HEARTBEAT_LOG_BATCH {
+                                let ts_part = hb_rx_last_ts
+                                    .as_deref()
+                                    .map(|s| format!(" device_ts={s}"))
+                                    .unwrap_or_default();
+                                log_for_router.push(
+                                    LogKind::Rx,
+                                    format!("心跳 Rx×{hb_rx_batch} (last seq={}){ts_part}", f.seq),
+                                );
+                                hb_rx_batch = 0;
+                            }
+                            // 后续按完整 data 记录 Rx 日志的旧路径已合并到上面的
+                            // 聚合逻辑，避免重复。
                         }
 
                         // 异类命令识别（body 在帧顶层，非 `data`）：
@@ -345,7 +435,6 @@ impl LinkManager {
 
         Ok(Self {
             log,
-            port,
             ui_rx_slot: Some(ui_rx),
             events_tx: event_tx,
             write_tx,
@@ -354,16 +443,10 @@ impl LinkManager {
             hb,
             stop,
             port_name: name,
-            on_reader_exit,
             _reader: Some(reader),
             _writer: Some(writer),
             _router: Some(router),
             _heartbeat: None,
-            counters: Some((
-                Arc::clone(&tx_counter),
-                Arc::clone(&rx_counter),
-                uptime_start,
-            )),
         })
     }
 
@@ -423,11 +506,6 @@ impl LinkManager {
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
     }
 
-    /// 当前状态
-    pub fn state(&self) -> ConnectionState {
-        self.state.lock().unwrap().clone()
-    }
-
     /// 当前连接的端口名
     pub fn port_name(&self) -> &str {
         &self.port_name
@@ -453,32 +531,53 @@ impl LinkManager {
         data: Option<serde_json::Value>,
         timeout: Duration,
     ) -> Result<Frame, String> {
-        let seq = self.next_seq();
+        request_via(&self.write_tx, &self.pending, &self.log, cmd, data, timeout)
+    }
+
+    /// 发放一个可跨线程克隆的请求句柄（连接存活期间有效，见 [`LinkRequester`]）。
+    pub fn requester(&self) -> LinkRequester {
+        LinkRequester {
+            write_tx: self.write_tx.clone(),
+            pending: Arc::clone(&self.pending),
+            log: self.log.clone(),
+        }
+    }
+
+    /// 异步请求-响应：立即返回结果接收端，**不阻塞调用线程**（UI 用）。
+    ///
+    /// 与 [`Self::request`] 同一套 seq 配对逻辑，区别只是等待在后台线程进行：
+    /// UI 线程每帧 `try_recv` 轮询结果，避免同步等待期间整个窗口无响应。
+    /// 断线时 router 清空 pending map → oneshot sender drop → 立即返回
+    /// `Err("disconnected")`，与同步版语义一致。
+    pub fn request_async(
+        &self,
+        cmd: u8,
+        data: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Receiver<Result<Frame, String>> {
+        let seq = alloc_seq();
         let (tx, rx) = channel::<Frame>();
         self.pending.lock().unwrap().insert(seq, tx);
         let frame = Frame::request(cmd, seq, data);
         self.send(frame);
 
-        match rx.recv_timeout(timeout) {
-            Ok(resp) => Ok(resp),
-            Err(e) => {
-                // sender 已被 router 回收（断线） vs 超时，区分开来便于上层决定
-                // 是立刻放弃还是继续等待。
-                let still_pending = self.pending.lock().unwrap().remove(&seq).is_some();
-                if !still_pending {
-                    self.log.push(
-                        LogKind::App,
-                        format!("request cmd=0x{cmd:02X} seq={seq}: disconnected"),
-                    );
-                    return Err("disconnected".to_string());
+        let pending = Arc::clone(&self.pending);
+        let (res_tx, res_rx) = channel();
+        thread::spawn(move || {
+            let result = match rx.recv_timeout(timeout) {
+                Ok(frame) => Ok(frame),
+                Err(e) => {
+                    let still_pending = pending.lock().unwrap().remove(&seq).is_some();
+                    if !still_pending {
+                        Err("disconnected".to_string())
+                    } else {
+                        Err(format!("timeout: {e}"))
+                    }
                 }
-                self.log.push(
-                    LogKind::App,
-                    format!("request cmd=0x{cmd:02X} seq={seq}: timeout ({e})"),
-                );
-                Err(format!("timeout: {e}"))
-            }
-        }
+            };
+            let _ = res_tx.send(result);
+        });
+        res_rx
     }
 
     /// 拉一批 UI 事件（router 线程已完成 seq 配对 / 心跳 ack / 状态同步）。
@@ -493,13 +592,4 @@ impl LinkManager {
         }
         out
     }
-
-    fn next_seq(&self) -> u32 {
-        static SEQ: AtomicU32 = AtomicU32::new(1);
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    }
 }
-
-// 占位：让 DeviceSettings 被引用（避免未用警告；同时给 future 扩展保留位置）
-#[allow(dead_code)]
-fn _ensure_used(_: DeviceSettings) {}

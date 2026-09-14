@@ -1,0 +1,92 @@
+name: Bug Report
+description: App 行为异常 / 崩溃 / 数据错误等
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提 Bug 前请先搜索现有 issue,确认没人提过。涉及协议 / 钳位的问题请同时
+        附 `docs/protocol-usage.md` 章节编号。
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 11 x64
+        - Windows 10 x64
+        - Windows 11 ARM64
+        - macOS (尚未支持,只在 CI 编译验证)
+        - Linux (尚未支持,只在 CI 编译验证)
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: App 版本
+      description: 顶栏 → 关于 / 或 `wxi --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: 固件阶段
+      description: 参考 docs/protocol-usage.md §11 兼容性矩阵
+      placeholder: "阶段 06"
+    validations:
+      required: false
+
+  - type: input
+    id: port
+    attributes:
+      label: 串口 / 桥接芯片
+      description: 如 COM3 (原生 CDC) / COM5 (CH340)
+      placeholder: "COMx"
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 关键日志(日志页 → 复制)
+      description: 协议 / 固件 / 应用 三类分色日志,定位最有帮助的是协议 Tx / Rx
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他
+      description: 截图 / 录屏链接、环境差异(暗色 / 亮色、本机时间等)
+    validations:
+      required: false

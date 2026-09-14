@@ -1,0 +1,55 @@
+name: Feature Request
+description: 新功能 / 协议层扩展 / 平台支持等
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        协议层相关建议(新增字段 / 新增命令)请同时阅读
+        `docs/protocol-usage.md` §12 扩展检查表,并尽量在该章节模板下讨论
+        字段编号 / mask 位置 / 钳位规则。
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 动机 / 解决的问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 可贴伪代码 / JSON / 草图
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: 影响层
+      options:
+        - App UI
+        - App 协议层 (src/protocol.rs)
+        - 协议层 + 文档
+        - 跨平台支持 (macOS / Linux)
+        - CI / 构建 / 发布
+        - 文档
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他
+    validations:
+      required: false

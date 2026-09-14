@@ -1,0 +1,7 @@
+contact_links:
+  - name: 📖 协议使用说明
+    url: https://github.com/EndThemex/EKeysApp/blob/main/docs/protocol-usage.md
+    about: 字段 / 命令 / 钳位规则以协议文档为准
+  - name: 🛡 安全漏洞报告
+    url: https://github.com/EndThemex/EKeysApp/security/advisories/new
+    about: 请勿在公开 issue 中披露安全问题

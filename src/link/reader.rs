@@ -110,9 +110,3 @@ fn handle_line(line: &str, tx: &Sender<LinkEvent>, log: &SharedLog) {
         }
     }
 }
-
-/// 周期（用于 read timeout）
-#[allow(dead_code)]
-pub fn read_timeout() -> Duration {
-    Duration::from_millis(100)
-}
