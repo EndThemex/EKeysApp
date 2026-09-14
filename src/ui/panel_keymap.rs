@@ -2426,13 +2426,43 @@ fn edit_action_params(
                 }
             }
             let mut add: u16 = 0;
-            egui::ComboBox::from_id_salt("chord-add")
-                .selected_text("＋ 添加按键…")
-                .show_ui(ui, |cb| {
-                    for (c, name) in HID_KEY_CHOICES.iter() {
-                        cb.selectable_value(&mut add, *c, format!("{name} (0x{c:02X})"));
-                    }
-                });
+            // 用 IconTextButton 触发下拉：图标走 Phosphor，文本走 Proportional，
+            // 避免全角字符 "＋" 在 maple_cn 里缺失被渲染成方框（fonts.rs §6.1）。
+            // 但 ComboBox 的 selected_text 只能承载单一字符串，所以这里用按钮 + 弹层：
+            // 按钮被点击时记录 `pending_open`，下一帧用 ComboBox 把选项列表弹出。
+            let chord_combo_id = ui.id().with("chord-add-combo");
+            let mut open = ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(chord_combo_id).unwrap_or(false));
+            let resp = ui.add(
+                crate::ui::fonts::IconTextButton::new(
+                    crate::ui::icons::KEYMAP_ADD_KEY,
+                    "添加按键",
+                    13.0,
+                )
+                .min_size(egui::vec2(120.0, 24.0))
+                .corner_radius(egui::CornerRadius::same(6)),
+            );
+            if resp.clicked() {
+                open = !open;
+            }
+            if open {
+                // 弹层：用纯文本承载"已选/未选"，避免方框字符
+                egui::ComboBox::from_id_salt("chord-add")
+                    .selected_text("选择按键…")
+                    .show_ui(ui, |cb| {
+                        for (c, name) in HID_KEY_CHOICES.iter() {
+                            if cb
+                                .selectable_label(add == *c, format!("{name} (0x{c:02X})"))
+                                .clicked()
+                            {
+                                add = *c;
+                                open = false;
+                            }
+                        }
+                    });
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(chord_combo_id, open));
             if add != 0 {
                 if !codes.contains(&add) {
                     codes.push(add);

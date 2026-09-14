@@ -22,6 +22,24 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
 
     settings_panel_scaffold(handle, ui, |ui, _snap, draft| {
         ui.group(|ui| {
+            // 整体亮度放在最上方：作为整个键盘灯亮度的总控，影响所有灯效模式的实际亮度输出
+            ui.horizontal(|ui| {
+                ui.label("整体亮度");
+                ui.label(
+                    egui::RichText::new("管理整个键盘灯的亮度，影响所有灯效模式")
+                        .weak()
+                        .size(11.0),
+                );
+            });
+            let mut bri = draft.rgb_brightness.clamp(0, 100);
+            if ui
+                .add(egui::Slider::new(&mut bri, 0..=100).show_value(true))
+                .changed()
+            {
+                draft.rgb_brightness = bri;
+            }
+
+            ui.add_space(8.0);
             // 与固件 RGBMode 枚举（RGBLightControl.h:22）严格 1:1 对齐
             ui.label("灯效模式");
             let mut mode = draft.rgb_mode;
@@ -82,7 +100,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             // 这里把 UI 范围收紧到 0~23 与调色板 1:1 对齐，避免越界值被静默绕回。
             ui.horizontal(|ui| {
                 ui.label("单色颜色（调色板 0~23，共 24 色）");
-                ui.label(egui::RichText::new("仅在「单色」灯效模式下生效").weak().size(11.0));
+                ui.label(
+                    egui::RichText::new("仅在「单色」灯效模式下生效")
+                        .weak()
+                        .size(11.0),
+                );
             });
             let mut color = draft.rgb_single_color.clamp(0, 23);
             // 当前索引对应的实际颜色（与固件 kPalette24 严格 1:1），提前取出供 hover 文本使用
@@ -139,19 +161,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             mode_grid(ui, clicks, &mut cm, crate::ui::ACCENT);
             if cm != draft.rgb_click_mode {
                 draft.rgb_click_mode = cm;
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label("整体亮度");
-                ui.label(egui::RichText::new("范围 0~100").weak().size(11.0));
-            });
-            let mut bri = draft.rgb_brightness.clamp(0, 100);
-            if ui
-                .add(egui::Slider::new(&mut bri, 0..=100).show_value(true))
-                .changed()
-            {
-                draft.rgb_brightness = bri;
             }
         });
     });

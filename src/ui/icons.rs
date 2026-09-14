@@ -56,6 +56,8 @@ pub const KEYMAP_RENAME_CLOSE: &str = r::X;
 pub const KEYMAP_RELOAD: &str = r::ARROW_CLOCKWISE;
 pub const KEYMAP_EXPORT: &str = r::DOWNLOAD_SIMPLE;
 pub const KEYMAP_CAPTURE: &str = r::KEYBOARD;
+/// Keymap 多键同按：添加一个新按键到 Chord 列表
+pub const KEYMAP_ADD_KEY: &str = r::PLUS;
 
 // Log 工具栏
 pub const LOG_COPY: &str = r::COPY;
