@@ -87,6 +87,18 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
                     crate::ui::icons::LIGHT_PULSE,
                     "整体呼吸式明暗脉冲",
                 ),
+                (
+                    8,
+                    "拾音",
+                    crate::ui::icons::LIGHT_SOUND,
+                    "RGB 随麦克风采集的环境声音律动",
+                ),
+                (
+                    9,
+                    "律动",
+                    crate::ui::icons::LIGHT_SOUND,
+                    "按 3×4 键位矩阵点亮：4 列对应 4 频段，音量决定每列点亮行数",
+                ),
             ];
             mode_grid(ui, modes, &mut mode, crate::ui::ACCENT);
             if mode != draft.rgb_mode {

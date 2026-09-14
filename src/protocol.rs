@@ -398,8 +398,8 @@ impl DeviceSettings {
         // 亮度：5~100
         clamp_min_max!(tft_brightness, 5, 100);
         // RGB（与固件 parseConfigSetCommand.cpp §RGB + panel_lighting UI 选项对齐）
-        // - rgb_mode：固件 RGBLightControl.h:22 RGBMode 枚举 0~7 共 8 种
-        //   （关闭/单色/彩虹/彩浪/循环/电平/火焰/脉冲）
+        // - rgb_mode：固件 RGBLightControl.h:22 RGBMode 枚举 0~9 共 10 种
+        //   （关闭/单色/彩虹/彩浪/循环/电平/火焰/脉冲/拾音/矩阵律动）
         // - rgb_single_color：固件 24 色调色板索引（RGBLightControl.cpp:74 `% 24` 兜底），
         //   UI 与固件实际语义对齐为 0~23
         // - rgb_click_mode：固件 ClickHighlight.h:34 ClickMode 枚举 0~2 共 3 种
@@ -407,7 +407,7 @@ impl DeviceSettings {
         // - rgb_brightness：UI Slider 0~100
         // 固件侧只做 uint8_t 截断、不做范围过滤；这里给 App 端兜底，避免
         // 越界值被静默接受后 UI 仍显示旧值造成"我改了为啥没生效"的歧义。
-        clamp_min_max!(rgb_mode, 0, 7);
+        clamp_min_max!(rgb_mode, 0, 9);
         clamp_min_max!(rgb_single_color, 0, 23);
         clamp_min_max!(rgb_click_mode, 0, 2);
         clamp_min_max!(rgb_brightness, 0, 100);
@@ -2501,7 +2501,7 @@ mod tests {
         s.voice_trigger_key = 99; // → 11
         s.voice_max_record_ms = 50; // → 1000
         // RGB 钳位（与固件 RGBLightControl.h:22 / ClickHighlight.h:34 对齐）
-        s.rgb_mode = 99; // → 7
+        s.rgb_mode = 99; // → 9
         s.rgb_single_color = -10; // → 0
         s.rgb_single_color = 1000; // → 23（再赋一次，覆盖前面）
         s.rgb_click_mode = 42; // → 2
@@ -2521,7 +2521,7 @@ mod tests {
         assert_eq!(s.voice_auto_enter, 1);
         assert_eq!(s.voice_trigger_key, 11);
         assert_eq!(s.voice_max_record_ms, 1000);
-        assert_eq!(s.rgb_mode, 7);
+        assert_eq!(s.rgb_mode, 9);
         assert_eq!(s.rgb_single_color, 23);
         assert_eq!(s.rgb_click_mode, 2);
         assert_eq!(s.rgb_brightness, 100);
