@@ -8,17 +8,31 @@
 //!   记录上一拍 idle/kernel/user 时间以计算 delta）
 //! - `memory_usage_percent`（Win32 `GlobalMemoryStatusEx`）
 //!
-//! `cpu_temp_c` / `disk_io_percent` / `network_up_kbps` / `network_down_kbps`
+//! `cpu_temp_c` / `disk_io_percent`
 //! 需要 PDH / WMI / `GetIfTable` 等更重量级的 API，本轮先不采集（保持 None，
 //! 序列化时自动跳过）。
+//!
+//! 本轮已接通：
+//! - `network_up_kbps` / `network_down_kbps`（`GetIfTable` 网卡字节计数差值，
+//!   跳过环回与非操作状态接口）
+//! - `disk_space_percent`（`GetLogicalDrives` + `GetDriveTypeW` 过滤固定盘，
+//!   `GetDiskFreeSpaceExW` 加权汇总）
 
 use crate::protocol::PcStatus;
 
 #[cfg(windows)]
 mod platform {
     use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetIfTable, IF_OPER_STATUS_OPERATIONAL, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IFTABLE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
     use windows_sys::Win32::Networking::WinInet::InternetGetConnectedState;
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::SystemInformation::{GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX};
     use windows_sys::Win32::System::Threading::GetSystemTimes;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_CAPITAL, VK_NUMLOCK, VK_SCROLL,
@@ -181,6 +195,134 @@ mod platform {
     pub fn cpu_usage_percent() -> Option<f32> {
         cpu_sampler().lock().ok()?.sample()
     }
+
+    /// 遍历所有网卡（跳过环回与非操作状态），汇总 in/out 字节计数（u64 累加，
+    /// 单口 32 位计数器在 1s 采样间隔下不会回绕，累加侧用 u64 无压力）。
+    fn iface_octets() -> Option<(u64, u64)> {
+        // 首次调用传 NULL 拿所需缓冲区大小（返回 ERROR_INSUFFICIENT_BUFFER）
+        let mut size: u32 = 0;
+        let rc = unsafe { GetIfTable(std::ptr::null_mut(), &mut size, 0) };
+        if (rc != ERROR_INSUFFICIENT_BUFFER && rc != 0) || size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let table = buf.as_mut_ptr() as *mut MIB_IFTABLE;
+        let rc = unsafe { GetIfTable(table, &mut size, 0) };
+        if rc != 0 {
+            return None;
+        }
+        let entries = unsafe { (*table).dwNumEntries as usize };
+        let mut total_in = 0u64;
+        let mut total_out = 0u64;
+        for i in 0..entries {
+            let row = unsafe { (*table).table.as_ptr().add(i) };
+            // 环回口流量与外网无关；非操作状态接口计数不走
+            unsafe {
+                if (*row).dwType == IF_TYPE_SOFTWARE_LOOPBACK {
+                    continue;
+                }
+                if (*row).dwOperStatus != IF_OPER_STATUS_OPERATIONAL {
+                    continue;
+                }
+                total_in += (*row).dwInOctets as u64;
+                total_out += (*row).dwOutOctets as u64;
+            }
+        }
+        Some((total_in, total_out))
+    }
+
+    /// 网速采样器：记录上一拍的总字节计数与系统 tick，
+    /// 差值 / 间隔 = 速率（kbps，bit 千位每秒，与固件协议字段语义一致）。
+    ///
+    /// 与 CPU 采样器同款 `OnceLock<Mutex<_>>` 全局共享：推送 tick 与设置面板
+    /// 预览看到同一序列，避免双重采样导致速率减半。
+    pub struct NetSpeedSampler {
+        last_ms: u64,
+        last_in: u64,
+        last_out: u64,
+        primed: bool,
+    }
+
+    impl NetSpeedSampler {
+        const fn new() -> Self {
+            Self {
+                last_ms: 0,
+                last_in: 0,
+                last_out: 0,
+                primed: false,
+            }
+        }
+
+        /// 返回 `(up_kbps, down_kbps)`；首拍建基线返回 None。
+        pub fn sample(&mut self) -> Option<(f32, f32)> {
+            let (recv, sent) = iface_octets()?;
+            let now = unsafe { GetTickCount64() };
+            if !self.primed {
+                self.last_ms = now;
+                self.last_in = recv;
+                self.last_out = sent;
+                self.primed = true;
+                return None;
+            }
+            let dt_s = now.saturating_sub(self.last_ms) as f32 / 1000.0;
+            if dt_s < 0.05 {
+                // 间隔过短，速率噪声大；跳过本次
+                return None;
+            }
+            let d_in = recv.wrapping_sub(self.last_in);
+            let d_out = sent.wrapping_sub(self.last_out);
+            self.last_ms = now;
+            self.last_in = recv;
+            self.last_out = sent;
+            let down_kbps = d_in as f64 * 8.0 / 1000.0 / dt_s as f64;
+            let up_kbps = d_out as f64 * 8.0 / 1000.0 / dt_s as f64;
+            Some((up_kbps as f32, down_kbps as f32))
+        }
+    }
+
+    pub fn net_speed_sampler() -> &'static std::sync::Mutex<NetSpeedSampler> {
+        static SAMPLER: OnceLock<std::sync::Mutex<NetSpeedSampler>> = OnceLock::new();
+        SAMPLER.get_or_init(|| std::sync::Mutex::new(NetSpeedSampler::new()))
+    }
+
+    /// 便捷包装：返回 `(up_kbps, down_kbps)`，未就绪返回 None。
+    pub fn network_speeds_kbps() -> Option<(f32, f32)> {
+        net_speed_sampler().lock().ok()?.sample()
+    }
+
+    /// 磁盘空间使用率（0~100）：枚举逻辑盘位，只统计固定盘（DRIVE_FIXED，
+    /// 排除 U 盘 / 光驱 / 网络映射盘），按容量加权汇总。
+    pub fn disk_space_percent() -> Option<f32> {
+        let drives = unsafe { GetLogicalDrives() };
+        if drives == 0 {
+            return None;
+        }
+        let mut total = 0u64;
+        let mut free = 0u64;
+        for i in 0..26u32 {
+            if drives & (1u32 << i) == 0 {
+                continue;
+            }
+            let letter = (b'A' + i as u8) as u16;
+            let root: [u16; 4] = [letter, b':' as u16, b'\\' as u16, 0];
+            unsafe {
+                if GetDriveTypeW(root.as_ptr()) != DRIVE_FIXED {
+                    continue;
+                }
+                let mut avail = 0u64;
+                let mut t = 0u64;
+                let mut f = 0u64;
+                if GetDiskFreeSpaceExW(root.as_ptr(), &mut avail, &mut t, &mut f) != 0 {
+                    total += t;
+                    free += f;
+                }
+            }
+        }
+        if total == 0 {
+            return None;
+        }
+        Some(((total - free) as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as f32)
+    }
 }
 
 #[cfg(not(windows))]
@@ -204,6 +346,12 @@ mod platform {
     pub fn memory_usage_percent() -> Option<f32> {
         None
     }
+    pub fn network_speeds_kbps() -> Option<(f32, f32)> {
+        None
+    }
+    pub fn disk_space_percent() -> Option<f32> {
+        None
+    }
 }
 
 /// 一次性快照：采集当前 PC 状态。
@@ -211,6 +359,7 @@ mod platform {
 /// CPU% 需要两次采样才能产出 delta；首次返回 `cpu_usage_percent = None`。
 /// UI 端按 `None` 显示"采样中…"，设备端协议层 None 字段会被 serde 跳过。
 pub fn snapshot() -> PcStatus {
+    let speeds = platform::network_speeds_kbps();
     PcStatus {
         caps_lock: Some(platform::caps_lock()),
         num_lock: Some(platform::num_lock()),
@@ -218,11 +367,12 @@ pub fn snapshot() -> PcStatus {
         network_connected: Some(platform::network_connected()),
         cpu_usage_percent: platform::cpu_usage_percent(),
         memory_usage_percent: platform::memory_usage_percent(),
+        disk_space_percent: platform::disk_space_percent(),
+        network_up_kbps: speeds.map(|s| s.0),
+        network_down_kbps: speeds.map(|s| s.1),
         // 其余扩展字段暂不采集，保持 None（序列化自动跳过）。
         cpu_temp_c: None,
         disk_io_percent: None,
-        network_up_kbps: None,
-        network_down_kbps: None,
     }
 }
 
@@ -241,18 +391,24 @@ mod tests {
         assert!(s.network_connected.is_some());
         // 内存% 必须 Some（GlobalMemoryStatusEx 单次即可产出）
         assert!(s.memory_usage_percent.is_some());
-        // cpu_temp_c / disk_io_percent / network_*_kbps 暂不采集
+        // cpu_temp_c / disk_io_percent 暂不采集
         assert!(s.cpu_temp_c.is_none());
         assert!(s.disk_io_percent.is_none());
-        assert!(s.network_up_kbps.is_none());
-        assert!(s.network_down_kbps.is_none());
         // 内存% 应在 0~100
         let mem = s.memory_usage_percent.unwrap();
         assert!((0.0..=100.0).contains(&mem), "内存% 应在 0~100，实际 {mem}");
+        // 磁盘空间（Windows 上必有固定盘）：Some 时必须在 0~100
+        if let Some(space) = s.disk_space_percent {
+            assert!(
+                (0.0..=100.0).contains(&space),
+                "磁盘空间% 应在 0~100，实际 {space}"
+            );
+        }
+        // 网速首拍 None（建基线），之后 Some；不做具体值断言
     }
 
-    /// 序列化应当只输出基础字段 + memory_usage_percent；CPU% 首次为 None
-    /// 时被跳过；cpu_temp_c / disk_io / network_*_kbps 全部跳过。
+    /// 序列化应当只输出采集到的字段；CPU% 首次为 None 时被跳过；
+    /// cpu_temp_c / disk_io_percent 暂不采集，全部跳过。
     #[test]
     fn snapshot_serialization_omits_none_fields() {
         let s = snapshot();
@@ -266,10 +422,8 @@ mod tests {
         // 暂未实现的字段不应出现
         assert!(v.get("cpu_temp_c").is_none());
         assert!(v.get("disk_io_percent").is_none());
-        assert!(v.get("network_down_kbps").is_none());
-        assert!(v.get("network_up_kbps").is_none());
-        // cpu_usage_percent 可能出现也可能不出现，取决于 CpuSampler 是否
-        // 已经被本次测试链路预热过（其他测试先调过一次就有值）。
+        // cpu_usage_percent / disk_space_percent / network_*_kbps 可能出现
+        // 也可能不出现，取决于采样器是否已被本次测试链路预热过。
     }
 
     /// CPU 采样器：连续两次采样，第二次必须返回 Some（首拍基线被填）。

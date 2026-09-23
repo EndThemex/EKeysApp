@@ -35,7 +35,7 @@ impl Theme {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalConfig {
     #[serde(default)]
     pub last_port: Option<String>,
@@ -52,6 +52,32 @@ pub struct LocalConfig {
     /// 不清楚时主动暴露 Lock / 网络状态到固件。
     #[serde(default)]
     pub pc_status_push: bool,
+    /// 是否启用音乐状态向设备的周期推送（0x0E CMD_MUSIC_STATUS）。
+    /// 默认开启：音乐播放页（固件）没有状态推送就完全不可用。
+    #[serde(default = "default_true")]
+    pub music_status_push: bool,
+}
+
+/// serde 默认值：true（`#[serde(default)]` 只能给 false）。
+fn default_true() -> bool {
+    true
+}
+
+/// 手动实现 Default 而非派生：`music_status_push` 需要默认 true
+/// （派生 bool 默认 false，会与 `#[serde(default = "default_true")]`
+/// 产生"配置文件缺字段=true / 全新安装=false"的不一致）。
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            last_port: None,
+            auto_connect: false,
+            window_size: None,
+            language: Language::default(),
+            theme: Theme::default(),
+            pc_status_push: false,
+            music_status_push: true,
+        }
+    }
 }
 
 fn config_path() -> Option<PathBuf> {

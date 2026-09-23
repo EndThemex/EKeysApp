@@ -199,6 +199,17 @@ pub struct AppHandle {
     /// 由 Settings 页 → PC 状态 tab 切换；退出时由 `on_exit` 持久化到
     /// `LocalConfig::pc_status_push`，启动时由 `main.rs` 注入。
     pub pc_status_push_enabled: Arc<AtomicBool>,
+    /// 音乐状态周期推送的上次发送时刻（0x0E 节流，语义同 PC 状态推送）。
+    pub last_music_status_sent_at: Arc<Mutex<Option<Instant>>>,
+    /// 上一次成功推送给设备的音乐状态快照（diff 基线，语义同 PC 状态推送）。
+    pub last_music_status_sent: Arc<Mutex<Option<crate::protocol::MusicStatus>>>,
+    /// 是否启用音乐状态向设备的周期推送（`0x0E CMD_MUSIC_STATUS`）。
+    /// 默认开启：音乐播放页没有状态推送就是黑屏，开关意义在于用户手动
+    /// 关掉 SMTC 采集。退出时由 `on_exit` 持久化，启动时由 `main.rs` 注入。
+    pub music_status_push_enabled: Arc<AtomicBool>,
+    /// SMTC watcher 线程（media.rs::spawn_watcher）写入的最新播放快照。
+    /// UI tick 只读；`None` = watcher 首拍未完成（按无会话处理）。
+    pub latest_music_status: Arc<Mutex<Option<crate::protocol::MusicStatus>>>,
     /// 设备已进入（或正在进入）烧录模式。置位后跳过所有自动重连，
     /// 避免重连逻辑占用串口导致 esptool / idf.py 无法烧录。
     /// 置位时机：用户确认进入烧录模式、0x14 请求发出之前；
@@ -214,6 +225,10 @@ pub const PC_STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// 浮点字段（CPU% / 内存%）"显著变化"阈值。差值 ≤ 该值视为抖动、不推送。
 /// 0.5% 对应 OS 资源管理器刷新粒度，足以避免每秒都重发相同数据。
 pub const PC_STATUS_FLOAT_EPS: f32 = 0.5;
+
+/// 音乐状态周期性推送间隔。1 秒一拍：播放中 `position_ms` 每秒都在走，
+/// 固件进度条（秒粒度）依赖持续刷新；暂停/无会话时走 diff 稀疏推送。
+pub const MUSIC_STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct ReconnectJob {
@@ -320,6 +335,12 @@ impl AppHandle {
             // 默认关闭：避免用户不察觉时主动暴露 Lock / 网络状态到固件。
             // Settings → PC 状态 tab 可勾选打开。
             pc_status_push_enabled: Arc::new(AtomicBool::new(false)),
+            last_music_status_sent_at: Arc::new(Mutex::new(None)),
+            last_music_status_sent: Arc::new(Mutex::new(None)),
+            // 默认开启：音乐播放页（0x0e 断开 = "WAITING FOR PLAYER"）没有
+            // 推送就完全不可用；关闭入口留给 config.json。
+            music_status_push_enabled: Arc::new(AtomicBool::new(true)),
+            latest_music_status: Arc::new(Mutex::new(None)),
             download_mode_armed: Arc::new(AtomicBool::new(false)),
             audio: Arc::new(Mutex::new(AudioPadData::default())),
         }
@@ -996,6 +1017,9 @@ impl AppHandle {
         // diff 基线也清零：断开期间 PC 状态可能改变（用户切了输入法、
         // 网络断了），重连后必须重发最新快照而非与"几秒前的旧值"对比。
         *self.last_pc_status_sent.lock().unwrap() = None;
+        // 音乐状态推送基线同步清零（语义同 PC 状态：重连后立即补发基线）
+        *self.last_music_status_sent_at.lock().unwrap() = None;
+        *self.last_music_status_sent.lock().unwrap() = None;
         // 主动断开也清掉挂起重连任务，避免下一次连接时还在跑旧 job
         *self.pending_reconnect.lock().unwrap() = None;
         if let Some(p) = prev_port {
@@ -1304,8 +1328,19 @@ impl AppHandle {
         if pc_status_float_changed(old.memory_usage_percent, new.memory_usage_percent) {
             return true;
         }
-        // 暂未采集的扩展字段（cpu_temp_c / disk_io_percent / network_*_kbps）：
-        // 两侧通常都是 None，相等即不变；将来真接上采集后此函数需要再追加。
+        if pc_status_float_changed(old.disk_space_percent, new.disk_space_percent) {
+            return true;
+        }
+        // 网速每拍都在抖，接通采集后推送会接近节流间隔节奏（约 1Hz），
+        // 与音乐状态推送同量级，固件侧可承受
+        if pc_status_float_changed(old.network_up_kbps, new.network_up_kbps) {
+            return true;
+        }
+        if pc_status_float_changed(old.network_down_kbps, new.network_down_kbps) {
+            return true;
+        }
+        // 暂未采集的扩展字段（cpu_temp_c / disk_io_percent）：
+        // 两侧都是 None，相等即不变；将来真接上采集后此函数需要再追加。
         false
     }
 
@@ -1371,6 +1406,94 @@ impl AppHandle {
             Err(e) => {
                 // 失败只记 App 日志，不弹 Toast；下一拍再尝试。
                 self.log_kind(LogKind::App, format!("PC 状态推送失败: {e}"));
+            }
+        }
+    }
+
+    /// 立即向设备推送一次音乐状态（`0x0E CMD_MUSIC_STATUS`，单向不等响应）。
+    ///
+    /// 与 [`Self::send_pc_status`] 同构：body 包在 `data.music_status` 里，
+    /// seq=0 走 `lm.send()` 直接入队，固件回的 0x8E 回执由 UI 侧静默吞掉。
+    pub fn send_music_status(&self, snap: &crate::protocol::MusicStatus) -> Result<(), String> {
+        let data = serde_json::to_value(serde_json::json!({ "music_status": snap }))
+            .map_err(|e| format!("音乐状态序列化失败: {e}"))?;
+        self.with_link(|lm| {
+            let frame = Frame::request(crate::protocol::CMD_MUSIC_STATUS, 0, Some(data));
+            lm.send(frame);
+        })
+        .ok_or_else(|| "未连接".to_string())
+    }
+
+    /// 判断两份 MusicStatus 是否"显著差异"（diff 稀疏推送用）。
+    ///
+    /// `position_ms` 不参与比较：播放中位置每秒都变，走节拍强制发送；
+    /// 暂停/换歌/连接态变化才需要它之外的信号。
+    pub fn music_status_has_changed(
+        old: &crate::protocol::MusicStatus,
+        new: &crate::protocol::MusicStatus,
+    ) -> bool {
+        old.connected != new.connected
+            || old.is_playing != new.is_playing
+            || old.is_paused != new.is_paused
+            || old.can_prev != new.can_prev
+            || old.can_next != new.can_next
+            || old.duration_ms != new.duration_ms
+            || old.title != new.title
+            || old.artist != new.artist
+            || old.player != new.player
+    }
+
+    /// 每帧调用一次：1s 节拍读取 watcher 共享快照并推送（0x0E）。
+    ///
+    /// 推送策略：
+    /// - 播放中（is_playing）→ 每拍都发（进度条需要 position 持续刷新）；
+    /// - 暂停 / 无会话 → 与上次 diff，有显著变化才发（换歌、切播放器等）；
+    /// - watcher 首拍未完成（共享槽位 None）→ 按无会话基线发一次。
+    pub fn tick_music_status_push(&self) {
+        if !self.music_status_push_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let online = matches!(
+            *self.state.lock().unwrap(),
+            crate::link::ConnectionState::Online
+        );
+        if !online {
+            return;
+        }
+        let last_at = self.last_music_status_sent_at.lock().unwrap();
+        let due = last_at
+            .map(|t| t.elapsed() >= MUSIC_STATUS_PUSH_INTERVAL)
+            .unwrap_or(true);
+        drop(last_at);
+        if !due {
+            return;
+        }
+
+        // 读取 watcher 最新快照（拿不到锁按无会话处理，下一拍再试）
+        let new_snap = self
+            .latest_music_status
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_default();
+
+        let last_snap = self.last_music_status_sent.lock().unwrap().clone();
+        let changed = match &last_snap {
+            None => true, // 首拍：必须发基线
+            Some(prev) => new_snap.is_playing || Self::music_status_has_changed(prev, &new_snap),
+        };
+        if !changed {
+            return;
+        }
+
+        match self.send_music_status(&new_snap) {
+            Ok(()) => {
+                *self.last_music_status_sent.lock().unwrap() = Some(new_snap);
+                *self.last_music_status_sent_at.lock().unwrap() = Some(Instant::now());
+            }
+            Err(e) => {
+                // 失败只记日志不弹 Toast（周期推送噪声敏感）；下一拍再试。
+                self.log_kind(LogKind::App, format!("音乐状态推送失败: {e}"));
             }
         }
     }
@@ -1551,6 +1674,7 @@ mod tests {
             memory_usage_percent: mem,
             cpu_temp_c: None,
             disk_io_percent: None,
+            disk_space_percent: None,
             network_up_kbps: None,
             network_down_kbps: None,
         }

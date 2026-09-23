@@ -5,6 +5,7 @@
 mod app;
 mod config;
 mod link;
+mod media;
 mod ota;
 mod pc_status;
 mod protocol;
@@ -57,6 +58,13 @@ fn main() -> eframe::Result {
     handle
         .pc_status_push_enabled
         .store(cfg.pc_status_push, std::sync::atomic::Ordering::Relaxed);
+    // 音乐状态推送开关：默认开启（音乐播放页依赖它）；持久化字段。
+    handle
+        .music_status_push_enabled
+        .store(cfg.music_status_push, std::sync::atomic::Ordering::Relaxed);
+
+    // SMTC watcher：后台线程采集"正在播放"快照，UI tick 每帧读取共享槽位。
+    media::spawn_watcher(Arc::clone(&handle.latest_music_status));
 
     let mut options = eframe::NativeOptions::default();
     if let Some([w, h]) = cfg.window_size {

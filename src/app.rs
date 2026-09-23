@@ -4,8 +4,8 @@ use eframe::egui;
 
 use crate::link::LinkEvent;
 use crate::protocol::{
-    CMD_CONFIG_GET, CMD_PC_STATUS, CMD_PROFILE_STATE, DeviceSettings, ProfileState, response_cmd,
-    top_level,
+    CMD_CONFIG_GET, CMD_MUSIC_CONTROL, CMD_MUSIC_STATUS, CMD_PC_STATUS, CMD_PROFILE_STATE,
+    DeviceSettings, MusicControl, ProfileState, response_cmd, top_level,
 };
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
@@ -123,6 +123,8 @@ impl WxiApp {
                     } else if f.cmd == response_cmd(CMD_PC_STATUS) {
                         // PC 状态推送回执（0x8D seq=0）：无需处理；静默避免
                         // 每次推送都刷一条日志。
+                    } else if f.cmd == response_cmd(CMD_MUSIC_STATUS) {
+                        // 音乐状态推送回执（0x8E seq=0）：同上，静默。
                     } else {
                         self.handle
                             .log_kind(LogKind::Rx, format!("PUSH ← cmd=0x{:02X}（未处理）", f.cmd));
@@ -238,7 +240,22 @@ impl WxiApp {
                         .log_kind(LogKind::App, format!("Profile 状态解析失败: {e}"));
                 }
             },
-            // 0x0C 语音文本 / 0x0F 音乐控制：推送链路尚未接入 UI，
+            // 0x0F 音乐控制：固件音乐二级页旋钮/按钮 → 转系统媒体键。
+            // 解析失败只记日志（错误帧不影响其它功能）。
+            CMD_MUSIC_CONTROL => match top_level::<MusicControl>(&f) {
+                Ok(mc) => {
+                    crate::media::press_media_key(mc.action);
+                    self.handle.log_kind(
+                        LogKind::Rx,
+                        format!("Rx ← 音乐控制: {:?}", mc.action),
+                    );
+                }
+                Err(e) => {
+                    self.handle
+                        .log_kind(LogKind::App, format!("音乐控制解析失败: {e}"));
+                }
+            },
+            // 0x0C 语音文本：推送链路尚未接入 UI，
             // router 已记录帧头日志，这里只吞掉避免误报错误。
             _ => {}
         }
@@ -345,6 +362,10 @@ impl eframe::App for WxiApp {
                 .handle
                 .pc_status_push_enabled
                 .load(std::sync::atomic::Ordering::Relaxed),
+            music_status_push: self
+                .handle
+                .music_status_push_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
         };
         crate::config::save(&cfg);
     }
@@ -359,6 +380,9 @@ impl eframe::App for WxiApp {
         // PC 状态周期推送：Online 时每 1s 通过 0x0D 推给设备一次。
         // tick 内部自带节流，未到节拍时直接 return，CPU 开销可忽略。
         self.handle.tick_pc_status_push();
+        // 音乐状态周期推送：Online 时每 1s 通过 0x0E 推给设备一次（播放中），
+        // 暂停/无会话走 diff 稀疏推送；数据来自 SMTC watcher 线程共享槽位。
+        self.handle.tick_music_status_push();
         self.handle_shortcuts(ctx);
 
         // chrome（顶栏/侧栏/底栏）统一底色，与内容区形成清晰分区

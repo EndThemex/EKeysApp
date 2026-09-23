@@ -19,6 +19,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "windows 0.58.0",
  "windows-sys 0.52.0",
  "winres",
 ]

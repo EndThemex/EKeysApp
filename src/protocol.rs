@@ -938,6 +938,9 @@ pub struct PcStatus {
     pub cpu_temp_c: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_io_percent: Option<f32>,
+    /// 磁盘空间使用率（0~100，全固定盘加权；GetDiskFreeSpaceExW）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_space_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_up_kbps: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -991,6 +994,41 @@ impl Serialize for MusicControl {
         s.serialize_field("action", &self.action)?;
         s.end()
     }
+}
+
+// ---------- 0x0E 音乐状态（App → 固件） ----------
+
+/// `0x0E CMD_MUSIC_STATUS` 请求体（包在 `data.music_status` 里）。
+///
+/// 字段与固件 `cmd_music.cpp` 解析端一一对应；`title/artist/player` 固件侧
+/// 会做 UTF-8 安全截断（title 96B / artist 64B / player 32B），App 侧无需
+/// 严格限长。`lyric_*` 暂无数据源，保持空串（序列化时跳过）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MusicStatus {
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub is_playing: bool,
+    #[serde(default)]
+    pub is_paused: bool,
+    #[serde(default)]
+    pub can_prev: bool,
+    #[serde(default)]
+    pub can_next: bool,
+    #[serde(default)]
+    pub position_ms: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub player: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lyric_current: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lyric_next: String,
 }
 
 // ---------- 心跳响应 ----------
@@ -1506,6 +1544,12 @@ fn parse_normal_string(n: &str) -> KeyAction {
 fn function_label(f: &str) -> String {
     match f {
         "KEY_FUNCTION_ASR" => "语音识别 (ASR)".into(),
+        "KEY_FUNCTION_PAGE_PC" => "页面跳转: PC状态".into(),
+        "KEY_FUNCTION_PAGE_MUSIC" => "页面跳转: 音乐播放".into(),
+        "KEY_FUNCTION_PAGE_AUDIO" => "页面跳转: 音效板".into(),
+        "KEY_FUNCTION_PAGE_KEYMAP" => "页面跳转: 键映射".into(),
+        "KEY_FUNCTION_PAGE_SETTING" => "页面跳转: 设置".into(),
+        "KEY_FUNCTION_PAGE_HA" => "页面跳转: 智能家居".into(),
         "MEDIA_PLAY" | "MEDIA_PLAY_PAUSE" | "MEDIA_PlayPause" => "媒体: 播放/暂停".into(),
         "MEDIA_NEXT" | "MEDIA_Next" => "媒体: 下一曲".into(),
         "MEDIA_PREV" | "MEDIA_Prev" => "媒体: 上一曲".into(),

@@ -2510,18 +2510,54 @@ fn edit_action_params(
             *current = KeyAction::Text(text);
         }
         5 => {
-            // 固件功能串：KEY_FUNCTION_ASR 有内置行为；其它串原样透传
+            // 固件功能串：KEY_FUNCTION_ASR / KEY_FUNCTION_PAGE_* 有内置行为；其它串原样透传
             let mut f = match current {
                 KeyAction::Function(s) => s.clone(),
                 _ => String::new(),
             };
-            ui.label("内置功能：");
-            if ui
-                .selectable_label(f == "KEY_FUNCTION_ASR", "语音识别（ASR）")
-                .clicked()
-            {
-                f = "KEY_FUNCTION_ASR".to_string();
-            }
+            // 页面跳转：与固件 functionKeyJumpTarget 解析表同名（MainTask.cpp）
+            const PAGE_JUMP_TARGETS: &[(&str, &str)] = &[
+                ("KEY_FUNCTION_PAGE_PC", "跳转: PC状态页"),
+                ("KEY_FUNCTION_PAGE_MUSIC", "跳转: 音乐播放页"),
+                ("KEY_FUNCTION_PAGE_AUDIO", "跳转: 音效板页"),
+                ("KEY_FUNCTION_PAGE_KEYMAP", "跳转: 键映射页"),
+                ("KEY_FUNCTION_PAGE_SETTING", "跳转: 设置页"),
+                // 暂时隐藏 HA 页面入口（恢复时取消注释）：
+                // ("KEY_FUNCTION_PAGE_HA", "跳转: 智能家居页"),
+            ];
+            const ASR: &str = "KEY_FUNCTION_ASR";
+            const ASR_LABEL: &str = "语音识别（ASR）";
+
+            // 当前选中项显示名：命中内置用友好名，否则显示原串（自定义）
+            let selected = if f == ASR {
+                ASR_LABEL.to_string()
+            } else {
+                match PAGE_JUMP_TARGETS.iter().find(|(c, _)| *c == f) {
+                    Some((_, label)) => (*label).to_string(),
+                    None => {
+                        if f.is_empty() {
+                            "请选择…".to_string()
+                        } else {
+                            format!("自定义: {f}")
+                        }
+                    }
+                }
+            };
+
+            egui::ComboBox::from_label("内置功能：")
+                .selected_text(selected)
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    ui.set_min_width(180.0);
+                    if ui.selectable_label(f == ASR, ASR_LABEL).clicked() {
+                        f = ASR.to_string();
+                    }
+                    for (code, label) in PAGE_JUMP_TARGETS {
+                        if ui.selectable_label(f == *code, *label).clicked() {
+                            f = (*code).to_string();
+                        }
+                    }
+                });
             ui.add_space(4.0);
             ui.label("自定义功能串：");
             ui.add(
@@ -2532,8 +2568,8 @@ fn edit_action_params(
             f = f.trim().to_string();
             ui.label(
                 egui::RichText::new(
-                    "设备支持：语音识别、组合键串（如 Ctrl+c）、单独修饰键；\
-                     其它未识别的串按键无效果，但会原样保留不下丢。",
+                    "设备支持：语音识别、二级页跳转（6个页面）、组合键串（如 Ctrl+c）、单独修饰键；\
+                     其它未识别的串按键无效果，但会原样保留不丢失。",
                 )
                 .weak()
                 .size(10.0),
