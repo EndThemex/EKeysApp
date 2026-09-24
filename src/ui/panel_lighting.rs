@@ -99,6 +99,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
                     crate::ui::icons::LIGHT_SOUND,
                     "按 3×4 键位矩阵点亮：4 列对应 4 频段，音量决定每列点亮行数",
                 ),
+                (
+                    10,
+                    "渐变",
+                    crate::ui::icons::LIGHT_SOUND,
+                    "4 列对应 4 频段，按音量自下而上点亮：新灯为蓝色，音量越强底部逐渐变为暖色并向上推进",
+                ),
             ];
             mode_grid(ui, modes, &mut mode, crate::ui::ACCENT);
             if mode != draft.rgb_mode {

@@ -2030,7 +2030,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             ui.add_space(10.0);
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new("改动需点击下方「应用」按钮才会同步到设备。")
+                                egui::RichText::new("改动需点击下方「保存」按钮才会同步到设备。")
                                     .weak()
                                     .size(11.0),
                             );

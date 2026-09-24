@@ -34,7 +34,7 @@ mod platform {
     use super::*;
     use std::sync::{Arc, Mutex, OnceLock};
     use windows::core::Result as WinResult;
-    use windows::Foundation::TimeSpan;
+    use windows::Foundation::{DateTime, TimeSpan};
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSession,
         GlobalSystemMediaTransportControlsSessionManager,
@@ -84,6 +84,11 @@ mod platform {
         (ts.Duration.max(0) as u64) / 10_000
     }
 
+    /// DateTime（1601-01-01 起 100ns ticks）→ Unix 毫秒（两纪元相差 11644473600 秒）。
+    fn dt_to_unix_ms(dt: DateTime) -> i64 {
+        dt.UniversalTime / 10_000 - 11_644_473_600_000
+    }
+
     /// 采集单个会话的完整快照。子调用失败逐字段降级（如个别播放器
     /// 不给 Timeline），已拿到的字段仍然有效。
     fn session_snapshot(
@@ -99,6 +104,7 @@ mod platform {
         }
 
         // 播放状态 + 可用控制
+        let mut playback_rate: Option<f64> = None;
         if let Ok(info) = session.GetPlaybackInfo() {
             if let Ok(status) = info.PlaybackStatus() {
                 st.is_playing =
@@ -110,12 +116,38 @@ mod platform {
                 st.can_prev = controls.IsPreviousEnabled().unwrap_or(false);
                 st.can_next = controls.IsNextEnabled().unwrap_or(false);
             }
+            playback_rate = info.PlaybackRate().ok().and_then(|r| r.Value().ok());
         }
 
         // 进度 / 时长（部分播放器不支持 → 保持 0，固件显示 "--:--"）
         if let Ok(timeline) = session.GetTimelineProperties() {
             st.position_ms = timeline.Position().map(ts_to_ms).unwrap_or(0);
             st.duration_ms = timeline.EndTime().map(ts_to_ms).unwrap_or(0);
+
+            // SMTC 的 Position 是 LastUpdatedTime 时刻的静态快照：多数播放器
+            // 播放中不主动刷新（只在 seek / 暂停 / 切歌时更新一次），直接透传
+            // 会导致设备端进度条播放中不走、暂停时才跳变。播放中按官方推荐
+            // 方式用 LastUpdatedTime + PlaybackRate 外推到当前时刻。
+            if st.is_playing {
+                if let Ok(last_updated) = timeline.LastUpdatedTime() {
+                    let rate = playback_rate
+                        .filter(|r| *r > 0.0)
+                        .unwrap_or(1.0);
+                    let last_ms = dt_to_unix_ms(last_updated);
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let elapsed_ms = now_ms - last_ms;
+                    // LastUpdatedTime 异常（未来时刻 / 垃圾值）时不外推，按原始值显示
+                    if elapsed_ms > 0 && elapsed_ms < 24 * 3600 * 1000 {
+                        st.position_ms += (elapsed_ms as f64 * rate) as u64;
+                    }
+                }
+                if st.duration_ms > 0 {
+                    st.position_ms = st.position_ms.min(st.duration_ms);
+                }
+            }
         }
 
         // 播放器标识（AUMID，如 "Spotify.exe"）；截到文件名部分更友好

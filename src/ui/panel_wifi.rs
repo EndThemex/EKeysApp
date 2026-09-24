@@ -59,16 +59,29 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
 
             ui.add_space(6.0);
             ui.label("网络密码（最多 64 个字符）");
-            let mut pw = if draft.wifi_password.is_empty() {
-                snapshot.wifi_password.clone()
-            } else {
+            // 设备回读的密码在 apply_settings_snapshot 中被 mask_sensitive 替换为 "***"，
+            // 不能用 is_empty() 当"未编辑"哨兵：
+            //   - 用户编辑后 draft="新密码" 与 snapshot="***" 永远不等 → 「应用下发」按钮一直可点
+            //   - 用户清空后 draft="" 触发 is_empty() 回填 snapshot="***" → `•••` 立刻重新出现
+            //
+            // 三态判断：
+            // - 未编辑：draft == snapshot（都是 "***"）→ 显示 "•••"（密码模式渲染 mask）
+            // - 已编辑：draft != snapshot 且 draft 非空 → 显示 draft 真值
+            // - 用户已清空：draft != snapshot 且 draft 为空 → 显示空 + hint_text
+            //
+            // id_salt 显式设置，防止 ScrollArea 重排导致 auto_id 漂移、TextEditState
+            // （cursor / selection / undoer）丢失引发渲染异常。
+            let mut pw = if draft.wifi_password != snapshot.wifi_password {
                 draft.wifi_password.clone()
+            } else {
+                snapshot.wifi_password.clone()
             };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut pw)
                     .hint_text("请输入 WiFi 密码…")
                     .password(true)
-                    .desired_width(280.0),
+                    .desired_width(280.0)
+                    .id_salt("wifi_password"),
             );
             if resp.changed() {
                 draft.wifi_password = pw;

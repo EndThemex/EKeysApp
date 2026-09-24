@@ -127,10 +127,16 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
 
             ui.add_space(6.0);
             ui.label("SecretKey（最多 64 个字符）");
-            let mut sk = if draft.voice_tencent_secret_key.is_empty() {
-                snapshot.voice_tencent_secret_key.clone()
-            } else {
+            // 与上方 SecretId / WiFi 密码一致：用"草稿 != 旧快照"判断是否被编辑。
+            // 不能用 is_empty() 当"未编辑"哨兵——快照值是掩码 "***"（非空），
+            // 用户把默认值删光后 draft="" 会被误判为"未编辑"，下一帧又用
+            // 快照值回填，表现为"删掉的密码自动加回来"。
+            let sk_modified =
+                draft.voice_tencent_secret_key != snapshot.voice_tencent_secret_key;
+            let mut sk = if sk_modified {
                 draft.voice_tencent_secret_key.clone()
+            } else {
+                snapshot.voice_tencent_secret_key.clone()
             };
             if ui
                 .add(

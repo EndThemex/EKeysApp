@@ -73,9 +73,6 @@ pub struct SettingsPanelState {
     pub fw_size: u64,
     /// 本机临时固件 HTTP 服务（Some = OTA 进行中）
     pub fw_server: Option<crate::ota::FirmwareServer>,
-    /// 固件信息查询的异步结果接收端（Some = 查询进行中，每帧轮询）
-    pub fw_query_rx:
-        Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
     /// OTA 触发请求的异步结果接收端（Some = 等待设备确认，每帧轮询）
     pub fw_ota_rx:
         Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
@@ -639,8 +636,6 @@ fn firmware_tab(
     st: &mut SettingsPanelState,
     handle: &AppHandle,
 ) {
-    use crate::protocol::CMD_FIRMWARE_INFO;
-    use std::time::Duration;
     use std::sync::mpsc::TryRecvError;
 
     let online = handle.state.lock().unwrap().is_online();
@@ -652,51 +647,6 @@ fn firmware_tab(
     }
 
     // ---- 异步结果回收（避免同步 request 阻塞 UI 线程导致窗口卡死）----
-
-    // 固件信息查询结果
-    if st.fw_query_rx.is_some() {
-        let outcome = st.fw_query_rx.as_ref().unwrap().try_recv();
-        match outcome {
-            Ok(Ok(frame)) => {
-                if let Some(v) = frame.extra_value("firmware") {
-                    match serde_json::from_value::<crate::protocol::FirmwareInfo>(v.clone())
-                    {
-                        Ok(fw) => {
-                            handle.device_info.lock().unwrap().firmware_version =
-                                fw.version.clone();
-                            handle.log_kind(
-                                crate::state::LogKind::Rx,
-                                format!(
-                                    "GET → 固件信息 v{}（{} {}）",
-                                    fw.version, fw.build_date, fw.build_time
-                                ),
-                            );
-                        }
-                        Err(e) => {
-                            handle.log_kind(
-                                crate::state::LogKind::App,
-                                format!("固件信息解析失败: {e}"),
-                            );
-                        }
-                    }
-                } else {
-                    handle.log_kind(crate::state::LogKind::App, "固件信息响应缺 firmware 字段");
-                }
-                st.fw_query_rx = None;
-            }
-            Ok(Err(e)) => {
-                handle.log_kind(
-                    crate::state::LogKind::App,
-                    format!("查询固件信息失败: {e}"),
-                );
-                st.fw_query_rx = None;
-            }
-            Err(TryRecvError::Empty) => {} // 仍在等待，下一帧继续
-            Err(TryRecvError::Disconnected) => {
-                st.fw_query_rx = None;
-            }
-        }
-    }
 
     // OTA 触发结果（设备确认 or 拒绝）
     if st.fw_ota_rx.is_some() {
@@ -842,23 +792,6 @@ fn firmware_tab(
                 });
                 ui.end_row();
             });
-        // 异步查询：请求发出后立即返回，结果由上方每帧轮询回收
-        let querying = st.fw_query_rx.is_some();
-        if ui
-            .add_enabled(
-                online && !querying,
-                egui::Button::new(if querying {
-                    "查询中…"
-                } else {
-                    "查询固件信息"
-                }),
-            )
-            .clicked()
-        {
-            st.fw_query_rx = handle.with_link(|lm| {
-                lm.request_async(CMD_FIRMWARE_INFO, None, Duration::from_millis(2000))
-            });
-        }
     });
 
     ui.add_space(8.0);
@@ -903,10 +836,7 @@ fn firmware_tab(
         ui.add_space(6.0);
 
         // 2) 触发升级
-        let ready = online
-            && st.fw_bytes.is_some()
-            && st.fw_ota_rx.is_none()
-            && st.fw_query_rx.is_none();
+        let ready = online && st.fw_bytes.is_some() && st.fw_ota_rx.is_none();
         ui.horizontal(|ui| {
             let starting = st.fw_ota_rx.is_some();
             if ui
