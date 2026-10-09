@@ -2522,8 +2522,7 @@ fn edit_action_params(
                 ("KEY_FUNCTION_PAGE_AUDIO", "跳转: 音效板页"),
                 ("KEY_FUNCTION_PAGE_KEYMAP", "跳转: 键映射页"),
                 ("KEY_FUNCTION_PAGE_SETTING", "跳转: 设置页"),
-                // 暂时隐藏 HA 页面入口（恢复时取消注释）：
-                // ("KEY_FUNCTION_PAGE_HA", "跳转: 智能家居页"),
+                ("KEY_FUNCTION_PAGE_HA", "跳转: 智能家居页"),
             ];
             const ASR: &str = "KEY_FUNCTION_ASR";
             const ASR_LABEL: &str = "语音识别（ASR）";
