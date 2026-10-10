@@ -50,6 +50,9 @@ pub struct KeymapPanelState {
     pub edit_channel: u8,
     /// Drawer 普通键/组合键分支是否进入"按下捕获"模式
     pub capture_keyboard: bool,
+    /// 同按捕获期间的修饰键状态位掩码（MOD_* 位），用于上升沿检测
+    /// "本帧新按下了哪个修饰键"。进入捕获时初始化为当前修饰键状态。
+    pub capture_mod_state: u8,
     /// 当前是否处于 Profile 重命名模式
     pub renaming_profile: bool,
     /// 重命名模式下 TextEdit 的临时字符串
@@ -1758,6 +1761,9 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                     });
                     ui.horizontal(|ui| {
                         if ui.button("保存").clicked() {
+                            // 保存即退出按键捕获（捕获中按 Esc 之外的自然收尾路径）
+                            st.capture_keyboard = false;
+                            st.capture_mod_state = 0;
                             let to_save = st.draft_action.clone().unwrap_or(KeyAction::None);
                             let mut d = handle.keymap_draft.lock().unwrap();
                             let active = d.active_profile;
@@ -2166,6 +2172,66 @@ fn capture_combo(ctx: &egui::Context) -> Option<Option<(u8, u16)>> {
     })
 }
 
+/// egui 修饰键状态 → MOD_* 位掩码（捕获边沿检测用）。
+/// Windows 上 Win 键在 egui 输入里不可见（egui-winit 只回填 mac_cmd /
+/// command），故只覆盖 Ctrl / Shift / Alt / macOS Cmd。
+fn modifiers_bitmask(m: egui::Modifiers) -> u8 {
+    (u8::from(m.ctrl) << 0)
+        | (u8::from(m.shift) << 1)
+        | (u8::from(m.alt) << 2)
+        | (u8::from(m.mac_cmd) << 3)
+}
+
+/// 多键同按捕获：扫描本帧按键事件与修饰键状态，把按下的键（去重）并入
+/// `codes`。修饰键（Ctrl/Shift/Alt）本身按下时也作为成员并入——egui 0.33
+/// 的修饰键按下不产生 `Event::Key`，只能经 `i.modifiers` 上升沿识别，
+/// 映射到左侧变体 0xE0~0xE3（固件 normal 通道逐段 press，字面量可无损
+/// 解析）。`mod_state` 为跨帧边沿检测状态。返回 `true` 表示用户按下了
+/// Esc，应退出捕获模式（键已并入的不回滚）。
+fn capture_chord_keys(ctx: &egui::Context, codes: &mut Vec<u16>, mod_state: &mut u8) -> bool {
+    let mut esc = false;
+    ctx.input(|i| {
+        // 修饰键边沿检测：本帧新按下的修饰键并入组合（egui Key 枚举无修饰键变体）
+        let cur = modifiers_bitmask(i.modifiers);
+        let rising = cur & !*mod_state;
+        for (bit, code) in [
+            (MOD_CTRL, 0xE0u16),
+            (MOD_SHIFT, 0xE1),
+            (MOD_ALT, 0xE2),
+            (MOD_GUI, 0xE3),
+        ] {
+            if rising & bit != 0 && !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+        *mod_state = cur;
+
+        for event in &i.events {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat,
+                ..
+            } = event
+            {
+                if *repeat {
+                    continue;
+                }
+                if *key == egui::Key::Escape {
+                    esc = true;
+                    continue;
+                }
+                if let Some(c) = egui_key_to_hid(*key) {
+                    if !codes.contains(&c) {
+                        codes.push(c);
+                    }
+                }
+            }
+        }
+    });
+    esc
+}
+
 /// 提交 Profile 重命名。
 ///
 /// 已连接设备时走 `0x15 CMD_PROFILE_NAME_SET` 同步到固件（持久化到
@@ -2204,7 +2270,9 @@ fn commit_rename(handle: &AppHandle, draft: &mut KeymapData, idx: u8, name: &str
 }
 
 /// "按任意键捕获" 提示条（激活 / 非激活两态），点击切换进入捕获模式。
-fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
+/// `chord_mode` = 多键同按模式：捕获不自动结束，可连续按多个键逐个并入，
+/// 按 Esc / 取消结束；普通模式捕获到一个键即结束。
+fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState, chord_mode: bool) {
     if st.capture_keyboard {
         // 激活态：明显的捕获提示条（配色随主题：深色 = 深琥珀底 + 白字，
         // 浅色 = 浅琥珀底 + 深琥珀字，保证 weak 提示在底色上可读）。
@@ -2243,17 +2311,17 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("●").size(16.0).color(border_color));
                     ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new("正在记录按键…")
-                                .strong()
-                                .color(title_color),
-                        );
+                        let (title, hint) = if chord_mode {
+                            (
+                                "正在记录同按按键…",
+                                "依次按下要加入的键（可含 Ctrl/Shift/Alt）· 按 Esc 结束",
+                            )
+                        } else {
+                            ("正在记录按键…", "按 Esc 退出")
+                        };
+                        ui.label(egui::RichText::new(title).strong().color(title_color));
                         // 显式配色：weak() 取主题弱文字色，在异色底上会失配
-                        ui.label(
-                            egui::RichText::new("按 Esc 退出")
-                                .size(10.0)
-                                .color(hint_color),
-                        );
+                        ui.label(egui::RichText::new(hint).size(10.0).color(hint_color));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("取消").on_hover_text("退出按键捕获").clicked() {
@@ -2288,22 +2356,25 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
                             .color(crate::ui::ACCENT),
                     );
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("记录一次按键").strong());
-                        ui.label(
-                            egui::RichText::new("把键盘按下的键作为此按键的触发行为")
-                                .weak()
-                                .size(10.0),
-                        );
+                        let (title, sub) = if chord_mode {
+                            ("记录同按按键", "按下键盘上的键，直接加入同按组合")
+                        } else {
+                            ("记录一次按键", "把键盘按下的键作为此按键的触发行为")
+                        };
+                        ui.label(egui::RichText::new(title).strong());
+                        ui.label(egui::RichText::new(sub).weak().size(10.0));
                     });
                 });
             });
-        // 点击整块框进入捕获
+        // 点击整块框进入捕获（修饰键状态初始化为当前值，避免已在按住的
+        // 修饰键在首帧被上升沿误判为新按下）
         let rect = resp.response.rect;
         if ui
             .interact(rect, ui.id().with("capture-bar"), Sense::click())
             .clicked()
         {
             st.capture_keyboard = true;
+            st.capture_mod_state = ui.ctx().input(|i| modifiers_bitmask(i.modifiers));
         }
     }
 }
@@ -2343,7 +2414,7 @@ fn edit_action_params(
 
             // 捕获模式：捕获到的 (mods, code) 只取 code（普通键不带修饰）
             ui.add_space(4.0);
-            capture_bar_ui(ui, st);
+            capture_bar_ui(ui, st, false);
             if st.capture_keyboard {
                 if let Some(res) = capture_combo(ui.ctx()) {
                     st.capture_keyboard = false;
@@ -2386,7 +2457,7 @@ fn edit_action_params(
 
             // 捕获模式：修饰键取按下时的实际组合（如按住 Ctrl 再按 S → Ctrl+S）
             ui.add_space(4.0);
-            capture_bar_ui(ui, st);
+            capture_bar_ui(ui, st, false);
             if st.capture_keyboard {
                 if let Some(res) = capture_combo(ui.ctx()) {
                     st.capture_keyboard = false;
@@ -2466,6 +2537,17 @@ fn edit_action_params(
             if add != 0 {
                 if !codes.contains(&add) {
                     codes.push(add);
+                }
+            }
+
+            // 捕获模式：把按下的键依次并入同按组合（去重，修饰键本身也算
+            // 成员），可连续添加，按 Esc 或「取消」结束记录。
+            ui.add_space(4.0);
+            capture_bar_ui(ui, st, true);
+            if st.capture_keyboard {
+                if capture_chord_keys(ui.ctx(), &mut codes, &mut st.capture_mod_state) {
+                    st.capture_keyboard = false;
+                    st.capture_mod_state = 0;
                 }
             }
             *current = KeyAction::Chord(codes);
