@@ -23,7 +23,6 @@ pub const SCAN: &str = r::ARROW_CLOCKWISE;
 pub const UPTIME: &str = r::TIMER;
 pub const TX: &str = r::ARROW_UP;
 pub const RX: &str = r::ARROW_DOWN;
-pub const HEARTBEAT: &str = r::HEART;
 
 // Toast
 pub const TOAST_INFO: &str = r::INFO;

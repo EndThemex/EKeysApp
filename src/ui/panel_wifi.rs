@@ -13,12 +13,11 @@ pub struct WifiPanelState;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
     ui.heading("无线网络");
-    ui.label("无线网络配置（修改后下次重启生效）");
+    ui.label(egui::RichText::new("修改后下次重启生效").weak().size(12.0));
     ui.add_space(4.0);
 
     settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {
         ui.group(|ui| {
-            ui.label("无线网络开关");
             let mut on = if draft.wifi_switch != 0 || snapshot.wifi_switch != 0 {
                 draft.wifi_switch != 0
             } else {
@@ -29,7 +28,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("与电脑的双向连接");
             let mut host = if draft.connect_host != 0 || snapshot.connect_host != 0 {
                 draft.connect_host != 0
             } else {

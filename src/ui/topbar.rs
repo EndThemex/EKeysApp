@@ -208,11 +208,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
 
         ui.add_space(6.0);
 
-        // 端口名（带波特率）
+        // 端口名（波特率固定 115200，不再重复展示）
         let port_text = match port_name {
-            Some(name) => format!("{name} · 115200"),
+            Some(name) => name.to_string(),
             None => match &st.selected {
-                Some(name) => format!("{name} · 115200"),
+                Some(name) => name.clone(),
                 None => "(未选择端口)".to_string(),
             },
         };

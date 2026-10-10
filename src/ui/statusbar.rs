@@ -1,4 +1,4 @@
-//! 底部状态条：Uptime、收发计数、心跳间隔。
+//! 底部状态条：Uptime、收发计数。
 //! （连接状态由顶栏胶囊展示，这里只放遥测信息，避免重复。）
 
 use std::sync::atomic::Ordering;
@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::link::heartbeat::HEARTBEAT_INTERVAL_MS;
 use crate::state::AppHandle;
 
 fn icon_label(ui: &mut egui::Ui, icon: &str, text: &str) {
@@ -46,13 +45,5 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
         icon_label(ui, crate::ui::icons::UPTIME, &format!("运行时长 {uptime}"));
         icon_label(ui, crate::ui::icons::TX, &format!("已发送 {tx}"));
         icon_label(ui, crate::ui::icons::RX, &format!("已接收 {rx}"));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // 心跳间隔当前硬编码 1s；预留接口给 UI 配置（见 heartbeat.rs 注释）。
-            icon_label(
-                ui,
-                crate::ui::icons::HEARTBEAT,
-                &format!("心跳 {}秒", HEARTBEAT_INTERVAL_MS / 1000),
-            );
-        });
     });
 }

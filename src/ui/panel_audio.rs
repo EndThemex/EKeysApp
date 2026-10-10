@@ -81,9 +81,13 @@ fn storage_card(handle: &AppHandle, ui: &mut egui::Ui) {
         ui.add(
             egui::ProgressBar::new(frac)
                 .show_percentage()
-                .text(format!("已用 {} / {} KB", used / 1024, total / 1024)),
+                .text(format!(
+                    "已用 {} / {} KB（剩余 {} KB）",
+                    used / 1024,
+                    total / 1024,
+                    free / 1024
+                )),
         );
-        ui.label(format!("剩余 {} KB", free / 1024));
     });
 }
 

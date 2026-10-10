@@ -9,8 +9,8 @@ use crate::protocol::{
 };
 use crate::state::{AppHandle, LogKind, Page, ToastKind, UiConfirmKind, UiEvent};
 use crate::ui::{
-    panel_about, panel_audio, panel_keymap, panel_lighting, panel_log, panel_settings,
-    panel_voice, panel_wifi, sidenav, statusbar, topbar,
+    panel_about, panel_audio, panel_keymap, panel_lighting, panel_log, panel_settings, panel_voice,
+    panel_wifi, sidenav, statusbar, topbar,
     widgets::{ConfirmOutcome, Toast, push_toast, show_confirm, show_local_settings, show_toasts},
 };
 
@@ -245,10 +245,8 @@ impl WxiApp {
             CMD_MUSIC_CONTROL => match top_level::<MusicControl>(&f) {
                 Ok(mc) => {
                     crate::media::press_media_key(mc.action);
-                    self.handle.log_kind(
-                        LogKind::Rx,
-                        format!("Rx ← 音乐控制: {:?}", mc.action),
-                    );
+                    self.handle
+                        .log_kind(LogKind::Rx, format!("Rx ← 音乐控制: {:?}", mc.action));
                 }
                 Err(e) => {
                     self.handle
@@ -287,7 +285,7 @@ impl WxiApp {
                         self.confirm_title = "进入烧录模式".into();
                         self.confirm_body = "设备将立即复位进入烧录（下载）模式，当前连接会断开，\
                                              之后可用 idf.py flash / esptool 烧录固件。\
-                                             烧录完成后请在「连接」页手动重连。是否继续？"
+                                             烧录完成后请在顶栏重新连接设备。是否继续？"
                             .into();
                         self.confirm_kind = Some(kind);
                         self.confirm_open = true;

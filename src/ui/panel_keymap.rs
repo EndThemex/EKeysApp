@@ -167,8 +167,8 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
             ui.separator();
             ui.add_space(4.0);
 
-            // 图例
-            ui.horizontal(|ui| {
+            // 图例：标记规则说明（键帽四角含义）收进行级 hover，不再单独占一行。
+            let legend_resp = ui.horizontal(|ui| {
                 legend_dot(
                     ui,
                     Color32::from_rgb(0x28, 0x2C, 0x36),
@@ -203,15 +203,10 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                 fun_tag(ui, 2);
                 ui.label(egui::RichText::new("FUN 键 2").size(11.0));
             });
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(
-                    "键帽左上「F1」/ 右上「F2」= 配置了对应 FUN 层行为；右下三角 = 该键本身是 FUN 键；左下琥珀小点 = 有未同步的修改；右键键帽可快速分配 FUN 键",
-                )
-                .weak()
-                .size(11.0),
+            legend_resp.response.on_hover_text(
+                "键帽左上「F1」/ 右上「F2」= 配置了对应 FUN 层行为；\
+                 右下三角 = 该键本身是 FUN 键；左下琥珀小点 = 有未同步的修改",
             );
-            ui.add_space(4.0);
         });
 
     // 中：键盘图 + Drawer；外层 ScrollArea 保留以便窗口太矮时滚动
@@ -800,10 +795,7 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
                     Color32::from_rgb(0x1A, 0x1D, 0x24),
                 ),
             ))
-            .on_hover_text(
-                "按住 FUN 键再按其它键，触发该键的 FUN 层行为。\n\
-                 右键键盘上的键帽可快速分配 / 取消 FUN 键。",
-            );
+            .on_hover_text("按住 FUN 键再按其它键，触发该键的 FUN 层行为。");
             ui.add_space(4.0);
 
             let row_h = {
@@ -1421,8 +1413,8 @@ fn draw_key(
     let clicked = resp.clicked();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let status = if is_pending { "待下发" } else { "已应用" };
         // FUN 组合层行为摘要（层激活且本键不是 FUN 键时才有意义）
+        // 同步状态由键帽左下角圆点表达，tooltip 不再重复。
         let mut combo_info = String::new();
         for (l, name, active) in [
             (LAYER_FUN1, "FUN1", fun.layer1_active),
@@ -1447,11 +1439,8 @@ fn draw_key(
             ""
         };
         resp.clone().on_hover_text(format!(
-            "「{label}」第 {row} 行 第 {col} 列 · {status} · 当前行为：{behavior}{combo_info}{fun_note}",
+            "「{label}」当前行为：{behavior}{combo_info}{fun_note}",
             label = slot.label,
-            row = slot.row,
-            col = slot.col,
-            status = status,
             behavior = binding
                 .map(|b| b.label())
                 .unwrap_or_else(|| "未设置".into()),

@@ -10,11 +10,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelStat
         ui.add_space(40.0);
         ui.heading("EKeys 桌面端");
         ui.add_space(8.0);
-        ui.label(format!("版本  {}（wxi）", env!("CARGO_PKG_VERSION")));
-        ui.label("适配固件协议  v0.1（阶段 04）");
-        ui.label("对接设备  ESP32-S3 USB CDC（VID 0x303A）");
-        ui.add_space(16.0);
-        ui.label("由 Rust 与 egui 框架构建");
+        ui.label(format!("版本  {}", env!("CARGO_PKG_VERSION")));
+        ui.label("适配固件协议  v0.1");
     });
 
     ui.add_space(24.0);
@@ -89,28 +86,23 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelStat
                 return;
             };
 
+            // 精简为常用三项；VID/PID/序列号等描述符细节收进 hover。
+            let details = format!(
+                "厂商 ID：{}\n产品 ID：{}\n序列号：{}",
+                p.vid
+                    .map(|v| format!("0x{v:04X}"))
+                    .unwrap_or_else(|| "—".into()),
+                p.pid
+                    .map(|v| format!("0x{v:04X}"))
+                    .unwrap_or_else(|| "—".into()),
+                p.serial_number.clone().unwrap_or_else(|| "—".into()),
+            );
             egui::Grid::new("about_port_info")
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
                     ui.label("端口名");
-                    ui.label(name);
-                    ui.end_row();
-
-                    ui.label("厂商 ID");
-                    ui.label(
-                        p.vid
-                            .map(|v| format!("0x{v:04X}"))
-                            .unwrap_or_else(|| "—".into()),
-                    );
-                    ui.end_row();
-
-                    ui.label("产品 ID");
-                    ui.label(
-                        p.pid
-                            .map(|v| format!("0x{v:04X}"))
-                            .unwrap_or_else(|| "—".into()),
-                    );
+                    ui.label(&name);
                     ui.end_row();
 
                     ui.label("厂商");
@@ -118,11 +110,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelStat
                     ui.end_row();
 
                     ui.label("产品");
-                    ui.label(p.product.clone().unwrap_or_else(|| "—".into()));
-                    ui.end_row();
-
-                    ui.label("序列号");
-                    ui.label(p.serial_number.clone().unwrap_or_else(|| "—".into()));
+                    ui.label(p.product.clone().unwrap_or_else(|| "—".into()))
+                        .on_hover_text(&details);
                     ui.end_row();
                 });
         });

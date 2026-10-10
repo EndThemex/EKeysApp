@@ -157,20 +157,7 @@ pub fn show_local_settings(
         .default_pos([0.0, 0.0])
         .default_size([420.0, 360.0])
         .show(ctx, |ui| {
-            // 1) 自动连接
-            ui.group(|ui| {
-                ui.strong("连接");
-                let mut ac = *handle.auto_connect.lock().unwrap();
-                if ui
-                    .checkbox(&mut ac, "启动时自动连接上次使用的端口")
-                    .changed()
-                {
-                    *handle.auto_connect.lock().unwrap() = ac;
-                }
-            });
-
-            // 2) 语言
-            ui.add_space(4.0);
+            // 1) 语言
             ui.group(|ui| {
                 ui.strong("语言");
                 let mut lang = handle.language();
@@ -186,7 +173,7 @@ pub fn show_local_settings(
                 ui.label("（目前仅提供中文界面；切换到英文后部分文案暂未翻译）");
             });
 
-            // 3) 主题：两段式按钮，选中态填品牌色，与 Settings 页 tab 同款风格。
+            // 2) 主题：两段式按钮，选中态填品牌色，与 Settings 页 tab 同款风格。
             ui.add_space(4.0);
             ui.group(|ui| {
                 ui.strong("主题");
@@ -216,13 +203,7 @@ pub fn show_local_settings(
                 });
             });
 
-            // 4) 窗口大小（只读展示）
-            ui.add_space(4.0);
-            ui.group(|ui| {
-                ui.strong("窗口");
-                ui.label("当前窗口大小会在退出时自动保存，下次启动时恢复。");
-            });
-
+            // 3) 关闭
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("关闭").clicked() {
@@ -449,51 +430,59 @@ pub fn show_diff_bar(
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
+                    // 展示用中文标签 + 可读值，不暴露协议字段名。
                     if mask.test(crate::protocol::F_WIFI_SWITCH) {
-                        ui.label(format!("wifi_switch={}", diff.wifi_switch));
+                        ui.label(format!("WiFi 开关 → {}", on_off(diff.wifi_switch)));
                     }
                     if mask.test(crate::protocol::F_WIFI_SSID) {
-                        ui.label(format!("wifi_ssid={}", diff.wifi_ssid));
+                        ui.label(format!("网络名称 → {}", diff.wifi_ssid));
                     }
                     if mask.test(crate::protocol::F_WIFI_PASSWORD) {
                         // 密码不下发明文到明细条，仅提示已修改。
-                        ui.label("wifi_password=******".to_string());
+                        ui.label("网络密码 → 已修改");
                     }
                     if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
-                        ui.label(format!("tft_brightness={}", diff.tft_brightness));
+                        ui.label(format!("屏幕背光 → {}", diff.tft_brightness));
                     }
                     if mask.test(crate::protocol::F_TFT_THEME) {
-                        ui.label(format!("tft_theme={}", diff.tft_theme));
-                    }
-                    if mask.test(crate::protocol::F_WORK_MODE) {
-                        ui.label(format!("work_mode={}", diff.work_mode));
-                    }
-                    if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
                         ui.label(format!(
-                            "active_keymap_profile={}",
-                            diff.active_keymap_profile
+                            "屏幕主题 → {}",
+                            if diff.tft_theme == 0 {
+                                "深色"
+                            } else {
+                                "浅色"
+                            }
                         ));
                     }
+                    if mask.test(crate::protocol::F_WORK_MODE) {
+                        ui.label(format!("连接方式 → {}", work_mode_label(diff.work_mode)));
+                    }
+                    if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
+                        ui.label(format!("按键配置 → 配置 {}", diff.active_keymap_profile));
+                    }
                     if mask.test(crate::protocol::F_DEVICE_VOLUME) {
-                        ui.label(format!("device_volume={}", diff.device_volume));
+                        ui.label(format!("音量 → {}", diff.device_volume));
                     }
                     if mask.test(crate::protocol::F_AUDIO_ENABLE) {
-                        ui.label(format!("audio_enable={}", diff.audio_enable));
+                        ui.label(format!("音频输出 → {}", on_off(diff.audio_enable)));
                     }
                     if mask.test(crate::protocol::F_POWER_MODE) {
-                        ui.label(format!("power_mode={}", diff.power_mode));
+                        ui.label(format!("节能策略 → {}", power_mode_label(diff.power_mode)));
                     }
                     if mask.test(crate::protocol::F_RGB_MODE) {
-                        ui.label(format!("rgb_mode={}", diff.rgb_mode));
+                        ui.label(format!("灯效模式 → {}", rgb_mode_label(diff.rgb_mode)));
                     }
                     if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
-                        ui.label(format!("rgb_single_color={}", diff.rgb_single_color));
+                        ui.label(format!("单色颜色 → 调色板 {}", diff.rgb_single_color));
                     }
                     if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
-                        ui.label(format!("rgb_click_mode={}", diff.rgb_click_mode));
+                        ui.label(format!(
+                            "按下灯光反馈 → {}",
+                            rgb_click_label(diff.rgb_click_mode)
+                        ));
                     }
                     if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
-                        ui.label(format!("rgb_brightness={}", diff.rgb_brightness));
+                        ui.label(format!("整体亮度 → {}", diff.rgb_brightness));
                     }
                 });
             }
@@ -512,6 +501,58 @@ fn diff_field_count(_d: &DeviceSettings, mask: FieldMask) -> usize {
     // 与 diff() 的 mask 严格对齐：count = mask 中置位的位数。
     // 这样当 diff 含合法 0 / 空串字段时也能正确计入"几处变更"。
     mask.bits().count_ones() as usize
+}
+
+/// 0/1 开关值 → 中文（Diff 明细条展示用）。
+fn on_off(v: i32) -> &'static str {
+    if v != 0 { "开" } else { "关" }
+}
+
+/// 工作模式值 → 中文（与 Settings 页下拉选项一致）。
+fn work_mode_label(m: i32) -> &'static str {
+    match m {
+        0 => "USB 有线",
+        1 => "蓝牙",
+        2 => "2.4G 无线",
+        _ => "未知",
+    }
+}
+
+/// 节能策略值 → 中文。
+fn power_mode_label(m: i32) -> &'static str {
+    match m {
+        0 => "性能优先",
+        1 => "省电优先",
+        _ => "未知",
+    }
+}
+
+/// 灯效模式值 → 中文（与灯效页卡片标签一致）。
+fn rgb_mode_label(m: i32) -> &'static str {
+    match m {
+        0 => "关闭",
+        1 => "单色",
+        2 => "彩虹",
+        3 => "彩浪",
+        4 => "循环",
+        5 => "电平",
+        6 => "火焰",
+        7 => "脉冲",
+        8 => "拾音",
+        9 => "律动",
+        10 => "渐变",
+        _ => "未知",
+    }
+}
+
+/// 按下灯光反馈值 → 中文（与灯效页卡片标签一致）。
+fn rgb_click_label(m: i32) -> &'static str {
+    match m {
+        0 => "关闭",
+        1 => "单色",
+        2 => "渐变",
+        _ => "未知",
+    }
 }
 
 /// 列出 mask 中置位的敏感字段名（按协议字段名），用于在 SET 成功 Toast 中

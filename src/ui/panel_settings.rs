@@ -74,8 +74,7 @@ pub struct SettingsPanelState {
     /// 本机临时固件 HTTP 服务（Some = OTA 进行中）
     pub fw_server: Option<crate::ota::FirmwareServer>,
     /// OTA 触发请求的异步结果接收端（Some = 等待设备确认，每帧轮询）
-    pub fw_ota_rx:
-        Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
+    pub fw_ota_rx: Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
     /// 本次 OTA 的下载 URL（成功后状态文案展示用）
     pub fw_url: String,
     /// OTA 状态文案（None = 无）
@@ -83,8 +82,7 @@ pub struct SettingsPanelState {
     /// 状态是否为错误（控制显示颜色）
     pub fw_status_is_err: bool,
     /// 进入烧录模式（0x14）请求的异步结果接收端（Some = 等待设备确认，每帧轮询）
-    pub fw_download_rx:
-        Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
+    pub fw_download_rx: Option<std::sync::mpsc::Receiver<Result<crate::protocol::Frame, String>>>,
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
@@ -237,8 +235,7 @@ fn keyboard_tab(
                     d.work_mode = target;
                     d
                 };
-                let mask =
-                    crate::protocol::FieldMask::empty().set(crate::protocol::F_WORK_MODE);
+                let mask = crate::protocol::FieldMask::empty().set(crate::protocol::F_WORK_MODE);
                 draft.work_mode = target;
                 crate::ui::widgets::apply_diff(handle, &diff, mask);
             }
@@ -470,7 +467,6 @@ fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetting
             draft.device_volume = v;
         }
         ui.add_space(6.0);
-        ui.label("音频开关");
         let mut enable = if draft.audio_enable != 0 || snap.audio_enable != 0 {
             draft.audio_enable != 0
         } else {
@@ -598,14 +594,6 @@ fn pc_status_tab(
                 ui.label(network_label(snap.network_connected));
                 ui.end_row();
             });
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(
-                "此处仅展示当前主机状态；启用推送后，相同数据每秒同步给设备一次。",
-            )
-            .weak()
-            .size(11.0),
-        );
     });
 }
 
@@ -631,11 +619,7 @@ fn network_label(v: Option<bool>) -> String {
 /// 校验失败不影响当前固件，成功自动重启）。
 ///
 /// 前置条件：设备已通过 Wi-Fi 页连接到与 PC 相同的局域网（设备走 HTTP 下载）。
-fn firmware_tab(
-    ui: &mut egui::Ui,
-    st: &mut SettingsPanelState,
-    handle: &AppHandle,
-) {
+fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHandle) {
     use std::sync::mpsc::TryRecvError;
 
     let online = handle.state.lock().unwrap().is_online();
@@ -663,10 +647,7 @@ fn firmware_tab(
                         crate::state::ToastKind::Success,
                         "OTA 已触发，设备开始下载固件".to_string(),
                     ));
-                    handle.log_kind(
-                        crate::state::LogKind::Tx,
-                        format!("OTA → {}", st.fw_url),
-                    );
+                    handle.log_kind(crate::state::LogKind::Tx, format!("OTA → {}", st.fw_url));
                 } else {
                     let msg = frame.error.unwrap_or_else(|| "设备拒绝升级".to_string());
                     if let Some(mut srv) = st.fw_server.take() {
@@ -707,17 +688,14 @@ fn firmware_tab(
             Ok(Ok(frame)) => {
                 st.fw_download_rx = None;
                 if frame.status() == Some(0) {
-                    handle.log_kind(
-                        crate::state::LogKind::Tx,
-                        "设备已确认，复位进入烧录模式",
-                    );
+                    handle.log_kind(crate::state::LogKind::Tx, "设备已确认，复位进入烧录模式");
                     // 设备即将复位：主动断开连接让出 COM 口给烧录工具
                     //（download_mode_armed 已在请求发出前置位，重连被抑制）
                     handle.detach_link();
                     st.fw_status = Some(
                         "设备已重启进入烧录模式，连接已断开。\
                          请使用 idf.py flash / esptool 烧录；\
-                         烧录完成后在「连接」页手动重连。"
+                         烧录完成后在顶栏重新连接设备。"
                             .into(),
                     );
                     st.fw_status_is_err = false;
@@ -730,8 +708,9 @@ fn firmware_tab(
                     handle
                         .download_mode_armed
                         .store(false, std::sync::atomic::Ordering::Release);
-                    let msg =
-                        frame.error.unwrap_or_else(|| "设备拒绝进入烧录模式".to_string());
+                    let msg = frame
+                        .error
+                        .unwrap_or_else(|| "设备拒绝进入烧录模式".to_string());
                     st.fw_status = Some(format!("进入烧录模式失败：{msg}"));
                     st.fw_status_is_err = true;
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
@@ -883,7 +862,7 @@ fn firmware_tab(
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(
-                    "提示：设备未连接。升级前请先在「连接」页连接设备，\
+                    "提示：设备未连接。升级前请先在顶栏连接设备，\
                      并确认设备已加入与电脑相同的 Wi-Fi 网络（Wi-Fi 页可配置）。",
                 )
                 .weak()
@@ -900,7 +879,7 @@ fn firmware_tab(
             egui::RichText::new(
                 "设备将立即复位进入 USB 下载模式（无需按 BOOT 键），当前连接会断开，\
                  应用在烧录完成前不会自动重连，以免占用串口。\
-                 烧录完成后请在「连接」页手动重连。",
+                 烧录完成后请在顶栏重新连接设备。",
             )
             .weak(),
         );
@@ -945,7 +924,11 @@ fn start_download_mode(handle: &AppHandle, st: &mut SettingsPanelState) {
     st.fw_status_is_err = false;
 
     match handle.with_link(|lm| {
-        lm.request_async(CMD_FIRMWARE_DOWNLOAD, None, std::time::Duration::from_millis(3000))
+        lm.request_async(
+            CMD_FIRMWARE_DOWNLOAD,
+            None,
+            std::time::Duration::from_millis(3000),
+        )
     }) {
         Some(rx) => {
             st.fw_download_rx = Some(rx);
@@ -964,21 +947,14 @@ fn start_download_mode(handle: &AppHandle, st: &mut SettingsPanelState) {
 }
 
 /// 选择固件文件：读入内存 + 基础校验（ESP32 应用镜像首字节 0xE9）+ 计算 MD5。
-fn pick_firmware_file(
-    handle: &AppHandle,
-    st: &mut SettingsPanelState,
-    path: &std::path::Path,
-) {
+fn pick_firmware_file(handle: &AppHandle, st: &mut SettingsPanelState, path: &std::path::Path) {
     let toast = |k: crate::state::ToastKind, t: String| {
         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(k, t));
     };
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            toast(
-                crate::state::ToastKind::Error,
-                format!("读取文件失败：{e}"),
-            );
+            toast(crate::state::ToastKind::Error, format!("读取文件失败：{e}"));
             return;
         }
     };
@@ -1011,12 +987,14 @@ fn pick_firmware_file(
 /// 避免同步等待阻塞 UI 线程。设备确认后自行下载，下载完成自动重启
 /// （串口会断开，自动重连逻辑会接管重连）。
 fn start_ota(handle: &AppHandle, st: &mut SettingsPanelState) {
-    use crate::ota::{local_lan_ip, FirmwareServer};
+    use crate::ota::{FirmwareServer, local_lan_ip};
 
     let toast = |k: crate::state::ToastKind, t: String| {
         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(k, t));
     };
-    let Some(bytes) = st.fw_bytes.clone() else { return };
+    let Some(bytes) = st.fw_bytes.clone() else {
+        return;
+    };
 
     // 停掉上一次的服务（幂等），再起本次的
     if let Some(mut old) = st.fw_server.take() {

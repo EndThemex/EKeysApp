@@ -14,7 +14,7 @@ pub struct LightingPanelState;
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState) {
     ui.heading("灯光效果");
     ui.label(
-        egui::RichText::new("调整背光模式与按下反馈，修改完成后点击下方「应用」同步到设备。")
+        egui::RichText::new("修改完成后点击下方「应用」同步到设备。")
             .weak()
             .size(12.0),
     );
@@ -23,14 +23,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
     settings_panel_scaffold(handle, ui, |ui, _snap, draft| {
         ui.group(|ui| {
             // 整体亮度放在最上方：作为整个键盘灯亮度的总控，影响所有灯效模式的实际亮度输出
-            ui.horizontal(|ui| {
-                ui.label("整体亮度");
-                ui.label(
-                    egui::RichText::new("管理整个键盘灯的亮度，影响所有灯效模式")
-                        .weak()
-                        .size(11.0),
-                );
-            });
+            ui.label("整体亮度")
+                .on_hover_text("管理整个键盘灯的亮度，影响所有灯效模式");
             let mut bri = draft.rgb_brightness.clamp(0, 100);
             if ui
                 .add(egui::Slider::new(&mut bri, 0..=100).show_value(true))

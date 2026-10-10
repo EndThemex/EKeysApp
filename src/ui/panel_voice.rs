@@ -46,7 +46,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
 
     settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {
         ui.group(|ui| {
-            ui.label("语音功能开关");
             let mut on = if draft.voice_enable != 0 || snapshot.voice_enable != 0 {
                 draft.voice_enable != 0
             } else {
@@ -77,7 +76,6 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("按触发键即启动识别");
             let mut ae = if draft.voice_auto_enter != 0 || snapshot.voice_auto_enter != 0 {
                 draft.voice_auto_enter != 0
             } else {
@@ -131,8 +129,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             // 不能用 is_empty() 当"未编辑"哨兵——快照值是掩码 "***"（非空），
             // 用户把默认值删光后 draft="" 会被误判为"未编辑"，下一帧又用
             // 快照值回填，表现为"删掉的密码自动加回来"。
-            let sk_modified =
-                draft.voice_tencent_secret_key != snapshot.voice_tencent_secret_key;
+            let sk_modified = draft.voice_tencent_secret_key != snapshot.voice_tencent_secret_key;
             let mut sk = if sk_modified {
                 draft.voice_tencent_secret_key.clone()
             } else {
