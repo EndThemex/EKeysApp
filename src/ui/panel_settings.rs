@@ -13,6 +13,8 @@ pub enum SettingsTab {
     Display,
     Keyboard,
     Audio,
+    /// 暂时隐藏：不出现在 tab 列表中，实现保留以便后续恢复。
+    #[allow(dead_code)]
     Power,
     /// PC 状态 tab：主机侧行为配置（推送开关 + 实时采集快照展示）。
     /// 不参与 `DeviceSettings` 的 diff / 下发，写入 `local_config` 持久化。
@@ -125,7 +127,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
             SettingsTab::Display,
             SettingsTab::Keyboard,
             SettingsTab::Audio,
-            SettingsTab::Power,
+            // SettingsTab::Power 暂时隐藏，需要恢复时加回此处即可
             SettingsTab::PcStatus,
             SettingsTab::Firmware,
         ] {
@@ -613,6 +615,11 @@ fn network_label(v: Option<bool>) -> String {
     }
 }
 
+/// OTA 固件升级 UI 暂时隐藏；需要恢复时把返回值改回 `true`。
+fn show_ota_ui() -> bool {
+    false
+}
+
 /// 固件升级 tab：选择本地 `.bin` → 计算并展示 MD5 → 本机起临时 HTTP 服务 →
 /// `0x0B CMD_FIRMWARE_INFO` 下发 `url` + `checksum` 触发设备 OTA
 /// （固件端实现见 EKeys `src/upgrade/Upgrade.cpp`：流式下载、边下边校验 MD5，
@@ -773,103 +780,106 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
             });
     });
 
-    ui.add_space(8.0);
-    ui.group(|ui| {
-        ui.strong("固件升级（OTA）");
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(
-                "选择固件文件后，应用会在本机临时开启一个 HTTP 服务，\
-                 设备通过 Wi-Fi 下载并自动校验 MD5。升级期间请保持设备供电、\
-                 不要断开 Wi-Fi；成功后设备会自动重启进入新固件。",
-            )
-            .weak(),
-        );
-        ui.add_space(4.0);
-
-        // 1) 选择固件文件
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut st.fw_path)
-                    .hint_text("点击「浏览…」选择 .bin 固件文件")
-                    .desired_width(280.0),
-            );
-            if ui.button("浏览…").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("固件文件", &["bin"])
-                    .pick_file()
-                {
-                    pick_firmware_file(handle, st, &path);
-                }
-            }
-        });
-        if st.fw_bytes.is_some() {
-            ui.label(format!(
-                "大小：{} 字节（{:.1} KB）",
-                st.fw_size,
-                st.fw_size as f64 / 1024.0
-            ));
-            ui.monospace(format!("MD5：{}", st.fw_md5));
-        }
-
-        ui.add_space(6.0);
-
-        // 2) 触发升级
-        let ready = online && st.fw_bytes.is_some() && st.fw_ota_rx.is_none();
-        ui.horizontal(|ui| {
-            let starting = st.fw_ota_rx.is_some();
-            if ui
-                .add_enabled(
-                    ready,
-                    egui::Button::new(if starting {
-                        "等待设备确认…"
-                    } else {
-                        "开始升级"
-                    }),
-                )
-                .on_disabled_hover_text(if !online {
-                    "设备未连接"
-                } else if st.fw_bytes.is_none() {
-                    "请先选择固件文件"
-                } else {
-                    "正在处理中"
-                })
-                .clicked()
-            {
-                start_ota(handle, st);
-            }
-            if (st.fw_server.is_some() || starting) && ui.button("取消升级").clicked() {
-                if let Some(mut srv) = st.fw_server.take() {
-                    srv.stop();
-                }
-                st.fw_ota_rx = None;
-                st.fw_status = Some("已取消：本地下载服务已关闭".into());
-                st.fw_status_is_err = false;
-            }
-        });
-
-        // 3) 状态展示
-        if let Some(status) = &st.fw_status {
-            ui.add_space(4.0);
-            let text = egui::RichText::new(status);
-            ui.label(if st.fw_status_is_err {
-                text.color(egui::Color32::from_rgb(0xE5, 0x6C, 0x5C))
-            } else {
-                text
-            });
-        }
-        if !online {
-            ui.add_space(4.0);
+    // 固件升级（OTA）相关 UI 暂时隐藏（show_ota_ui 置回 true 即恢复）
+    if show_ota_ui() {
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.strong("固件升级（OTA）");
+            ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(
-                    "提示：设备未连接。升级前请先在顶栏连接设备，\
-                     并确认设备已加入与电脑相同的 Wi-Fi 网络（Wi-Fi 页可配置）。",
+                    "选择固件文件后，应用会在本机临时开启一个 HTTP 服务，\
+                 设备通过 Wi-Fi 下载并自动校验 MD5。升级期间请保持设备供电、\
+                 不要断开 Wi-Fi；成功后设备会自动重启进入新固件。",
                 )
-                .weak()
-                .size(11.0),
+                .weak(),
             );
-        }
-    });
+            ui.add_space(4.0);
+
+            // 1) 选择固件文件
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut st.fw_path)
+                        .hint_text("点击「浏览…」选择 .bin 固件文件")
+                        .desired_width(280.0),
+                );
+                if ui.button("浏览…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("固件文件", &["bin"])
+                        .pick_file()
+                    {
+                        pick_firmware_file(handle, st, &path);
+                    }
+                }
+            });
+            if st.fw_bytes.is_some() {
+                ui.label(format!(
+                    "大小：{} 字节（{:.1} KB）",
+                    st.fw_size,
+                    st.fw_size as f64 / 1024.0
+                ));
+                ui.monospace(format!("MD5：{}", st.fw_md5));
+            }
+
+            ui.add_space(6.0);
+
+            // 2) 触发升级
+            let ready = online && st.fw_bytes.is_some() && st.fw_ota_rx.is_none();
+            ui.horizontal(|ui| {
+                let starting = st.fw_ota_rx.is_some();
+                if ui
+                    .add_enabled(
+                        ready,
+                        egui::Button::new(if starting {
+                            "等待设备确认…"
+                        } else {
+                            "开始升级"
+                        }),
+                    )
+                    .on_disabled_hover_text(if !online {
+                        "设备未连接"
+                    } else if st.fw_bytes.is_none() {
+                        "请先选择固件文件"
+                    } else {
+                        "正在处理中"
+                    })
+                    .clicked()
+                {
+                    start_ota(handle, st);
+                }
+                if (st.fw_server.is_some() || starting) && ui.button("取消升级").clicked() {
+                    if let Some(mut srv) = st.fw_server.take() {
+                        srv.stop();
+                    }
+                    st.fw_ota_rx = None;
+                    st.fw_status = Some("已取消：本地下载服务已关闭".into());
+                    st.fw_status_is_err = false;
+                }
+            });
+
+            // 3) 状态展示
+            if let Some(status) = &st.fw_status {
+                ui.add_space(4.0);
+                let text = egui::RichText::new(status);
+                ui.label(if st.fw_status_is_err {
+                    text.color(egui::Color32::from_rgb(0xE5, 0x6C, 0x5C))
+                } else {
+                    text
+                });
+            }
+            if !online {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "提示：设备未连接。升级前请先在顶栏连接设备，\
+                         并确认设备已加入与电脑相同的 Wi-Fi 网络（Wi-Fi 页可配置）。",
+                    )
+                    .weak()
+                    .size(11.0),
+                );
+            }
+        });
+    }
 
     ui.add_space(8.0);
     ui.group(|ui| {
