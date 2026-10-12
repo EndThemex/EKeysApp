@@ -2,16 +2,17 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::AppHandle;
 use crate::ui::topbar::ConnectPanelState;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelState) {
     ui.vertical_centered(|ui| {
         ui.add_space(40.0);
-        ui.heading("EKeys 桌面端");
+        ui.heading(i18n::t("about.title"));
         ui.add_space(8.0);
-        ui.label(format!("版本  {}", env!("CARGO_PKG_VERSION")));
-        ui.label("适配固件协议  v0.1");
+        ui.label(i18n::t("about.version").replace("{version}", env!("CARGO_PKG_VERSION")));
+        ui.label(i18n::t("about.protocol"));
     });
 
     ui.add_space(24.0);
@@ -25,21 +26,21 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelStat
         .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.strong("当前设备");
+            ui.strong(i18n::t("about.device"));
             ui.add_space(8.0);
             egui::Grid::new("about_device_info")
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("名称");
+                    ui.label(i18n::t("about.device.name"));
                     ui.label(if info.device_name.is_empty() {
-                        "（未拉取）"
+                        i18n::t("about.not_fetched")
                     } else {
                         info.device_name.as_str()
                     });
                     ui.end_row();
 
-                    ui.label("设备 ID");
+                    ui.label(i18n::t("about.device.id"));
                     ui.label(if info.device_id.is_empty() {
                         "—"
                     } else {
@@ -47,9 +48,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelStat
                     });
                     ui.end_row();
 
-                    ui.label("固件版本");
+                    ui.label(i18n::t("about.device.firmware"));
                     ui.label(if info.firmware_version.is_empty() {
-                        "（未拉取）"
+                        i18n::t("about.not_fetched")
                     } else {
                         info.firmware_version.as_str()
                     });
@@ -78,38 +79,45 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, connect_st: &ConnectPanelStat
         .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.strong("当前选中端口");
+            ui.strong(i18n::t("about.port"));
             ui.add_space(8.0);
 
             let Some((name, p)) = port_view else {
-                ui.label("（未选择端口）");
+                ui.label(i18n::t("about.port.none"));
                 return;
             };
 
             // 精简为常用三项；VID/PID/序列号等描述符细节收进 hover。
-            let details = format!(
-                "厂商 ID：{}\n产品 ID：{}\n序列号：{}",
-                p.vid
-                    .map(|v| format!("0x{v:04X}"))
-                    .unwrap_or_else(|| "—".into()),
-                p.pid
-                    .map(|v| format!("0x{v:04X}"))
-                    .unwrap_or_else(|| "—".into()),
-                p.serial_number.clone().unwrap_or_else(|| "—".into()),
-            );
+            let details = i18n::t("about.port.details")
+                .replace(
+                    "{vid}",
+                    &p.vid
+                        .map(|v| format!("0x{v:04X}"))
+                        .unwrap_or_else(|| "—".into()),
+                )
+                .replace(
+                    "{pid}",
+                    &p.pid
+                        .map(|v| format!("0x{v:04X}"))
+                        .unwrap_or_else(|| "—".into()),
+                )
+                .replace(
+                    "{serial}",
+                    &p.serial_number.clone().unwrap_or_else(|| "—".into()),
+                );
             egui::Grid::new("about_port_info")
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("端口名");
+                    ui.label(i18n::t("about.port.name"));
                     ui.label(&name);
                     ui.end_row();
 
-                    ui.label("厂商");
+                    ui.label(i18n::t("about.port.vendor"));
                     ui.label(p.manufacturer.clone().unwrap_or_else(|| "—".into()));
                     ui.end_row();
 
-                    ui.label("产品");
+                    ui.label(i18n::t("about.port.product"));
                     ui.label(p.product.clone().unwrap_or_else(|| "—".into()))
                         .on_hover_text(&details);
                     ui.end_row();

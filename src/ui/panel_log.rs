@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::{AppHandle, LogEntry, LogKind, ToastKind, UiEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -74,7 +75,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
         st.cached_dark = dark;
     }
 
-    ui.heading("运行日志");
+    ui.heading(i18n::t("log.title"));
     ui.add_space(8.0);
 
     // 工具栏卡片：两行布局
@@ -83,38 +84,50 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
     crate::ui::card(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                egui::RichText::new("来源")
+                egui::RichText::new(i18n::t("log.source"))
                     .strong()
                     .color(ui.visuals().weak_text_color()),
             );
-            ui.checkbox(&mut st.show_tx, "上行数据");
-            ui.checkbox(&mut st.show_rx, "下行数据");
-            ui.checkbox(&mut st.show_fw, "设备日志");
-            ui.checkbox(&mut st.show_app, "应用日志");
+            ui.checkbox(&mut st.show_tx, i18n::t("log.source.tx"));
+            ui.checkbox(&mut st.show_rx, i18n::t("log.source.rx"));
+            ui.checkbox(&mut st.show_fw, i18n::t("log.source.fw"));
+            ui.checkbox(&mut st.show_app, i18n::t("log.source.app"));
         });
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                egui::RichText::new("等级")
+                egui::RichText::new(i18n::t("log.level"))
                     .strong()
                     .color(ui.visuals().weak_text_color()),
             );
             egui::ComboBox::from_id_salt("log-level")
                 .selected_text(match st.level {
-                    LevelFilter::All => "全部".to_string(),
-                    LevelFilter::Info => "提示".to_string(),
-                    LevelFilter::Warn => "警告".to_string(),
-                    LevelFilter::Error => "错误".to_string(),
+                    LevelFilter::All => i18n::t("log.level.all"),
+                    LevelFilter::Info => i18n::t("log.level.info"),
+                    LevelFilter::Warn => i18n::t("log.level.warn"),
+                    LevelFilter::Error => i18n::t("log.level.error"),
                 })
                 .show_ui(ui, |cb| {
-                    cb.selectable_value(&mut st.level, LevelFilter::All, "全部");
-                    cb.selectable_value(&mut st.level, LevelFilter::Info, "提示");
-                    cb.selectable_value(&mut st.level, LevelFilter::Warn, "警告");
-                    cb.selectable_value(&mut st.level, LevelFilter::Error, "错误");
+                    cb.selectable_value(&mut st.level, LevelFilter::All, i18n::t("log.level.all"));
+                    cb.selectable_value(
+                        &mut st.level,
+                        LevelFilter::Info,
+                        i18n::t("log.level.info"),
+                    );
+                    cb.selectable_value(
+                        &mut st.level,
+                        LevelFilter::Warn,
+                        i18n::t("log.level.warn"),
+                    );
+                    cb.selectable_value(
+                        &mut st.level,
+                        LevelFilter::Error,
+                        i18n::t("log.level.error"),
+                    );
                 });
             ui.add(
                 egui::TextEdit::singleline(&mut st.search)
-                    .hint_text("搜索日志内容…")
+                    .hint_text(i18n::t("log.search.hint"))
                     .desired_width(280.0),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -124,7 +137,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     .add(
                         crate::ui::fonts::IconTextButton::new(
                             crate::ui::icons::LOG_CLEAR,
-                            "清空日志",
+                            i18n::t("log.clear"),
                             13.0,
                         )
                         .corner_radius(egui::CornerRadius::same(6)),
@@ -136,7 +149,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                 // 复制全部 —— 主操作：ACCENT 底 + 白字。
                 let copy_btn = crate::ui::fonts::IconTextButton::new(
                     crate::ui::icons::LOG_COPY,
-                    "复制全部",
+                    i18n::t("log.copy_all"),
                     13.0,
                 )
                 .fill(crate::ui::ACCENT)
@@ -147,15 +160,15 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     if text.is_empty() {
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             ToastKind::Info,
-                            "当前筛选下没有可复制的日志".to_string(),
+                            i18n::t("log.copy.empty").to_string(),
                         ));
                     } else {
                         ui.ctx().copy_text(text.clone());
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             ToastKind::Success,
-                            format!(
-                                "已复制 {count} 行日志",
-                                count = count_visible(&cached_entries, st)
+                            i18n::t("log.copy.done").replace(
+                                "{count}",
+                                &count_visible(&cached_entries, st).to_string(),
                             ),
                         ));
                     }
@@ -167,11 +180,11 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
 
     let total_visible = count_visible(&cached_entries, st);
     ui.label(
-        egui::RichText::new(format!(
-            "共 {total} 条，当前筛选显示 {visible} 条",
-            total = cached_entries.len(),
-            visible = total_visible
-        ))
+        egui::RichText::new(
+            i18n::t("log.counts")
+                .replace("{total}", &cached_entries.len().to_string())
+                .replace("{visible}", &total_visible.to_string()),
+        )
         .small()
         .color(ui.visuals().weak_text_color()),
     );
@@ -260,14 +273,15 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
                     .context_menu(|ui| {
                         let ts = format_timestamp(e.ts_ms);
                         let line = format!("{}  {}", ts, e.text);
-                        if ui.button("复制此行（含时间）").clicked() {
+                        if ui.button(i18n::t("log.ctx.copy_line")).clicked() {
                             ui.ctx().copy_text(line.clone());
-                            let _ = handle
-                                .ui_tx
-                                .send(UiEvent::Toast(ToastKind::Success, "已复制此行".to_string()));
+                            let _ = handle.ui_tx.send(UiEvent::Toast(
+                                ToastKind::Success,
+                                i18n::t("log.ctx.copied").to_string(),
+                            ));
                             ui.close();
                         }
-                        if ui.button("仅复制消息内容").clicked() {
+                        if ui.button(i18n::t("log.ctx.copy_text")).clicked() {
                             ui.ctx().copy_text(e.text.clone());
                             ui.close();
                         }
@@ -291,7 +305,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut LogPanelState) {
     // “跳转最新”悬浮按钮：用户滚离底部时显示在日志区右下角。
     // 悬浮在 ScrollArea 内容之上属于无法用常规布局表达的定位，故使用精确 Rect。
     if !st.follow {
-        let label = "回到最新";
+        let label = i18n::t("log.jump_latest");
         let font = egui::TextStyle::Button.resolve(ui.style());
         let galley = ui
             .painter()
@@ -333,16 +347,12 @@ fn kind_visible(st: &LogPanelState, k: LogKind) -> bool {
 /// 提出来便于在循环外预计算（未来如果需要更细的缓存键）。
 fn log_row_color(dark: bool, e: &LogEntry) -> egui::Color32 {
     match e.kind {
-        LogKind::Tx => crate::ui::colors::themed(
-            dark,
-            crate::ui::colors::TX,
-            crate::ui::colors::TX_L,
-        ),
-        LogKind::Rx => crate::ui::colors::themed(
-            dark,
-            crate::ui::colors::RX,
-            crate::ui::colors::RX_L,
-        ),
+        LogKind::Tx => {
+            crate::ui::colors::themed(dark, crate::ui::colors::TX, crate::ui::colors::TX_L)
+        }
+        LogKind::Rx => {
+            crate::ui::colors::themed(dark, crate::ui::colors::RX, crate::ui::colors::RX_L)
+        }
         LogKind::Firmware if e.text.contains("[E]") => crate::ui::colors::themed(
             dark,
             crate::ui::colors::FW_ERROR,
@@ -358,11 +368,9 @@ fn log_row_color(dark: bool, e: &LogEntry) -> egui::Color32 {
             crate::ui::colors::FW_INFO,
             crate::ui::colors::FW_INFO_L,
         ),
-        LogKind::App => crate::ui::colors::themed(
-            dark,
-            crate::ui::colors::APP,
-            crate::ui::colors::APP_L,
-        ),
+        LogKind::App => {
+            crate::ui::colors::themed(dark, crate::ui::colors::APP, crate::ui::colors::APP_L)
+        }
     }
 }
 

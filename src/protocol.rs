@@ -7,6 +7,7 @@
 // 所有命令的收发链路，也要保留完整协议面。新增或下线命令时同步维护本模块。
 #![allow(dead_code)]
 
+use crate::i18n;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1117,11 +1118,11 @@ pub fn validate_audio_content(ext: &str, bytes: &[u8]) -> Result<(), String> {
 /// 通过魔数猜测真实容器格式（用于错误提示）。
 fn sniff_audio_container(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        return Some("MP4/M4A 容器（可能是改了扩展名的视频/音频文件）");
+        return Some(i18n::t("proto.audio.container_mp4"));
     }
     if bytes.len() >= 4 {
         match &bytes[0..4] {
-            b"RIFF" => return Some("RIFF（WAV）"),
+            b"RIFF" => return Some(i18n::t("proto.audio.container_riff")),
             b"OggS" => return Some("OGG"),
             b"fLaC" => return Some("FLAC"),
             _ => {}
@@ -1139,36 +1140,29 @@ fn sniff_audio_container(bytes: &[u8]) -> Option<&'static str> {
 
 fn validate_wav(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        let actual = sniff_audio_container(bytes).unwrap_or("无法识别的格式");
-        return Err(format!(
-            "文件内容不是 WAV（实际为{actual}）。设备按扩展名选解码器，\
-             伪装文件会被播放成噪声。请转码后上传：\
-             ffmpeg -i 输入 -vn -acodec pcm_s16le 输出.wav"
-        ));
+        let actual =
+            sniff_audio_container(bytes).unwrap_or(i18n::t("proto.audio.container_unknown"));
+        return Err(i18n::t("proto.audio.err_not_wav").replace("{actual}", actual));
     }
-    let (code, ch, _sr, bits) = wav_format_params(bytes)
-        .ok_or_else(|| "WAV 缺少 fmt 块（文件头损坏），设备无法解码".to_string())?;
+    let (code, ch, _sr, bits) =
+        wav_format_params(bytes).ok_or_else(|| i18n::t("proto.audio.err_no_fmt").to_string())?;
     if code != 1 {
         let codec_name = match code {
             3 => "IEEE float",
             6 => "A-law",
             7 => "μ-law",
             0xFFFE => "WAVE_FORMAT_EXTENSIBLE",
-            _ => "非 PCM 编码",
+            _ => i18n::t("proto.audio.codec_non_pcm"),
         };
-        return Err(format!(
-            "WAV 编码为格式码 {code}（{codec_name}），设备仅支持 PCM（格式码 1）。\
-             请转码：ffmpeg -i 输入 -acodec pcm_s16le 输出.wav"
-        ));
+        return Err(i18n::t("proto.audio.err_codec")
+            .replace("{code}", &code.to_string())
+            .replace("{codec_name}", codec_name));
     }
     if bits != 16 {
-        return Err(format!(
-            "WAV 位深 {bits}bit，设备仅支持 16bit PCM。\
-             请转码：ffmpeg -i 输入 -acodec pcm_s16le 输出.wav"
-        ));
+        return Err(i18n::t("proto.audio.err_bits").replace("{bits}", &bits.to_string()));
     }
     if ch != 1 && ch != 2 {
-        return Err(format!("WAV 声道数 {ch}，设备仅支持单声道/立体声"));
+        return Err(i18n::t("proto.audio.err_channels").replace("{ch}", &ch.to_string()));
     }
     Ok(())
 }
@@ -1179,11 +1173,8 @@ fn validate_mp3(bytes: &[u8]) -> Result<(), String> {
     if is_id3 || is_frame_sync {
         return Ok(());
     }
-    let actual = sniff_audio_container(bytes).unwrap_or("无法识别的格式");
-    Err(format!(
-        "文件内容不是 MP3（实际为{actual}）。请转码后上传：\
-         ffmpeg -i 输入 -acodec libmp3lame 输出.mp3"
-    ))
+    let actual = sniff_audio_container(bytes).unwrap_or(i18n::t("proto.audio.container_unknown"));
+    Err(i18n::t("proto.audio.err_not_mp3").replace("{actual}", actual))
 }
 
 /// 解析 WAV 的 fmt 块：返回 (格式码, 声道数, 采样率, 位深)。
@@ -1361,7 +1352,7 @@ impl KeyAction {
     /// 给 UI 展示用的简短标签
     pub fn label(&self) -> String {
         match self {
-            KeyAction::None => "未绑定".into(),
+            KeyAction::None => i18n::t("proto.action.none").into(),
             KeyAction::Keyboard(code) => hid_key_label(*code)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("0x{code:02X}")),
@@ -1392,7 +1383,7 @@ impl KeyAction {
                 if t.chars().count() > 12 {
                     d.push('…');
                 }
-                format!("文本:{d}")
+                i18n::t("proto.action.text").replace("{text}", &d)
             }
             KeyAction::Function(f) => function_label(f),
         }
@@ -1543,24 +1534,28 @@ fn parse_normal_string(n: &str) -> KeyAction {
 /// 固件功能串 → 友好展示名；未识别原样返回。
 fn function_label(f: &str) -> String {
     match f {
-        "KEY_FUNCTION_ASR" => "语音识别 (ASR)".into(),
-        "KEY_FUNCTION_PAGE_PC" => "页面跳转: PC状态".into(),
-        "KEY_FUNCTION_PAGE_MUSIC" => "页面跳转: 音乐播放".into(),
-        "KEY_FUNCTION_PAGE_AUDIO" => "页面跳转: 音效板".into(),
-        "KEY_FUNCTION_PAGE_KEYMAP" => "页面跳转: 键映射".into(),
-        "KEY_FUNCTION_PAGE_SETTING" => "页面跳转: 设置".into(),
-        "KEY_FUNCTION_PAGE_HA" => "页面跳转: 智能家居".into(),
-        "MEDIA_PLAY" | "MEDIA_PLAY_PAUSE" | "MEDIA_PlayPause" => "媒体: 播放/暂停".into(),
-        "MEDIA_NEXT" | "MEDIA_Next" => "媒体: 下一曲".into(),
-        "MEDIA_PREV" | "MEDIA_Prev" => "媒体: 上一曲".into(),
-        "MEDIA_VOLUME_UP" | "MEDIA_VolUp" => "媒体: 音量+".into(),
-        "MEDIA_VOLUME_DOWN" | "MEDIA_VolDown" => "媒体: 音量-".into(),
-        "MEDIA_MUTE" | "MEDIA_Mute" => "媒体: 静音".into(),
-        "MOUSE_LEFT" | "MOUSE_LeftClick" => "鼠标: 左键".into(),
-        "MOUSE_RIGHT" | "MOUSE_RightClick" => "鼠标: 右键".into(),
-        "MOUSE_MIDDLE" | "MOUSE_MiddleClick" => "鼠标: 中键".into(),
-        "MOUSE_SCROLL_UP" | "MOUSE_ScrollUp" => "鼠标: 滚轮上".into(),
-        "MOUSE_SCROLL_DOWN" | "MOUSE_ScrollDown" => "鼠标: 滚轮下".into(),
+        "KEY_FUNCTION_ASR" => i18n::t("proto.function.asr").into(),
+        "KEY_FUNCTION_PAGE_PC" => i18n::t("proto.function.page_pc").into(),
+        "KEY_FUNCTION_PAGE_MUSIC" => i18n::t("proto.function.page_music").into(),
+        "KEY_FUNCTION_PAGE_AUDIO" => i18n::t("proto.function.page_audio").into(),
+        "KEY_FUNCTION_PAGE_KEYMAP" => i18n::t("proto.function.page_keymap").into(),
+        "KEY_FUNCTION_PAGE_SETTING" => i18n::t("proto.function.page_setting").into(),
+        "KEY_FUNCTION_PAGE_HA" => i18n::t("proto.function.page_ha").into(),
+        "MEDIA_PLAY" | "MEDIA_PLAY_PAUSE" | "MEDIA_PlayPause" => {
+            i18n::t("proto.function.media_play").into()
+        }
+        "MEDIA_NEXT" | "MEDIA_Next" => i18n::t("proto.function.media_next").into(),
+        "MEDIA_PREV" | "MEDIA_Prev" => i18n::t("proto.function.media_prev").into(),
+        "MEDIA_VOLUME_UP" | "MEDIA_VolUp" => i18n::t("proto.function.media_vol_up").into(),
+        "MEDIA_VOLUME_DOWN" | "MEDIA_VolDown" => i18n::t("proto.function.media_vol_down").into(),
+        "MEDIA_MUTE" | "MEDIA_Mute" => i18n::t("proto.function.media_mute").into(),
+        "MOUSE_LEFT" | "MOUSE_LeftClick" => i18n::t("proto.function.mouse_left").into(),
+        "MOUSE_RIGHT" | "MOUSE_RightClick" => i18n::t("proto.function.mouse_right").into(),
+        "MOUSE_MIDDLE" | "MOUSE_MiddleClick" => i18n::t("proto.function.mouse_middle").into(),
+        "MOUSE_SCROLL_UP" | "MOUSE_ScrollUp" => i18n::t("proto.function.mouse_scroll_up").into(),
+        "MOUSE_SCROLL_DOWN" | "MOUSE_ScrollDown" => {
+            i18n::t("proto.function.mouse_scroll_down").into()
+        }
         other => other.to_string(),
     }
 }

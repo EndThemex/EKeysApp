@@ -5,6 +5,7 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::AppHandle;
 use crate::ui::widgets::settings_panel_scaffold;
 
@@ -12,9 +13,9 @@ use crate::ui::widgets::settings_panel_scaffold;
 pub struct LightingPanelState;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState) {
-    ui.heading("灯光效果");
+    ui.heading(i18n::t("lighting.title"));
     ui.label(
-        egui::RichText::new("修改完成后点击下方「应用」同步到设备。")
+        egui::RichText::new(i18n::t("lighting.desc"))
             .weak()
             .size(12.0),
     );
@@ -23,8 +24,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
     settings_panel_scaffold(handle, ui, |ui, _snap, draft| {
         ui.group(|ui| {
             // 整体亮度放在最上方：作为整个键盘灯亮度的总控，影响所有灯效模式的实际亮度输出
-            ui.label("整体亮度")
-                .on_hover_text("管理整个键盘灯的亮度，影响所有灯效模式");
+            ui.label(i18n::t("lighting.brightness"))
+                .on_hover_text(i18n::t("lighting.brightness.hint"));
             let mut bri = draft.rgb_brightness.clamp(0, 100);
             if ui
                 .add(egui::Slider::new(&mut bri, 0..=100).show_value(true))
@@ -35,69 +36,74 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
 
             ui.add_space(8.0);
             // 与固件 RGBMode 枚举（RGBLightControl.h:22）严格 1:1 对齐
-            ui.label("灯效模式");
+            ui.label(i18n::t("lighting.mode"));
             let mut mode = draft.rgb_mode;
             let modes: &[(i32, &str, &str, &str)] = &[
-                (0, "关闭", crate::ui::icons::LIGHT_OFF, "所有 LED 熄灭"),
+                (
+                    0,
+                    i18n::t("lighting.mode.off"),
+                    crate::ui::icons::LIGHT_OFF,
+                    i18n::t("lighting.mode.off.tip"),
+                ),
                 (
                     1,
-                    "单色",
+                    i18n::t("lighting.mode.solid"),
                     crate::ui::icons::LIGHT_SOLID,
-                    "所有 LED 常亮同一颜色",
+                    i18n::t("lighting.mode.solid.tip"),
                 ),
                 (
                     2,
-                    "彩虹",
+                    i18n::t("lighting.mode.rainbow"),
                     crate::ui::icons::LIGHT_RAINBOW,
-                    "色相在 LED 之间平滑过渡",
+                    i18n::t("lighting.mode.rainbow.tip"),
                 ),
                 (
                     3,
-                    "彩浪",
+                    i18n::t("lighting.mode.wave"),
                     crate::ui::icons::LIGHT_WAVE,
-                    "彩色波浪在键盘上来回滚动",
+                    i18n::t("lighting.mode.wave.tip"),
                 ),
                 (
                     4,
-                    "循环",
+                    i18n::t("lighting.mode.cycle"),
                     crate::ui::icons::LIGHT_CYCLE,
-                    "24 色调色板循环切换",
+                    i18n::t("lighting.mode.cycle.tip"),
                 ),
                 (
                     5,
-                    "电平",
+                    i18n::t("lighting.mode.meter"),
                     crate::ui::icons::LIGHT_METER,
-                    "按音频电平驱动亮度",
+                    i18n::t("lighting.mode.meter.tip"),
                 ),
                 (
                     6,
-                    "火焰",
+                    i18n::t("lighting.mode.fire"),
                     crate::ui::icons::LIGHT_FIRE,
-                    "模拟随机跳动的火焰效果",
+                    i18n::t("lighting.mode.fire.tip"),
                 ),
                 (
                     7,
-                    "脉冲",
+                    i18n::t("lighting.mode.pulse"),
                     crate::ui::icons::LIGHT_PULSE,
-                    "整体呼吸式明暗脉冲",
+                    i18n::t("lighting.mode.pulse.tip"),
                 ),
                 (
                     8,
-                    "拾音",
+                    i18n::t("lighting.mode.sound"),
                     crate::ui::icons::LIGHT_SOUND,
-                    "RGB 随麦克风采集的环境声音律动",
+                    i18n::t("lighting.mode.sound.tip"),
                 ),
                 (
                     9,
-                    "律动",
+                    i18n::t("lighting.mode.rhythm"),
                     crate::ui::icons::LIGHT_SOUND,
-                    "按 3×4 键位矩阵点亮：4 列对应 4 频段，音量决定每列点亮行数",
+                    i18n::t("lighting.mode.rhythm.tip"),
                 ),
                 (
                     10,
-                    "渐变",
+                    i18n::t("lighting.mode.gradient"),
                     crate::ui::icons::LIGHT_SOUND,
-                    "4 列对应 4 频段，按音量自下而上点亮：新灯为蓝色，音量越强底部逐渐变为暖色并向上推进",
+                    i18n::t("lighting.mode.gradient.tip"),
                 ),
             ];
             mode_grid(ui, modes, &mut mode, crate::ui::ACCENT);
@@ -111,9 +117,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
             // 固件 uint8_t 接受 0~255，但 24 之外的索引会被 %24 兜底，
             // 这里把 UI 范围收紧到 0~23 与调色板 1:1 对齐，避免越界值被静默绕回。
             ui.horizontal(|ui| {
-                ui.label("单色颜色（调色板 0~23，共 24 色）");
+                ui.label(i18n::t("lighting.single_color"));
                 ui.label(
-                    egui::RichText::new("仅在「单色」灯效模式下生效")
+                    egui::RichText::new(i18n::t("lighting.single_color.hint"))
                         .weak()
                         .size(11.0),
                 );
@@ -141,33 +147,43 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut LightingPanelState)
                 );
                 ui.label(format!("#{:02X}{:02X}{:02X}", r, g, b));
             });
-            row.response
-                .on_hover_text(format!("调色板 {}\nRGB（{r}, {g}, {b}）", color));
+            row.response.on_hover_text(
+                i18n::t("lighting.palette.tip")
+                    .replace("{index}", &color.to_string())
+                    .replace("{r}", &r.to_string())
+                    .replace("{g}", &g.to_string())
+                    .replace("{b}", &b.to_string()),
+            );
 
             ui.add_space(8.0);
             // 与固件 ClickHighlight.h:34 严格 1:1
             ui.horizontal(|ui| {
-                ui.label("按下按键时的灯光反馈");
+                ui.label(i18n::t("lighting.click.title"));
                 ui.label(
-                    egui::RichText::new("在灯效之上叠加按下时的反馈")
+                    egui::RichText::new(i18n::t("lighting.click.subtitle"))
                         .weak()
                         .size(11.0),
                 );
             });
             let mut cm = draft.rgb_click_mode;
             let clicks: &[(i32, &str, &str, &str)] = &[
-                (0, "关闭", crate::ui::icons::LIGHT_NONE, "按键无灯光反馈"),
+                (
+                    0,
+                    i18n::t("lighting.mode.off"),
+                    crate::ui::icons::LIGHT_NONE,
+                    i18n::t("lighting.click.off.tip"),
+                ),
                 (
                     1,
-                    "单色",
+                    i18n::t("lighting.mode.solid"),
                     crate::ui::icons::LIGHT_CLICK,
-                    "按下时点亮对应 LED，抬起熄灭",
+                    i18n::t("lighting.click.solid.tip"),
                 ),
                 (
                     2,
-                    "渐变",
+                    i18n::t("lighting.mode.gradient"),
                     crate::ui::icons::LIGHT_WARE,
-                    "按下点亮 + 相邻 LED 微亮",
+                    i18n::t("lighting.click.gradient.tip"),
                 ),
             ];
             mode_grid(ui, clicks, &mut cm, crate::ui::ACCENT);

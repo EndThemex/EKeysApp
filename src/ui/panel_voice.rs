@@ -6,6 +6,7 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::AppHandle;
 use crate::ui::widgets::settings_panel_scaffold;
 
@@ -40,8 +41,8 @@ fn preview_mask(s: &str) -> String {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
-    ui.heading("语音识别");
-    ui.label("腾讯云一句话识别服务（采样率 16 kHz，中文）");
+    ui.heading(i18n::t("voice.title"));
+    ui.label(i18n::t("voice.subtitle"));
     ui.add_space(4.0);
 
     settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {
@@ -51,12 +52,12 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             } else {
                 snapshot.voice_enable != 0
             };
-            if ui.checkbox(&mut on, "启用语音识别").changed() {
+            if ui.checkbox(&mut on, i18n::t("voice.enable")).changed() {
                 draft.voice_enable = if on { 1 } else { 0 };
             }
 
             ui.add_space(6.0);
-            ui.label("触发键编号");
+            ui.label(i18n::t("voice.trigger_key"));
             // 触发键 / 录音时长直接读 draft：未编辑时 draft 经 merge_push
             // 始终跟随 snapshot，不能取 max（否则低于快照值的修改会被
             // 立刻回显成旧值，只能调大不能调小）。
@@ -66,7 +67,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("最长录音时长（毫秒）");
+            ui.label(i18n::t("voice.max_record_ms"));
             let mut ms = draft.voice_max_record_ms;
             if ui
                 .add(egui::DragValue::new(&mut ms).range(1000..=60000).speed(100))
@@ -81,16 +82,16 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             } else {
                 snapshot.voice_auto_enter != 0
             };
-            if ui.checkbox(&mut ae, "按下触发键后立即进入识别").changed() {
+            if ui.checkbox(&mut ae, i18n::t("voice.auto_enter")).changed() {
                 draft.voice_auto_enter = if ae { 1 } else { 0 };
             }
         });
 
         ui.group(|ui| {
-            ui.label("腾讯云 API 配置");
+            ui.label(i18n::t("voice.api_config"));
 
             ui.add_space(4.0);
-            ui.label("SecretId（最多 64 个字符）");
+            ui.label(i18n::t("voice.secret_id"));
             // SecretId 与 SecretKey 一样，在设备回读时被 mask_sensitive
             // 统一替换为 "***"（协议 §7，App 不存储密钥明文）。
             // 编辑判断必须用"草稿 != 旧快照"而不是 is_empty()：
@@ -124,7 +125,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut VoicePanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("SecretKey（最多 64 个字符）");
+            ui.label(i18n::t("voice.secret_key"));
             // 与上方 SecretId / WiFi 密码一致：用"草稿 != 旧快照"判断是否被编辑。
             // 不能用 is_empty() 当"未编辑"哨兵——快照值是掩码 "***"（非空），
             // 用户把默认值删光后 draft="" 会被误判为"未编辑"，下一帧又用

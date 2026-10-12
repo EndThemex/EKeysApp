@@ -7,8 +7,9 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::protocol::{
-    sanitize_audio_name, valid_audio_name, validate_audio_content, AUDIO_FILE_MAX_BYTES,
+    AUDIO_FILE_MAX_BYTES, sanitize_audio_name, valid_audio_name, validate_audio_content,
 };
 use crate::state::{AppHandle, ToastKind, UiEvent};
 
@@ -29,25 +30,33 @@ fn toast(handle: &AppHandle, kind: ToastKind, text: impl Into<String>) {
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) {
     ui.horizontal(|ui| {
-        ui.heading("音效板");
+        ui.heading(i18n::t("audio.title"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("停止播放").clicked() {
+            if ui.button(i18n::t("audio.stop")).clicked() {
                 if let Err(e) = handle.audio_stop() {
-                    toast(handle, ToastKind::Error, format!("停止失败：{e}"));
+                    toast(
+                        handle,
+                        ToastKind::Error,
+                        i18n::t("audio.stop_fail").replace("{e}", &e.to_string()),
+                    );
                 }
             }
-            if ui.button("刷新").clicked() {
+            if ui.button(i18n::t("audio.refresh")).clicked() {
                 if let Err(e) = handle
                     .refresh_audio_files()
                     .and_then(|_| handle.refresh_audio_pads())
                 {
-                    toast(handle, ToastKind::Error, format!("刷新失败：{e}"));
+                    toast(
+                        handle,
+                        ToastKind::Error,
+                        i18n::t("audio.refresh_fail").replace("{e}", &e.to_string()),
+                    );
                 }
             }
         });
     });
     ui.label(
-        egui::RichText::new("为 11 个矩阵键绑定音频文件，设备音效页（导航环）按键即播")
+        egui::RichText::new(i18n::t("audio.subtitle"))
             .weak()
             .small(),
     );
@@ -69,24 +78,23 @@ fn storage_card(handle: &AppHandle, ui: &mut egui::Ui) {
         (a.total_bytes, a.used_bytes, a.free_bytes)
     };
     ui.group(|ui| {
-        ui.label("设备存储（SPIFFS）");
+        ui.label(i18n::t("audio.storage_title"));
         if total == 0 {
-            ui.label(
-                egui::RichText::new("尚未读取（连接设备后自动拉取，或点击右上角「刷新」）")
-                    .weak(),
-            );
+            ui.label(egui::RichText::new(i18n::t("audio.storage_empty")).weak());
             return;
         }
-        let frac = if total > 0 { used as f32 / total as f32 } else { 0.0 };
+        let frac = if total > 0 {
+            used as f32 / total as f32
+        } else {
+            0.0
+        };
         ui.add(
-            egui::ProgressBar::new(frac)
-                .show_percentage()
-                .text(format!(
-                    "已用 {} / {} KB（剩余 {} KB）",
-                    used / 1024,
-                    total / 1024,
-                    free / 1024
-                )),
+            egui::ProgressBar::new(frac).show_percentage().text(
+                i18n::t("audio.storage_usage")
+                    .replace("{used}", &(used / 1024).to_string())
+                    .replace("{total}", &(total / 1024).to_string())
+                    .replace("{free}", &(free / 1024).to_string()),
+            ),
         );
     });
 }
@@ -95,7 +103,7 @@ fn storage_card(handle: &AppHandle, ui: &mut egui::Ui) {
 fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) {
     let upload = handle.audio.lock().unwrap().upload.clone();
     ui.group(|ui| {
-        ui.label("上传音频文件");
+        ui.label(i18n::t("audio.upload_title"));
         match upload {
             Some(u) => {
                 // 进行中：进度条 + 取消。finished 由 tick_upload 统一收尾。
@@ -105,15 +113,18 @@ fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) 
                     0.0
                 };
                 ui.add(
-                    egui::ProgressBar::new(frac)
-                        .show_percentage()
-                        .text(format!("{}（{} / {} KB）", u.name, u.sent / 1024, u.total / 1024)),
+                    egui::ProgressBar::new(frac).show_percentage().text(
+                        i18n::t("audio.upload_progress")
+                            .replace("{name}", &u.name)
+                            .replace("{sent}", &(u.sent / 1024).to_string())
+                            .replace("{total}", &(u.total / 1024).to_string()),
+                    ),
                 );
-                if ui.button("取消上传").clicked() {
+                if ui.button(i18n::t("audio.upload_cancel")).clicked() {
                     u.cancel.store(true, std::sync::atomic::Ordering::Release);
                 }
                 ui.label(
-                    egui::RichText::new("上传在后台进行，可切换页面；取消会回滚设备端临时文件")
+                    egui::RichText::new(i18n::t("audio.upload_hint"))
                         .weak()
                         .small(),
                 );
@@ -124,28 +135,25 @@ fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) 
                     .spacing([8.0, 6.0])
                     .min_col_width(64.0)
                     .show(ui, |ui| {
-                        ui.label("本地文件");
+                        ui.label(i18n::t("audio.upload_local_file"));
                         ui.horizontal(|ui| {
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut st.upload_path)
                                     .desired_width(400.0),
                             );
                             // 输入框为空时显示一行提示文字（不占位符）
-                            if st.upload_path.trim().is_empty()
-                                && !resp.has_focus()
-                            {
+                            if st.upload_path.trim().is_empty() && !resp.has_focus() {
                                 ui.painter().text(
-                                    resp.rect.left_center()
-                                        + egui::vec2(6.0, 0.0),
+                                    resp.rect.left_center() + egui::vec2(6.0, 0.0),
                                     egui::Align2::LEFT_CENTER,
-                                    "点击「浏览…」选择 .mp3 / .wav 文件",
+                                    i18n::t("audio.upload_path_hint"),
                                     egui::TextStyle::Body.resolve(ui.style()),
                                     ui.visuals().weak_text_color(),
                                 );
                             }
-                            if ui.button("浏览…").clicked() {
+                            if ui.button(i18n::t("audio.upload_browse")).clicked() {
                                 if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("音频文件", &["mp3", "wav"])
+                                    .add_filter(i18n::t("audio.upload_filter"), &["mp3", "wav"])
                                     .pick_file()
                                 {
                                     st.upload_path = path.display().to_string();
@@ -154,20 +162,17 @@ fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) 
                         });
                         ui.end_row();
 
-                        ui.label("设备端名");
+                        ui.label(i18n::t("audio.upload_device_name"));
                         ui.horizontal(|ui| {
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut st.upload_name)
                                     .desired_width(400.0),
                             );
-                            if st.upload_name.trim().is_empty()
-                                && !resp.has_focus()
-                            {
+                            if st.upload_name.trim().is_empty() && !resp.has_focus() {
                                 ui.painter().text(
-                                    resp.rect.left_center()
-                                        + egui::vec2(6.0, 0.0),
+                                    resp.rect.left_center() + egui::vec2(6.0, 0.0),
                                     egui::Align2::LEFT_CENTER,
-                                    "留空: 自动从文件名生成（a-z0-9_ + .mp3/.wav）",
+                                    i18n::t("audio.upload_name_hint"),
                                     egui::TextStyle::Body.resolve(ui.style()),
                                     ui.visuals().weak_text_color(),
                                 );
@@ -178,15 +183,15 @@ fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) 
 
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    if ui.button("开始上传").clicked() {
+                    if ui.button(i18n::t("audio.upload_start")).clicked() {
                         start_upload(handle, st);
                     }
                 });
                 ui.label(
-                    egui::RichText::new(format!(
-                        "限制：单文件 ≤ {} KB，文件名 a-z0-9_ + .mp3/.wav",
-                        AUDIO_FILE_MAX_BYTES / 1024
-                    ))
+                    egui::RichText::new(
+                        i18n::t("audio.upload_limit")
+                            .replace("{max}", &(AUDIO_FILE_MAX_BYTES / 1024).to_string()),
+                    )
                     .weak()
                     .small(),
                 );
@@ -199,38 +204,40 @@ fn upload_card(handle: &AppHandle, ui: &mut egui::Ui, st: &mut AudioPanelState) 
 fn start_upload(handle: &AppHandle, st: &mut AudioPanelState) {
     let path = st.upload_path.trim().to_string();
     if path.is_empty() {
-        toast(handle, ToastKind::Warning, "请先填写本地文件路径".to_string());
+        toast(
+            handle,
+            ToastKind::Warning,
+            i18n::t("audio.upload_need_path"),
+        );
         return;
     }
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
-            toast(handle, ToastKind::Error, format!("读取文件失败：{e}"));
+            toast(
+                handle,
+                ToastKind::Error,
+                i18n::t("audio.upload_read_fail").replace("{e}", &e.to_string()),
+            );
             return;
         }
     };
     if bytes.is_empty() {
-        toast(handle, ToastKind::Error, "文件为空".to_string());
+        toast(handle, ToastKind::Error, i18n::t("audio.upload_empty_file"));
         return;
     }
     if bytes.len() as u32 > AUDIO_FILE_MAX_BYTES {
         toast(
             handle,
             ToastKind::Error,
-            format!(
-                "文件 {} KB 超过上限 {} KB",
-                bytes.len() / 1024,
-                AUDIO_FILE_MAX_BYTES / 1024
-            ),
+            i18n::t("audio.upload_too_large")
+                .replace("{size}", &(bytes.len() / 1024).to_string())
+                .replace("{max}", &(AUDIO_FILE_MAX_BYTES / 1024).to_string()),
         );
         return;
     }
     // 内容预检：拦截伪装扩展名（如 .wav 实为 MP4）与设备不支持的编码
-    let local_ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let local_ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if let Err(e) = validate_audio_content(&local_ext, &bytes) {
         toast(handle, ToastKind::Error, e);
         return;
@@ -245,7 +252,7 @@ fn start_upload(handle: &AppHandle, st: &mut AudioPanelState) {
                     toast(
                         handle,
                         ToastKind::Error,
-                        format!("无法从文件名「{local}」生成合法设备端名，请手动填写"),
+                        i18n::t("audio.upload_name_gen_fail").replace("{name}", local),
                     );
                     return;
                 }
@@ -257,25 +264,21 @@ fn start_upload(handle: &AppHandle, st: &mut AudioPanelState) {
         toast(
             handle,
             ToastKind::Error,
-            format!("设备端名不合法（a-z0-9_ + .mp3/.wav）：{device_name}"),
+            i18n::t("audio.upload_name_invalid").replace("{name}", &device_name),
         );
         return;
     }
     // 本地预检剩余空间（固件 begin 时还会强校验 size + 64KB headroom）
     {
         let a = handle.audio.lock().unwrap();
-        if a.total_bytes > 0
-            && a.free_bytes < bytes.len() as u32 + FREE_HEADROOM_BYTES
-        {
+        if a.total_bytes > 0 && a.free_bytes < bytes.len() as u32 + FREE_HEADROOM_BYTES {
             toast(
                 handle,
                 ToastKind::Error,
-                format!(
-                    "设备剩余空间不足（剩 {} KB，需要 {} KB + {} KB 预留）",
-                    a.free_bytes / 1024,
-                    bytes.len() / 1024,
-                    FREE_HEADROOM_BYTES / 1024
-                ),
+                i18n::t("audio.upload_no_space")
+                    .replace("{free}", &(a.free_bytes / 1024).to_string())
+                    .replace("{size}", &(bytes.len() / 1024).to_string())
+                    .replace("{headroom}", &(FREE_HEADROOM_BYTES / 1024).to_string()),
             );
             return;
         }
@@ -285,7 +288,11 @@ fn start_upload(handle: &AppHandle, st: &mut AudioPanelState) {
             st.upload_path.clear();
             st.upload_name.clear();
         }
-        Err(e) => toast(handle, ToastKind::Error, format!("上传未开始：{e}")),
+        Err(e) => toast(
+            handle,
+            ToastKind::Error,
+            i18n::t("audio.upload_not_started").replace("{e}", &e.to_string()),
+        ),
     }
 }
 
@@ -295,17 +302,17 @@ fn files_card(handle: &AppHandle, ui: &mut egui::Ui) {
     ui.group(|ui| {
         ui.set_max_width(560.0);
         ui.horizontal(|ui| {
-            ui.label(format!("音频文件（{}）", files.len()));
+            ui.label(i18n::t("audio.files_title").replace("{count}", &files.len().to_string()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new("名称 · 大小 · 试播 / 删除")
+                    egui::RichText::new(i18n::t("audio.files_header"))
                         .weak()
                         .small(),
                 );
             });
         });
         if files.is_empty() {
-            ui.label(egui::RichText::new("暂无文件").weak());
+            ui.label(egui::RichText::new(i18n::t("audio.files_empty")).weak());
             return;
         }
         egui::ScrollArea::vertical()
@@ -316,20 +323,30 @@ fn files_card(handle: &AppHandle, ui: &mut egui::Ui) {
                     ui.horizontal(|ui| {
                         ui.label(&f.name);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("删除").clicked() {
+                            if ui.small_button(i18n::t("audio.files_delete")).clicked() {
                                 if let Err(e) = handle.delete_audio_file(&f.name) {
-                                    toast(handle, ToastKind::Error, format!("删除失败：{e}"));
+                                    toast(
+                                        handle,
+                                        ToastKind::Error,
+                                        i18n::t("audio.files_delete_fail")
+                                            .replace("{e}", &e.to_string()),
+                                    );
                                 } else {
                                     toast(
                                         handle,
                                         ToastKind::Success,
-                                        format!("已删除 {f}，引用它的键位已清空", f = f.name),
+                                        i18n::t("audio.files_deleted").replace("{name}", &f.name),
                                     );
                                 }
                             }
-                            if ui.small_button("试播").clicked() {
+                            if ui.small_button(i18n::t("audio.files_preview")).clicked() {
                                 if let Err(e) = handle.audio_play_file(&f.name) {
-                                    toast(handle, ToastKind::Error, format!("试播失败：{e}"));
+                                    toast(
+                                        handle,
+                                        ToastKind::Error,
+                                        i18n::t("audio.preview_fail")
+                                            .replace("{e}", &e.to_string()),
+                                    );
                                 }
                             }
                             ui.label(
@@ -351,11 +368,9 @@ fn pads_card(handle: &AppHandle, ui: &mut egui::Ui) {
         (a.files.clone(), a.pads.clone())
     };
     ui.group(|ui| {
-        ui.label("键位绑定（K1 ~ K11）");
+        ui.label(i18n::t("audio.pads_title"));
         if files.is_empty() {
-            ui.label(
-                egui::RichText::new("设备上还没有音频文件，先上传后再绑定").weak(),
-            );
+            ui.label(egui::RichText::new(i18n::t("audio.pads_no_files")).weak());
         }
         egui::Grid::new("audio-pads-grid")
             .num_columns(2)
@@ -375,10 +390,7 @@ fn pads_card(handle: &AppHandle, ui: &mut egui::Ui) {
                     ui.end_row();
                 }
             });
-        ui.label(
-            egui::RichText::new("绑定即改即发；设备音效页按键播放，音量跟随设备「音频」设置")
-                .weak(),
-        );
+        ui.label(egui::RichText::new(i18n::t("audio.pads_hint")).weak());
     });
 }
 
@@ -391,13 +403,9 @@ fn pad_row(
     files: &[crate::protocol::AudioFileInfo],
 ) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("K{key}"))
-                .strong()
-                .monospace(),
-        );
+        ui.label(egui::RichText::new(format!("K{key}")).strong().monospace());
         let selected_text = if bound.is_empty() {
-            "（未绑定）".to_string()
+            i18n::t("audio.pads_unbound").to_string()
         } else {
             bound.to_string()
         };
@@ -407,12 +415,16 @@ fn pad_row(
             .show_ui(ui, |ui| {
                 // 「未绑定」选项
                 if ui
-                    .selectable_label(bound.is_empty(), "（未绑定）")
+                    .selectable_label(bound.is_empty(), i18n::t("audio.pads_unbound"))
                     .clicked()
                 {
                     if !bound.is_empty() {
                         if let Err(e) = handle.set_audio_pad(key as u8, "") {
-                            toast(handle, ToastKind::Error, format!("清除绑定失败：{e}"));
+                            toast(
+                                handle,
+                                ToastKind::Error,
+                                i18n::t("audio.pads_clear_fail").replace("{e}", &e.to_string()),
+                            );
                         }
                     }
                 }
@@ -420,25 +432,44 @@ fn pad_row(
                     if ui.selectable_label(*bound == f.name, &f.name).clicked() {
                         if *bound != f.name {
                             if let Err(e) = handle.set_audio_pad(key as u8, &f.name) {
-                                toast(handle, ToastKind::Error, format!("绑定失败：{e}"));
+                                toast(
+                                    handle,
+                                    ToastKind::Error,
+                                    i18n::t("audio.pads_bind_fail").replace("{e}", &e.to_string()),
+                                );
                             }
                         }
                     }
                 }
             });
-        if ui.small_button("试播").clicked() {
+        if ui.small_button(i18n::t("audio.files_preview")).clicked() {
             if bound.is_empty() {
-                toast(handle, ToastKind::Warning, format!("K{key} 未绑定文件"));
+                toast(
+                    handle,
+                    ToastKind::Warning,
+                    i18n::t("audio.pads_key_unbound").replace("{key}", &key.to_string()),
+                );
             } else if let Err(e) = handle.audio_play_key(key as u8) {
-                toast(handle, ToastKind::Error, format!("试播失败：{e}"));
+                toast(
+                    handle,
+                    ToastKind::Error,
+                    i18n::t("audio.preview_fail").replace("{e}", &e.to_string()),
+                );
             }
         }
         if ui
-            .add_enabled(!bound.is_empty(), egui::Button::new("清除").small())
+            .add_enabled(
+                !bound.is_empty(),
+                egui::Button::new(i18n::t("audio.pads_clear")).small(),
+            )
             .clicked()
         {
             if let Err(e) = handle.set_audio_pad(key as u8, "") {
-                toast(handle, ToastKind::Error, format!("清除绑定失败：{e}"));
+                toast(
+                    handle,
+                    ToastKind::Error,
+                    i18n::t("audio.pads_clear_fail").replace("{e}", &e.to_string()),
+                );
             }
         }
     });
@@ -459,16 +490,28 @@ pub fn tick_upload(handle: &AppHandle) {
     if let Some((name, err, total)) = done {
         match err {
             Some(e) if e == "已取消" => {
-                toast(handle, ToastKind::Warning, format!("上传 {name} 已取消"));
+                toast(
+                    handle,
+                    ToastKind::Warning,
+                    i18n::t("audio.upload_cancelled").replace("{name}", &name),
+                );
             }
             Some(e) => {
-                toast(handle, ToastKind::Error, format!("上传 {name} 失败：{e}"));
+                toast(
+                    handle,
+                    ToastKind::Error,
+                    i18n::t("audio.upload_fail")
+                        .replace("{name}", &name)
+                        .replace("{e}", &e),
+                );
             }
             None => {
                 toast(
                     handle,
                     ToastKind::Success,
-                    format!("上传 {name} 完成（{} KB）", total / 1024),
+                    i18n::t("audio.upload_done")
+                        .replace("{name}", &name)
+                        .replace("{size}", &(total / 1024).to_string()),
                 );
             }
         }

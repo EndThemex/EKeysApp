@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::i18n;
 use crate::link::LinkEvent;
 use crate::protocol;
 use crate::state::LogKind;
@@ -34,7 +35,9 @@ pub fn run_shared(
                 Ok(g) => g,
                 Err(_) => {
                     log.push(LogKind::App, "串口锁被毒化".to_string());
-                    let _ = tx.send(LinkEvent::Error("串口锁被毒化".into()));
+                    let _ = tx.send(LinkEvent::Error(
+                        i18n::t("link.reader.lock_poisoned").to_string(),
+                    ));
                     return;
                 }
             };
@@ -44,7 +47,9 @@ pub fn run_shared(
         match read_result {
             Ok(0) => {
                 log.push(LogKind::App, "串口对端关闭".to_string());
-                let _ = tx.send(LinkEvent::Error("串口对端关闭".into()));
+                let _ = tx.send(LinkEvent::Error(
+                    i18n::t("link.reader.peer_closed").to_string(),
+                ));
                 return;
             }
             Ok(n) => {
@@ -72,7 +77,9 @@ pub fn run_shared(
             }
             Err(e) => {
                 log.push(LogKind::App, format!("串口读失败: {e}"));
-                let _ = tx.send(LinkEvent::Error(format!("串口读失败: {e}")));
+                let _ = tx.send(LinkEvent::Error(
+                    i18n::t("link.reader.read_fail").replace("{e}", &e.to_string()),
+                ));
                 return;
             }
         }
@@ -81,7 +88,9 @@ pub fn run_shared(
         if line.len() > 16 * 1024 {
             line.clear();
             log.push(LogKind::App, "单行过长，已丢弃".to_string());
-            let _ = tx.send(LinkEvent::Error("单行过长，已丢弃".into()));
+            let _ = tx.send(LinkEvent::Error(
+                i18n::t("link.reader.line_too_long").to_string(),
+            ));
         }
     }
 }

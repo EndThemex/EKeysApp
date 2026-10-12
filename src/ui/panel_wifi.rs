@@ -5,6 +5,7 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::AppHandle;
 use crate::ui::widgets::settings_panel_scaffold;
 
@@ -12,8 +13,12 @@ use crate::ui::widgets::settings_panel_scaffold;
 pub struct WifiPanelState;
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
-    ui.heading("无线网络");
-    ui.label(egui::RichText::new("修改后下次重启生效").weak().size(12.0));
+    ui.heading(i18n::t("wifi.title"));
+    ui.label(
+        egui::RichText::new(i18n::t("wifi.reboot_hint"))
+            .weak()
+            .size(12.0),
+    );
     ui.add_space(4.0);
 
     settings_panel_scaffold(handle, ui, |ui, snapshot, draft| {
@@ -23,7 +28,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             } else {
                 snapshot.wifi_switch != 0
             };
-            if ui.checkbox(&mut on, "启用无线网络").changed() {
+            if ui.checkbox(&mut on, i18n::t("wifi.enable")).changed() {
                 draft.wifi_switch = if on { 1 } else { 0 };
             }
 
@@ -33,12 +38,15 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             } else {
                 snapshot.connect_host != 0
             };
-            if ui.checkbox(&mut host, "启用与电脑的连接通道").changed() {
+            if ui
+                .checkbox(&mut host, i18n::t("wifi.connect_channel"))
+                .changed()
+            {
                 draft.connect_host = if host { 1 } else { 0 };
             }
 
             ui.add_space(6.0);
-            ui.label("网络名称（最多 32 个字符）");
+            ui.label(i18n::t("wifi.ssid_label"));
             // SSID 是明文回读字段：用"草稿 != 旧快照"判断是否被编辑，
             // 否则用户输入的 SSID 会被设备回传值覆盖。
             let mut ssid = if draft.wifi_ssid != snapshot.wifi_ssid {
@@ -48,7 +56,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut ssid)
-                    .hint_text("请输入 WiFi 名称…")
+                    .hint_text(i18n::t("wifi.ssid_hint"))
                     .desired_width(280.0),
             );
             if resp.changed() {
@@ -56,7 +64,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             }
 
             ui.add_space(6.0);
-            ui.label("网络密码（最多 64 个字符）");
+            ui.label(i18n::t("wifi.password_label"));
             // 设备回读的密码在 apply_settings_snapshot 中被 mask_sensitive 替换为 "***"，
             // 不能用 is_empty() 当"未编辑"哨兵：
             //   - 用户编辑后 draft="新密码" 与 snapshot="***" 永远不等 → 「应用下发」按钮一直可点
@@ -76,7 +84,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, _st: &mut WifiPanelState) {
             };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut pw)
-                    .hint_text("请输入 WiFi 密码…")
+                    .hint_text(i18n::t("wifi.password_hint"))
                     .password(true)
                     .desired_width(280.0)
                     .id_salt("wifi_password"),

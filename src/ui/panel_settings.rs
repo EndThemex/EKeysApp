@@ -3,6 +3,7 @@
 use eframe::egui;
 use std::sync::Arc;
 
+use crate::i18n;
 use crate::protocol::DeviceSettings;
 use crate::state::{AppHandle, UiConfirmKind, UiEvent};
 use crate::ui::widgets::{apply_diff, settings_panel_scaffold};
@@ -27,12 +28,12 @@ pub enum SettingsTab {
 impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
-            SettingsTab::Display => "显示",
-            SettingsTab::Keyboard => "键盘",
-            SettingsTab::Audio => "音频",
-            SettingsTab::Power => "电源",
-            SettingsTab::PcStatus => "PC 状态",
-            SettingsTab::Firmware => "固件升级",
+            SettingsTab::Display => i18n::t("settings.tab.display"),
+            SettingsTab::Keyboard => i18n::t("settings.tab.keyboard"),
+            SettingsTab::Audio => i18n::t("settings.tab.audio"),
+            SettingsTab::Power => i18n::t("settings.tab.power"),
+            SettingsTab::PcStatus => i18n::t("settings.tab.pc_status"),
+            SettingsTab::Firmware => i18n::t("settings.tab.firmware"),
         }
     }
 
@@ -88,17 +89,12 @@ pub struct SettingsPanelState {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
-    ui.heading("设备");
+    ui.heading(i18n::t("settings.page.title"));
     ui.add_space(4.0);
 
     // 在线但尚未成功读到 0x07 全量快照 → 提示用户当前展示的不是设备真实配置
     if handle.state.lock().unwrap().is_online() && !handle.is_config_loaded() {
-        ui.label(
-            egui::RichText::new(
-                "正在读取设备配置…（若长时间无变化，请查看日志或点击顶栏「刷新」）",
-            )
-            .weak(),
-        );
+        ui.label(egui::RichText::new(i18n::t("settings.page.loading")).weak());
         ui.add_space(4.0);
     }
 
@@ -168,20 +164,24 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
 
 fn display_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label("屏幕主题");
+        ui.label(i18n::t("settings.display.theme"));
         let mut theme = draft.tft_theme.max(snap.tft_theme);
         egui::ComboBox::from_id_salt("tft-theme")
-            .selected_text(if theme == 0 { "深色" } else { "浅色" })
+            .selected_text(if theme == 0 {
+                i18n::t("settings.display.theme.dark")
+            } else {
+                i18n::t("settings.display.theme.light")
+            })
             .show_ui(ui, |cb| {
-                cb.selectable_value(&mut theme, 0, "深色");
-                cb.selectable_value(&mut theme, 1, "浅色");
+                cb.selectable_value(&mut theme, 0, i18n::t("settings.display.theme.dark"));
+                cb.selectable_value(&mut theme, 1, i18n::t("settings.display.theme.light"));
             });
         if theme != snap.tft_theme {
             draft.tft_theme = theme;
         }
         ui.add_space(6.0);
 
-        ui.label("屏幕背光（范围 5~100）");
+        ui.label(i18n::t("settings.display.backlight"));
         // slider 优先展示 draft：存在待下发的亮度变更时显示草稿值，
         // 否则每帧从 snap 取值会在松手后把滑块"顶回"设备旧值，
         // 看起来像被自动覆盖（draft 实际一直持有新值，只是没展示）。
@@ -208,7 +208,7 @@ fn keyboard_tab(
     handle: &AppHandle,
 ) {
     ui.group(|ui| {
-        ui.label("连接方式");
+        ui.label(i18n::t("settings.keyboard.mode"));
         let mut mode = if draft.work_mode != 0 || snap.work_mode != 0 {
             draft.work_mode
         } else {
@@ -217,9 +217,9 @@ fn keyboard_tab(
         egui::ComboBox::from_id_salt("work-mode")
             .selected_text(work_mode_label(mode))
             .show_ui(ui, |cb| {
-                cb.selectable_value(&mut mode, 0, "USB 有线");
-                cb.selectable_value(&mut mode, 1, "蓝牙");
-                cb.selectable_value(&mut mode, 2, "2.4G 无线");
+                cb.selectable_value(&mut mode, 0, i18n::t("settings.keyboard.mode.usb"));
+                cb.selectable_value(&mut mode, 1, i18n::t("settings.keyboard.mode.bluetooth"));
+                cb.selectable_value(&mut mode, 2, i18n::t("settings.keyboard.mode.wireless_24g"));
             });
         // 危险操作 → 走 confirm。
         // 弹窗「是」由 app.rs 下一帧置位 pending_confirm，此时组合框选中值
@@ -250,9 +250,9 @@ fn keyboard_tab(
         }
         ui.add_space(6.0);
 
-        ui.label("当前按键配置");
+        ui.label(i18n::t("settings.keyboard.profile.active"));
         ui.label(if snap.active_profile_name.is_empty() {
-            "（未知）"
+            i18n::t("settings.common.unknown")
         } else {
             &snap.active_profile_name
         });
@@ -264,7 +264,7 @@ fn keyboard_tab(
                 ui,
                 resp.rect,
                 crate::ui::icons::CUSTOM_ICON,
-                "已设置自定义图标",
+                i18n::t("settings.keyboard.icon.custom"),
                 13.0,
                 ui.style().visuals.text_color(),
                 4.0,
@@ -272,17 +272,21 @@ fn keyboard_tab(
         }
         ui.add_space(6.0);
 
-        ui.label("切换按键配置（共 8 组）");
+        ui.label(i18n::t("settings.keyboard.profile.switch"));
         let mut p = if draft.active_keymap_profile != 0 || snap.active_keymap_profile != 0 {
             draft.active_keymap_profile
         } else {
             snap.active_keymap_profile
         };
         egui::ComboBox::from_id_salt("profile")
-            .selected_text(format!("配置 {p}"))
+            .selected_text(i18n::t("settings.keyboard.profile.name").replace("{n}", &p.to_string()))
             .show_ui(ui, |cb| {
                 for i in 0..=7 {
-                    cb.selectable_value(&mut p, i, format!("配置 {i}"));
+                    cb.selectable_value(
+                        &mut p,
+                        i,
+                        i18n::t("settings.keyboard.profile.name").replace("{n}", &i.to_string()),
+                    );
                 }
             });
         if p != snap.active_keymap_profile {
@@ -293,16 +297,16 @@ fn keyboard_tab(
         ui.add_space(4.0);
 
         // Profile 图标：0x11 CMD_PROFILE_ICON_SET 上传 / 清除
-        ui.label("按键配置图标（建议 PNG，≤ 48×48，文件 ≤ 2 KB）");
+        ui.label(i18n::t("settings.keyboard.icon.path"));
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut st.icon_path)
-                    .hint_text("选择 PNG 图片文件…")
+                    .hint_text(i18n::t("settings.keyboard.icon.path_hint"))
                     .desired_width(280.0),
             );
-            if ui.button("浏览…").clicked() {
+            if ui.button(i18n::t("settings.common.browse")).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PNG 图片", &["png"])
+                    .add_filter(i18n::t("settings.keyboard.icon.filter"), &["png"])
                     .pick_file()
                 {
                     st.icon_path = path.display().to_string();
@@ -310,12 +314,15 @@ fn keyboard_tab(
             }
             let uploading = !st.icon_path.trim().is_empty();
             if ui
-                .add_enabled(uploading, egui::Button::new("上传"))
+                .add_enabled(
+                    uploading,
+                    egui::Button::new(i18n::t("settings.keyboard.icon.upload")),
+                )
                 .clicked()
             {
                 upload_profile_icon(handle, st, p as u8, st.icon_path.trim().to_string());
             }
-            if ui.button("清除图标").clicked() {
+            if ui.button(i18n::t("settings.keyboard.icon.clear")).clicked() {
                 clear_profile_icon(handle, p as u8);
             }
         });
@@ -333,7 +340,10 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
-            toast(crate::state::ToastKind::Error, format!("读取文件失败：{e}"));
+            toast(
+                crate::state::ToastKind::Error,
+                i18n::t("settings.common.read_file_fail").replace("{error}", &e.to_string()),
+            );
             return;
         }
     };
@@ -341,7 +351,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         toast(
             crate::state::ToastKind::Error,
-            "所选文件不是有效的 PNG 图片".to_string(),
+            i18n::t("settings.icon.invalid_png").to_string(),
         );
         return;
     }
@@ -349,7 +359,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     if let Err(e) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
         toast(
             crate::state::ToastKind::Error,
-            format!("无法解析 PNG 图片：{e}"),
+            i18n::t("settings.icon.parse_fail").replace("{error}", &e.to_string()),
         );
         return;
     }
@@ -358,7 +368,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     if b64.len() > 1400 {
         toast(
             crate::state::ToastKind::Error,
-            format!("图片过大（编码后 {} 字节），请压缩到 48×48 以下", b64.len()),
+            i18n::t("settings.icon.too_large").replace("{bytes}", &b64.len().to_string()),
         );
         return;
     }
@@ -372,7 +382,7 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
     let Some(data) = serde_json::to_value(&req).ok() else {
         toast(
             crate::state::ToastKind::Error,
-            "请求数据生成失败".to_string(),
+            i18n::t("settings.common.request_build_fail").to_string(),
         );
         return;
     };
@@ -391,17 +401,23 @@ fn upload_profile_icon(handle: &AppHandle, st: &mut SettingsPanelState, profile:
                     d.active_profile_has_custom_icon = true;
                     toast(
                         crate::state::ToastKind::Success,
-                        format!("配置 {profile} 的图标已更新"),
+                        i18n::t("settings.icon.upload_done").replace("{n}", &profile.to_string()),
                     );
                     st.icon_path.clear();
                 } else {
                     let msg = frame
                         .error
-                        .unwrap_or_else(|| "设备未接受新图标".to_string());
-                    toast(crate::state::ToastKind::Error, format!("上传失败：{msg}"));
+                        .unwrap_or_else(|| i18n::t("settings.icon.device_rejected").to_string());
+                    toast(
+                        crate::state::ToastKind::Error,
+                        i18n::t("settings.icon.upload_fail").replace("{error}", &msg),
+                    );
                 }
             }
-            Err(e) => toast(crate::state::ToastKind::Error, format!("上传超时：{e}")),
+            Err(e) => toast(
+                crate::state::ToastKind::Error,
+                i18n::t("settings.icon.upload_timeout").replace("{error}", &e),
+            ),
         }
     });
 }
@@ -423,7 +439,7 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
     let Some(data) = serde_json::to_value(&req).ok() else {
         toast(
             crate::state::ToastKind::Error,
-            "请求数据生成失败".to_string(),
+            i18n::t("settings.common.request_build_fail").to_string(),
         );
         return;
     };
@@ -441,23 +457,29 @@ fn clear_profile_icon(handle: &AppHandle, profile: u8) {
                     d.active_profile_has_custom_icon = false;
                     toast(
                         crate::state::ToastKind::Success,
-                        format!("配置 {profile} 的图标已清除"),
+                        i18n::t("settings.icon.clear_done").replace("{n}", &profile.to_string()),
                     );
                 } else {
                     let msg = frame
                         .error
-                        .unwrap_or_else(|| "设备未接受清除请求".to_string());
-                    toast(crate::state::ToastKind::Error, format!("清除失败：{msg}"));
+                        .unwrap_or_else(|| i18n::t("settings.icon.clear_rejected").to_string());
+                    toast(
+                        crate::state::ToastKind::Error,
+                        i18n::t("settings.icon.clear_fail").replace("{error}", &msg),
+                    );
                 }
             }
-            Err(e) => toast(crate::state::ToastKind::Error, format!("清除超时：{e}")),
+            Err(e) => toast(
+                crate::state::ToastKind::Error,
+                i18n::t("settings.icon.clear_timeout").replace("{error}", &e),
+            ),
         }
     });
 }
 
 fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label("音量（范围 0~100）");
+        ui.label(i18n::t("settings.audio.volume"));
         // 直接读 draft：未编辑时 draft 经 merge_push 始终跟随 snapshot，
         // 不能取 max（否则低于当前值的修改会被立刻回显成旧值，
         // 只能调大不能调小）。
@@ -474,7 +496,10 @@ fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetting
         } else {
             snap.audio_enable != 0
         };
-        if ui.checkbox(&mut enable, "启用音频输出").changed() {
+        if ui
+            .checkbox(&mut enable, i18n::t("settings.audio.enable"))
+            .changed()
+        {
             draft.audio_enable = if enable { 1 } else { 0 };
         }
     });
@@ -482,13 +507,13 @@ fn audio_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSetting
 
 fn power_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label("节能策略");
+        ui.label(i18n::t("settings.power.policy"));
         let mut pm = draft.power_mode.max(snap.power_mode);
         egui::ComboBox::from_id_salt("power-mode")
             .selected_text(power_mode_label(pm))
             .show_ui(ui, |cb| {
-                cb.selectable_value(&mut pm, 0, "性能优先");
-                cb.selectable_value(&mut pm, 1, "省电优先");
+                cb.selectable_value(&mut pm, 0, i18n::t("settings.power.mode.performance"));
+                cb.selectable_value(&mut pm, 1, i18n::t("settings.power.mode.saving"));
             });
         if pm != snap.power_mode {
             draft.power_mode = pm;
@@ -515,25 +540,17 @@ fn pc_status_tab(
     use std::time::{Duration, Instant};
 
     ui.group(|ui| {
-        ui.strong("主机状态推送");
+        ui.strong(i18n::t("settings.pc.group.push"));
         ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(
-                "启用后，应用会定时把大写锁定、数字锁定、滚动锁定与网络连通状态推送给设备，\
-                 设备屏幕上的指示灯即可随之刷新。默认关闭，避免无意间共享主机状态。",
-            )
-            .weak(),
-        );
+        ui.label(egui::RichText::new(i18n::t("settings.pc.push.desc")).weak());
         ui.add_space(4.0);
 
         // 1) 启用开关
         let mut enabled = handle.pc_status_push_enabled.load(Ordering::Relaxed);
         let online = handle.state.lock().unwrap().is_online();
         if ui
-            .checkbox(&mut enabled, "向设备同步主机状态")
-            .on_hover_text(
-                "勾选后立即生效；启用时只在「在线」状态下发送，频率约每秒一次；退出应用时会自动记住选择。",
-            )
+            .checkbox(&mut enabled, i18n::t("settings.pc.enable"))
+            .on_hover_text(i18n::t("settings.pc.enable.hint"))
             .changed()
         {
             handle
@@ -545,27 +562,27 @@ fn pc_status_tab(
             let _ = handle.ui_tx.send(UiEvent::Toast(
                 crate::state::ToastKind::Info,
                 if enabled {
-                    "已开始向设备推送主机状态".to_string()
+                    i18n::t("settings.pc.toast.on").to_string()
                 } else {
-                    "已停止向设备推送主机状态".to_string()
+                    i18n::t("settings.pc.toast.off").to_string()
                 },
             ));
         }
 
         ui.add_space(4.0);
         let status_text = match (enabled, online) {
-            (false, _) => "未启用",
-            (true, false) => "等待设备连接…",
-            (true, true) => "正在推送（每秒一次）",
+            (false, _) => i18n::t("settings.pc.state.disabled"),
+            (true, false) => i18n::t("settings.pc.state.waiting"),
+            (true, true) => i18n::t("settings.pc.state.pushing"),
         };
-        ui.label(format!("当前状态：{status_text}"));
+        ui.label(i18n::t("settings.pc.state.label").replace("{status}", status_text));
 
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
 
         // 2) 实时快照展示（节流 1s，避免每帧都 GetAsyncKeyState）
-        ui.strong("主机实时状态");
+        ui.strong(i18n::t("settings.pc.group.live"));
         ui.add_space(2.0);
         let due = st
             .pc_status_snapshot_at
@@ -576,23 +593,23 @@ fn pc_status_tab(
             st.pc_status_snapshot_at = Some(Instant::now());
         }
         let Some(snap): Option<PcStatus> = st.pc_status_snapshot.clone() else {
-            ui.label("（尚未采集）");
+            ui.label(i18n::t("settings.pc.empty"));
             return;
         };
         egui::Grid::new("pc-status-grid")
             .num_columns(2)
             .spacing([10.0, 4.0])
             .show(ui, |ui| {
-                ui.label("大写锁定 Caps");
+                ui.label(i18n::t("settings.pc.caps"));
                 ui.label(lock_label(snap.caps_lock));
                 ui.end_row();
-                ui.label("数字锁定 Num");
+                ui.label(i18n::t("settings.pc.num"));
                 ui.label(lock_label(snap.num_lock));
                 ui.end_row();
-                ui.label("滚动锁定 Scroll");
+                ui.label(i18n::t("settings.pc.scroll"));
                 ui.label(lock_label(snap.scroll_lock));
                 ui.end_row();
-                ui.label("网络连通");
+                ui.label(i18n::t("settings.pc.network"));
                 ui.label(network_label(snap.network_connected));
                 ui.end_row();
             });
@@ -601,17 +618,17 @@ fn pc_status_tab(
 
 fn lock_label(v: Option<bool>) -> String {
     match v {
-        Some(true) => "已开启".into(),
-        Some(false) => "未开启".into(),
-        None => "（未采集）".into(),
+        Some(true) => i18n::t("settings.pc.lock.on").into(),
+        Some(false) => i18n::t("settings.pc.lock.off").into(),
+        None => i18n::t("settings.common.not_captured").into(),
     }
 }
 
 fn network_label(v: Option<bool>) -> String {
     match v {
-        Some(true) => "已连接".into(),
-        Some(false) => "未连接".into(),
-        None => "（未采集）".into(),
+        Some(true) => i18n::t("settings.pc.network.connected").into(),
+        Some(false) => i18n::t("settings.pc.network.disconnected").into(),
+        None => i18n::t("settings.common.not_captured").into(),
     }
 }
 
@@ -645,26 +662,26 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
         match outcome {
             Ok(Ok(frame)) => {
                 if frame.status() == Some(0) {
-                    st.fw_status = Some(format!(
-                        "设备已确认，正在从本机下载固件（{}）…下载并校验通过后自动重启，全程约 1~2 分钟",
-                        st.fw_url
-                    ));
+                    st.fw_status =
+                        Some(i18n::t("settings.fw.ota.confirmed").replace("{url}", &st.fw_url));
                     st.fw_status_is_err = false;
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Success,
-                        "OTA 已触发，设备开始下载固件".to_string(),
+                        i18n::t("settings.fw.ota.triggered").to_string(),
                     ));
                     handle.log_kind(crate::state::LogKind::Tx, format!("OTA → {}", st.fw_url));
                 } else {
-                    let msg = frame.error.unwrap_or_else(|| "设备拒绝升级".to_string());
+                    let msg = frame
+                        .error
+                        .unwrap_or_else(|| i18n::t("settings.fw.ota.rejected").to_string());
                     if let Some(mut srv) = st.fw_server.take() {
                         srv.stop();
                     }
-                    st.fw_status = Some(format!("升级失败：{msg}"));
+                    st.fw_status = Some(i18n::t("settings.fw.ota.fail").replace("{error}", &msg));
                     st.fw_status_is_err = true;
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Error,
-                        format!("升级失败：{msg}"),
+                        i18n::t("settings.fw.ota.fail").replace("{error}", &msg),
                     ));
                 }
                 st.fw_ota_rx = None;
@@ -673,11 +690,11 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
                 if let Some(mut srv) = st.fw_server.take() {
                     srv.stop();
                 }
-                st.fw_status = Some(format!("升级请求失败：{e}"));
+                st.fw_status = Some(i18n::t("settings.fw.ota.request_fail").replace("{error}", &e));
                 st.fw_status_is_err = true;
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                     crate::state::ToastKind::Error,
-                    format!("升级请求失败：{e}"),
+                    i18n::t("settings.fw.ota.request_fail").replace("{error}", &e),
                 ));
                 st.fw_ota_rx = None;
             }
@@ -699,16 +716,11 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
                     // 设备即将复位：主动断开连接让出 COM 口给烧录工具
                     //（download_mode_armed 已在请求发出前置位，重连被抑制）
                     handle.detach_link();
-                    st.fw_status = Some(
-                        "设备已重启进入烧录模式，连接已断开。\
-                         请使用 idf.py flash / esptool 烧录；\
-                         烧录完成后在顶栏重新连接设备。"
-                            .into(),
-                    );
+                    st.fw_status = Some(i18n::t("settings.fw.download.done").into());
                     st.fw_status_is_err = false;
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Success,
-                        "设备已进入烧录模式".to_string(),
+                        i18n::t("settings.fw.download.toast_ok").to_string(),
                     ));
                 } else {
                     // 设备明确拒绝（如旧固件不认识 0x14）：解除重连抑制
@@ -717,12 +729,13 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
                         .store(false, std::sync::atomic::Ordering::Release);
                     let msg = frame
                         .error
-                        .unwrap_or_else(|| "设备拒绝进入烧录模式".to_string());
-                    st.fw_status = Some(format!("进入烧录模式失败：{msg}"));
+                        .unwrap_or_else(|| i18n::t("settings.fw.download.rejected").to_string());
+                    st.fw_status =
+                        Some(i18n::t("settings.fw.download.fail").replace("{error}", &msg));
                     st.fw_status_is_err = true;
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Error,
-                        format!("进入烧录模式失败：{msg}"),
+                        i18n::t("settings.fw.download.fail").replace("{error}", &msg),
                     ));
                 }
             }
@@ -736,16 +749,11 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
                     format!("烧录模式请求未收到确认: {e}（设备可能已复位）"),
                 );
                 handle.detach_link();
-                st.fw_status = Some(
-                    "未收到设备确认（响应可能在复位前丢失）。\
-                     设备大概率已进入烧录模式，可直接尝试烧录；\
-                     若未进入，请手动重连后重试。"
-                        .into(),
-                );
+                st.fw_status = Some(i18n::t("settings.fw.download.no_confirm").into());
                 st.fw_status_is_err = true;
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                     crate::state::ToastKind::Warning,
-                    "未收到设备确认，可能已进入烧录模式".to_string(),
+                    i18n::t("settings.fw.download.no_confirm_toast").to_string(),
                 ));
             }
             Err(TryRecvError::Empty) => {} // 等待设备确认中（最多 3s）
@@ -756,23 +764,23 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
     }
 
     ui.group(|ui| {
-        ui.strong("当前固件");
+        ui.strong(i18n::t("settings.fw.group.info"));
         ui.add_space(2.0);
         let info = handle.device_info.lock().unwrap();
         egui::Grid::new("fw-info-grid")
             .num_columns(2)
             .spacing([10.0, 4.0])
             .show(ui, |ui| {
-                ui.label("设备名称");
+                ui.label(i18n::t("settings.fw.info.name"));
                 ui.label(if info.device_name.is_empty() {
-                    "（未知）"
+                    i18n::t("settings.common.unknown")
                 } else {
                     &info.device_name
                 });
                 ui.end_row();
-                ui.label("固件版本");
+                ui.label(i18n::t("settings.fw.info.version"));
                 ui.label(if info.firmware_version.is_empty() {
-                    "（未知）"
+                    i18n::t("settings.common.unknown")
                 } else {
                     &info.firmware_version
                 });
@@ -784,28 +792,21 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
     if show_ota_ui() {
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.strong("固件升级（OTA）");
+            ui.strong(i18n::t("settings.fw.ota.group"));
             ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(
-                    "选择固件文件后，应用会在本机临时开启一个 HTTP 服务，\
-                 设备通过 Wi-Fi 下载并自动校验 MD5。升级期间请保持设备供电、\
-                 不要断开 Wi-Fi；成功后设备会自动重启进入新固件。",
-                )
-                .weak(),
-            );
+            ui.label(egui::RichText::new(i18n::t("settings.fw.ota.desc")).weak());
             ui.add_space(4.0);
 
             // 1) 选择固件文件
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut st.fw_path)
-                        .hint_text("点击「浏览…」选择 .bin 固件文件")
+                        .hint_text(i18n::t("settings.fw.ota.pick_hint"))
                         .desired_width(280.0),
                 );
-                if ui.button("浏览…").clicked() {
+                if ui.button(i18n::t("settings.common.browse")).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("固件文件", &["bin"])
+                        .add_filter(i18n::t("settings.fw.ota.filter"), &["bin"])
                         .pick_file()
                     {
                         pick_firmware_file(handle, st, &path);
@@ -813,12 +814,12 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
                 }
             });
             if st.fw_bytes.is_some() {
-                ui.label(format!(
-                    "大小：{} 字节（{:.1} KB）",
-                    st.fw_size,
-                    st.fw_size as f64 / 1024.0
-                ));
-                ui.monospace(format!("MD5：{}", st.fw_md5));
+                ui.label(
+                    i18n::t("settings.fw.ota.size")
+                        .replace("{bytes}", &st.fw_size.to_string())
+                        .replace("{kb}", &format!("{:.1}", st.fw_size as f64 / 1024.0)),
+                );
+                ui.monospace(i18n::t("settings.fw.ota.md5").replace("{md5}", &st.fw_md5));
             }
 
             ui.add_space(6.0);
@@ -831,28 +832,30 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
                     .add_enabled(
                         ready,
                         egui::Button::new(if starting {
-                            "等待设备确认…"
+                            i18n::t("settings.common.waiting_confirm")
                         } else {
-                            "开始升级"
+                            i18n::t("settings.fw.ota.start")
                         }),
                     )
                     .on_disabled_hover_text(if !online {
-                        "设备未连接"
+                        i18n::t("settings.common.device_offline")
                     } else if st.fw_bytes.is_none() {
-                        "请先选择固件文件"
+                        i18n::t("settings.fw.ota.pick_first")
                     } else {
-                        "正在处理中"
+                        i18n::t("settings.common.busy")
                     })
                     .clicked()
                 {
                     start_ota(handle, st);
                 }
-                if (st.fw_server.is_some() || starting) && ui.button("取消升级").clicked() {
+                if (st.fw_server.is_some() || starting)
+                    && ui.button(i18n::t("settings.fw.ota.cancel")).clicked()
+                {
                     if let Some(mut srv) = st.fw_server.take() {
                         srv.stop();
                     }
                     st.fw_ota_rx = None;
-                    st.fw_status = Some("已取消：本地下载服务已关闭".into());
+                    st.fw_status = Some(i18n::t("settings.fw.ota.cancelled").into());
                     st.fw_status_is_err = false;
                 }
             });
@@ -870,12 +873,9 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
             if !online {
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(
-                        "提示：设备未连接。升级前请先在顶栏连接设备，\
-                         并确认设备已加入与电脑相同的 Wi-Fi 网络（Wi-Fi 页可配置）。",
-                    )
-                    .weak()
-                    .size(11.0),
+                    egui::RichText::new(i18n::t("settings.fw.ota.offline_hint"))
+                        .weak()
+                        .size(11.0),
                 );
             }
         });
@@ -883,31 +883,24 @@ fn firmware_tab(ui: &mut egui::Ui, st: &mut SettingsPanelState, handle: &AppHand
 
     ui.add_space(8.0);
     ui.group(|ui| {
-        ui.strong("进入烧录模式");
+        ui.strong(i18n::t("settings.fw.download.enter"));
         ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(
-                "设备将立即复位进入 USB 下载模式（无需按 BOOT 键），当前连接会断开，\
-                 应用在烧录完成前不会自动重连，以免占用串口。\
-                 烧录完成后请在顶栏重新连接设备。",
-            )
-            .weak(),
-        );
+        ui.label(egui::RichText::new(i18n::t("settings.fw.download.desc")).weak());
         ui.add_space(4.0);
         let waiting = st.fw_download_rx.is_some();
         if ui
             .add_enabled(
                 online && !waiting,
                 egui::Button::new(if waiting {
-                    "等待设备确认…"
+                    i18n::t("settings.common.waiting_confirm")
                 } else {
-                    "进入烧录模式"
+                    i18n::t("settings.fw.download.enter")
                 }),
             )
             .on_disabled_hover_text(if !online {
-                "设备未连接"
+                i18n::t("settings.common.device_offline")
             } else if waiting {
-                "正在处理中"
+                i18n::t("settings.common.busy")
             } else {
                 ""
             })
@@ -930,7 +923,7 @@ fn start_download_mode(handle: &AppHandle, st: &mut SettingsPanelState) {
 
     // 先武装抑制标记再发请求：设备复位导致的被动断开也必须跳过重连
     handle.download_mode_armed.store(true, Ordering::Release);
-    st.fw_status = Some("已发送进入烧录模式请求，等待设备确认…".into());
+    st.fw_status = Some(i18n::t("settings.fw.download.request_sent").into());
     st.fw_status_is_err = false;
 
     match handle.with_link(|lm| {
@@ -946,11 +939,11 @@ fn start_download_mode(handle: &AppHandle, st: &mut SettingsPanelState) {
         None => {
             // 未连接：解除抑制，避免残留标记影响后续正常重连
             handle.download_mode_armed.store(false, Ordering::Release);
-            st.fw_status = Some("设备未连接".into());
+            st.fw_status = Some(i18n::t("settings.common.device_offline").into());
             st.fw_status_is_err = true;
             let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                 crate::state::ToastKind::Error,
-                "设备未连接".to_string(),
+                i18n::t("settings.common.device_offline").to_string(),
             ));
         }
     }
@@ -964,7 +957,10 @@ fn pick_firmware_file(handle: &AppHandle, st: &mut SettingsPanelState, path: &st
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            toast(crate::state::ToastKind::Error, format!("读取文件失败：{e}"));
+            toast(
+                crate::state::ToastKind::Error,
+                i18n::t("settings.common.read_file_fail").replace("{error}", &e.to_string()),
+            );
             return;
         }
     };
@@ -972,12 +968,15 @@ fn pick_firmware_file(handle: &AppHandle, st: &mut SettingsPanelState, path: &st
     if bytes.first() != Some(&0xE9) {
         toast(
             crate::state::ToastKind::Error,
-            "所选文件不是有效的 ESP32 固件镜像（首字节非 0xE9）".to_string(),
+            i18n::t("settings.fw.pick.invalid").to_string(),
         );
         return;
     }
     if bytes.is_empty() {
-        toast(crate::state::ToastKind::Error, "固件文件为空".to_string());
+        toast(
+            crate::state::ToastKind::Error,
+            i18n::t("settings.fw.pick.empty").to_string(),
+        );
         return;
     }
     st.fw_path = path.display().to_string();
@@ -1015,7 +1014,7 @@ fn start_ota(handle: &AppHandle, st: &mut SettingsPanelState) {
         Err(e) => {
             toast(
                 crate::state::ToastKind::Error,
-                format!("启动本地下载服务失败：{e}"),
+                i18n::t("settings.fw.ota.server_fail").replace("{error}", &e.to_string()),
             );
             return;
         }
@@ -1024,7 +1023,7 @@ fn start_ota(handle: &AppHandle, st: &mut SettingsPanelState) {
     let Some(ip) = local_lan_ip() else {
         toast(
             crate::state::ToastKind::Error,
-            "无法获取本机局域网 IP，请确认电脑已联网".to_string(),
+            i18n::t("settings.fw.ota.no_ip").to_string(),
         );
         return;
     };
@@ -1042,33 +1041,36 @@ fn start_ota(handle: &AppHandle, st: &mut SettingsPanelState) {
     }) {
         Some(rx) => {
             st.fw_ota_rx = Some(rx);
-            st.fw_status = Some("已发送升级请求，等待设备确认…".into());
+            st.fw_status = Some(i18n::t("settings.fw.ota.request_sent").into());
             st.fw_status_is_err = false;
         }
         None => {
             if let Some(mut srv) = st.fw_server.take() {
                 srv.stop();
             }
-            st.fw_status = Some("设备未连接".into());
+            st.fw_status = Some(i18n::t("settings.common.device_offline").into());
             st.fw_status_is_err = true;
-            toast(crate::state::ToastKind::Error, "设备未连接".to_string());
+            toast(
+                crate::state::ToastKind::Error,
+                i18n::t("settings.common.device_offline").to_string(),
+            );
         }
     }
 }
 
 fn work_mode_label(m: i32) -> String {
     match m {
-        0 => "USB 有线".into(),
-        1 => "蓝牙".into(),
-        2 => "2.4G 无线".into(),
-        _ => format!("未知（{m}）"),
+        0 => i18n::t("settings.keyboard.mode.usb").into(),
+        1 => i18n::t("settings.keyboard.mode.bluetooth").into(),
+        2 => i18n::t("settings.keyboard.mode.wireless_24g").into(),
+        _ => i18n::t("settings.keyboard.mode.unknown").replace("{n}", &m.to_string()),
     }
 }
 
 fn power_mode_label(m: i32) -> String {
     match m {
-        0 => "性能优先".into(),
-        1 => "省电优先".into(),
-        _ => format!("模式 {m}"),
+        0 => i18n::t("settings.power.mode.performance").into(),
+        1 => i18n::t("settings.power.mode.saving").into(),
+        _ => i18n::t("settings.power.mode.unknown").replace("{n}", &m.to_string()),
     }
 }

@@ -2,6 +2,7 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::link::LinkEvent;
 use crate::protocol::{
     CMD_CONFIG_GET, CMD_MUSIC_CONTROL, CMD_MUSIC_STATUS, CMD_PC_STATUS, CMD_PROFILE_STATE,
@@ -154,7 +155,9 @@ impl WxiApp {
                         self.handle
                             .log_kind(LogKind::Rx, format!("ACK ← 0x{:02X}", f.cmd));
                     } else {
-                        let msg = f.error.unwrap_or_else(|| "未知错误".into());
+                        let msg = f
+                            .error
+                            .unwrap_or_else(|| i18n::t("common.unknown_error").into());
                         self.handle.log_kind(LogKind::App, format!("错误: {msg}"));
                         push_toast(&mut self.toasts, ToastKind::Error, msg, 5000);
                     }
@@ -275,18 +278,14 @@ impl WxiApp {
                 }
                 UiEvent::ConfirmYes(kind) => match kind {
                     UiConfirmKind::SwitchWorkMode => {
-                        self.confirm_title = "切换工作模式".into();
-                        self.confirm_body =
-                            "切换工作模式将重建键盘实例，期间无法响应按键，是否继续？".into();
+                        self.confirm_title = i18n::t("dlg.work_mode.title").into();
+                        self.confirm_body = i18n::t("dlg.work_mode.body").into();
                         self.confirm_kind = Some(kind);
                         self.confirm_open = true;
                     }
                     UiConfirmKind::EnterDownloadMode => {
-                        self.confirm_title = "进入烧录模式".into();
-                        self.confirm_body = "设备将立即复位进入烧录（下载）模式，当前连接会断开，\
-                                             之后可用 idf.py flash / esptool 烧录固件。\
-                                             烧录完成后请在顶栏重新连接设备。是否继续？"
-                            .into();
+                        self.confirm_title = i18n::t("dlg.download.title").into();
+                        self.confirm_body = i18n::t("dlg.download.body").into();
                         self.confirm_kind = Some(kind);
                         self.confirm_open = true;
                     }

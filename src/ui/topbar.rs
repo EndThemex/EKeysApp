@@ -8,6 +8,7 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::link::serial::WCH_VID;
 use crate::link::{ConnectionState, LinkManager, PortInfo};
 use crate::state::{AppHandle, UiEvent};
@@ -63,7 +64,12 @@ fn interactive_border(dark: bool) -> egui::Stroke {
     egui::Stroke::new(1.0, color)
 }
 
-pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: &mut ConnectPanelState) {
+pub fn show(
+    handle: &AppHandle,
+    ui: &mut egui::Ui,
+    port_name: Option<&str>,
+    st: &mut ConnectPanelState,
+) {
     let state = handle.state.lock().unwrap().clone();
     let is_online = matches!(state, ConnectionState::Online);
     // 状态色按主题取色：亮黄 / 亮绿在白底上对比不足，浅色主题用加深变体。
@@ -71,19 +77,19 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
     let (color, label) = match &state {
         ConnectionState::Online => (
             colors::themed(dark, colors::STATUS_GREEN, colors::STATUS_GREEN_L),
-            "在线",
+            i18n::t("top.status.online"),
         ),
         ConnectionState::Connecting | ConnectionState::Reconnecting => (
             colors::themed(dark, colors::STATUS_YELLOW, colors::STATUS_YELLOW_L),
             if matches!(state, ConnectionState::Reconnecting) {
-                "重连中"
+                i18n::t("top.status.reconnecting")
             } else {
-                "连接中"
+                i18n::t("top.status.connecting")
             },
         ),
         ConnectionState::Disconnected => (
             colors::themed(dark, colors::STATUS_GREY, colors::STATUS_GREY_L),
-            "未连接",
+            i18n::t("top.status.disconnected"),
         ),
     };
 
@@ -117,7 +123,10 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
 
         // 端口下拉 + 扫描
         ui.horizontal(|ui| {
-            let display = st.selected.clone().unwrap_or_else(|| "(无)".to_string());
+            let display = st
+                .selected
+                .clone()
+                .unwrap_or_else(|| i18n::t("top.port.none").to_string());
             // ComboBox 自身在两种主题下的边框都偏淡，套一层 Frame 强制画出
             // 清晰轮廓 + 次级底色，让下拉看上去是可交互的控件。
             egui::Frame::new()
@@ -133,17 +142,15 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
                                 // CH340 系列桥接端口：列表里直接标注不支持
                                 // （连接时 attempt_connect 也会拒绝并弹 Toast）
                                 let label = if p.vid == Some(WCH_VID) {
-                                    format!("{}（CH340 不支持）", p.name)
+                                    i18n::t("top.port.ch340").replace("{name}", &p.name)
                                 } else if let Some(prod) = &p.product {
-                                    format!("{}（{}）", p.name, prod)
+                                    i18n::t("top.port.product")
+                                        .replace("{name}", &p.name)
+                                        .replace("{product}", prod)
                                 } else {
                                     p.name.clone()
                                 };
-                                cb.selectable_value(
-                                    &mut st.selected,
-                                    Some(p.name.clone()),
-                                    label,
-                                );
+                                cb.selectable_value(&mut st.selected, Some(p.name.clone()), label);
                             }
                         });
                 });
@@ -152,7 +159,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
             // 这里显式传入 fill 让它看上去"可点击"。
             let scan_btn = crate::ui::fonts::IconTextButton::new(
                 crate::ui::icons::SCAN,
-                "扫描",
+                i18n::t("top.scan"),
                 13.0,
             )
             .fill(interactive_fill(dark))
@@ -168,7 +175,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
         // 连接按钮用品牌色填充强调主操作；断开按钮用次级底色避免视觉过重。
         let can_connect = !is_online && st.selected.is_some();
         let connect_btn = egui::Button::new(
-            egui::RichText::new("● 连接").color(egui::Color32::WHITE),
+            egui::RichText::new(i18n::t("top.connect")).color(egui::Color32::WHITE),
         )
         .fill(crate::ui::ACCENT)
         .stroke(egui::Stroke::new(1.0, crate::ui::ACCENT))
@@ -185,13 +192,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
                     Err(e) => {
                         let _ = handle.ui_tx.send(UiEvent::Toast(
                             crate::state::ToastKind::Error,
-                            format!("连接失败：{e}"),
+                            i18n::t("top.connect.fail").replace("{error}", &e.to_string()),
                         ));
                     }
                 }
             }
         }
-        let disconnect_btn = egui::Button::new("■ 断开")
+        let disconnect_btn = egui::Button::new(i18n::t("top.disconnect"))
             .fill(interactive_fill(dark))
             .stroke(interactive_border(dark))
             .corner_radius(egui::CornerRadius::same(6))
@@ -213,7 +220,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
             Some(name) => name.to_string(),
             None => match &st.selected {
                 Some(name) => name.clone(),
-                None => "(未选择端口)".to_string(),
+                None => i18n::t("top.port.unselected").to_string(),
             },
         };
         ui.label(egui::RichText::new(port_text).weak());
@@ -238,8 +245,8 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
         ui.add_space(6.0);
         let mut ac = *handle.auto_connect.lock().unwrap();
         if ui
-            .checkbox(&mut ac, "启动时自动连接")
-            .on_hover_text("勾选后下次启动自动连接上次使用的端口")
+            .checkbox(&mut ac, i18n::t("top.auto_connect"))
+            .on_hover_text(i18n::t("top.auto_connect.hint"))
             .changed()
         {
             *handle.auto_connect.lock().unwrap() = ac;
@@ -257,11 +264,9 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
                 if info.vid == Some(WCH_VID) {
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new(
-                            "⚠ 当前为 CH340 系列 USB 转串口芯片，不支持连接，请改用设备原生 USB CDC 接口",
-                        )
-                        .color(ui.visuals().warn_fg_color)
-                        .size(11.0),
+                        egui::RichText::new(i18n::t("top.auto_connect.ch340_warning"))
+                            .color(ui.visuals().warn_fg_color)
+                            .size(11.0),
                     );
                 }
             }
@@ -271,19 +276,19 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
         // 仅在确实有挂起重连任务时出现，避免误触发。
         let reconnecting = handle.pending_reconnect.lock().unwrap().is_some();
         if reconnecting && !is_online {
-            let stop_btn = egui::Button::new("✕ 停止重连")
+            let stop_btn = egui::Button::new(i18n::t("top.stop_reconnect"))
                 .fill(interactive_fill(dark))
                 .stroke(interactive_border(dark))
                 .corner_radius(egui::CornerRadius::same(6));
             if ui
                 .add(stop_btn)
-                .on_hover_text("立即终止当前的自动重连流程")
+                .on_hover_text(i18n::t("top.stop_reconnect.hint"))
                 .clicked()
             {
                 handle.cancel_reconnect();
                 let _ = handle.ui_tx.send(UiEvent::Toast(
                     crate::state::ToastKind::Info,
-                    "已停止自动重连".into(),
+                    i18n::t("top.stop_reconnect.done").into(),
                 ));
             }
         }
@@ -292,7 +297,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
             if ui
                 .add(crate::ui::fonts::IconTextButton::new(
                     crate::ui::icons::GEAR,
-                    "设置",
+                    i18n::t("top.settings"),
                     13.0,
                 ))
                 .clicked()
@@ -303,9 +308,13 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
             if ui
                 .add_enabled(
                     can_refresh,
-                    crate::ui::fonts::IconTextButton::new(crate::ui::icons::REFRESH, "刷新", 13.0),
+                    crate::ui::fonts::IconTextButton::new(
+                        crate::ui::icons::REFRESH,
+                        i18n::t("top.refresh"),
+                        13.0,
+                    ),
                 )
-                .on_hover_text("重新拉取全量设置 (F5)")
+                .on_hover_text(i18n::t("top.refresh.hint"))
                 .clicked()
             {
                 handle_refresh(handle);
@@ -334,7 +343,7 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, port_name: Option<&str>, st: 
                 );
                 let _ = handle.ui_tx.send(UiEvent::Toast(
                     crate::state::ToastKind::Warning,
-                    format!("已跳过自动连接：{p} 为 CH340 系列芯片，请改用设备原生 USB CDC 接口"),
+                    i18n::t("top.auto_connect.ch340_skipped").replace("{port}", &p),
                 ));
                 return;
             }

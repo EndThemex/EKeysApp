@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, Vec2};
 
+use crate::i18n;
 use crate::protocol::{
     HID_KEY_CHOICES, KeyAction, KeymapData, KeymapDiffEntry, LAYER_BASE, LAYER_FUN1, LAYER_FUN2,
     MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT, SlotKind, hid_key_label,
@@ -152,13 +153,11 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                 }),
         )
         .show(ctx, |ui| {
-            ui.heading("按键映射");
+            ui.heading(i18n::t("keymap.title"));
             ui.label(
-                egui::RichText::new(
-                    "为每个按键自定义触发行为：可设为普通键、组合键、文本片段或内置功能",
-                )
-                .weak()
-                .size(11.0),
+                egui::RichText::new(i18n::t("keymap.subtitle"))
+                    .weak()
+                    .size(11.0),
             );
             ui.add_space(6.0);
 
@@ -173,19 +172,19 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                     ui,
                     Color32::from_rgb(0x28, 0x2C, 0x36),
                     Color32::from_rgb(0x44, 0x4A, 0x55),
-                    "未设置",
+                    i18n::t("keymap.unset"),
                 );
                 legend_dot(
                     ui,
                     Color32::from_rgb(0x2C, 0x46, 0x7A),
                     Color32::from_rgb(0x6A, 0x88, 0xC0),
-                    "已同步",
+                    i18n::t("keymap.legend.synced"),
                 );
                 legend_dot(
                     ui,
                     Color32::from_rgb(0xC0, 0x80, 0x20),
                     Color32::from_rgb(0xFF, 0xC8, 0x60),
-                    "待同步",
+                    i18n::t("keymap.legend.pending"),
                 );
                 legend_dot(
                     ui,
@@ -196,17 +195,16 @@ pub fn show(ctx: &egui::Context, handle: &AppHandle, st: &mut KeymapPanelState) 
                         Color32::WHITE,
                         Color32::from_rgb(0x1A, 0x1D, 0x24),
                     ),
-                    "已选中",
+                    i18n::t("keymap.legend.selected"),
                 );
                 fun_tag(ui, 1);
-                ui.label(egui::RichText::new("FUN 键 1").size(11.0));
+                ui.label(egui::RichText::new(i18n::t("keymap.legend.fun1")).size(11.0));
                 fun_tag(ui, 2);
-                ui.label(egui::RichText::new("FUN 键 2").size(11.0));
+                ui.label(egui::RichText::new(i18n::t("keymap.legend.fun2")).size(11.0));
             });
-            legend_resp.response.on_hover_text(
-                "键帽左上「F1」/ 右上「F2」= 配置了对应 FUN 层行为；\
-                 右下三角 = 该键本身是 FUN 键；左下琥珀小点 = 有未同步的修改",
-            );
+            legend_resp
+                .response
+                .on_hover_text(i18n::t("keymap.legend.hover"));
         });
 
     // 中：键盘图 + Drawer；外层 ScrollArea 保留以便窗口太矮时滚动
@@ -322,19 +320,19 @@ fn handle_keymap_diff_action(
                         if frame.status() == Some(0) {
                             success = true;
                         } else {
-                            let msg = frame
-                                .error
-                                .unwrap_or_else(|| "设备未接受新的按键映射".to_string());
+                            let msg = frame.error.unwrap_or_else(|| {
+                                i18n::t("keymap.apply.error.device").to_string()
+                            });
                             let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                                 crate::state::ToastKind::Error,
-                                format!("下发失败：{msg}"),
+                                i18n::t("keymap.apply.error.fail").replace("{msg}", &msg),
                             ));
                         }
                     }
                     Err(e) => {
                         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                             crate::state::ToastKind::Error,
-                            format!("下发超时：{e}"),
+                            i18n::t("keymap.apply.error.timeout").replace("{error}", &e),
                         ));
                     }
                 }
@@ -349,7 +347,7 @@ fn handle_keymap_diff_action(
                 );
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                     crate::state::ToastKind::Success,
-                    format!("已同步 {} 项按键映射", diff.len()),
+                    i18n::t("keymap.apply.ok").replace("{count}", &diff.len().to_string()),
                 ));
             } else {
                 handle.log_kind(
@@ -458,14 +456,16 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
         {
             let mut draft = handle.keymap_draft.lock().unwrap();
 
-            ui.label("配置：");
+            ui.label(i18n::t("keymap.profile.label"));
             let mut p = draft.active_profile as i32;
             // ComboBox 显示设备端方案名称（0x10 列表同步，UTF-8 中文），
             // 未连接 / 旧固件时为本地默认 "P{i}"
             let current_name = draft
                 .profile(p as u8)
                 .map(|x| x.name.clone())
-                .unwrap_or_else(|| format!("配置 {p}"));
+                .unwrap_or_else(|| {
+                    i18n::t("keymap.profile.fallback").replace("{profile}", &p.to_string())
+                });
             egui::ComboBox::from_id_salt("keymap-profile")
                 .selected_text(current_name.clone())
                 .show_ui(ui, |cb| {
@@ -498,9 +498,9 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     16.0,
                 )))
                 .on_hover_text(if st.renaming_profile {
-                    "放弃重命名"
+                    i18n::t("keymap.rename.discard")
                 } else {
-                    "为当前配置改名"
+                    i18n::t("keymap.rename.start")
                 })
                 .clicked()
             {
@@ -513,7 +513,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
             if st.renaming_profile {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut st.profile_name_edit)
-                        .hint_text("输入新名称")
+                        .hint_text(i18n::t("keymap.rename.hint"))
                         .desired_width(280.0),
                 );
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -522,7 +522,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                         crate::ui::icons::KEYMAP_CONFIRM,
                         14.0,
                     )))
-                    .on_hover_text("保存新名称")
+                    .on_hover_text(i18n::t("keymap.rename.confirm"))
                     .clicked()
                     || enter
                 {
@@ -540,13 +540,17 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                 Ok(n) => {
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Success,
-                        format!("已加载配置 {} 的 {} 个按键映射", p + 1, n),
+                        i18n::t("keymap.profile.loaded")
+                            .replace("{profile}", &(p + 1).to_string())
+                            .replace("{count}", &n.to_string()),
                     ));
                 }
                 Err(e) => {
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Warning,
-                        format!("加载配置 {} 失败：{}（显示本地缓存）", p + 1, e),
+                        i18n::t("keymap.profile.load_failed")
+                            .replace("{profile}", &(p + 1).to_string())
+                            .replace("{error}", &e),
                     ));
                 }
             }
@@ -556,7 +560,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
             if ui
                 .add(crate::ui::fonts::IconTextButton::new(
                     crate::ui::icons::KEYMAP_RELOAD,
-                    "重新加载",
+                    i18n::t("keymap.reload"),
                     14.0,
                 ))
                 .clicked()
@@ -567,13 +571,13 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     Ok(n) => {
                         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                             crate::state::ToastKind::Success,
-                            format!("已从设备同步 {n} 个按键的映射"),
+                            i18n::t("keymap.reload.ok").replace("{count}", &n.to_string()),
                         ));
                     }
                     Err(e) => {
                         let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                             crate::state::ToastKind::Error,
-                            format!("重新加载失败：{e}"),
+                            i18n::t("keymap.reload.fail").replace("{error}", &e),
                         ));
                     }
                 }
@@ -581,7 +585,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
             if ui
                 .add(crate::ui::fonts::IconTextButton::new(
                     crate::ui::icons::KEYMAP_EXPORT,
-                    "导出",
+                    i18n::t("keymap.export"),
                     14.0,
                 ))
                 .clicked()
@@ -592,7 +596,7 @@ fn top_controls(handle: &AppHandle, ui: &mut egui::Ui, st: &mut KeymapPanelState
                     let _ = std::fs::write(&path, s);
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Success,
-                        format!("已导出到 {}", path.display()),
+                        i18n::t("keymap.export.ok").replace("{path}", &path.display().to_string()),
                     ));
                 }
             }
@@ -779,23 +783,28 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
             let phys = draft.physical_key_slots();
             let key_label = |n: u8| -> String {
                 match n {
-                    0 => "未分配".to_string(),
+                    0 => i18n::t("keymap.fun.unassigned").to_string(),
                     n => phys
                         .iter()
                         .find(|(p, _, _, _)| *p == n)
                         .map(|(_, _, _, l)| l.clone())
-                        .unwrap_or_else(|| format!("键 {n}")),
+                        .unwrap_or_else(|| {
+                            i18n::t("keymap.fun.key_n").replace("{n}", &n.to_string())
+                        }),
                 }
             };
 
-            ui.label(egui::RichText::new("FUN 组合键").strong().size(12.0).color(
-                crate::ui::colors::themed(
-                    dark,
-                    Color32::from_rgb(0xC8, 0xCE, 0xD8),
-                    Color32::from_rgb(0x1A, 0x1D, 0x24),
-                ),
-            ))
-            .on_hover_text("按住 FUN 键再按其它键，触发该键的 FUN 层行为。");
+            ui.label(
+                egui::RichText::new(i18n::t("keymap.fun.bar_title"))
+                    .strong()
+                    .size(12.0)
+                    .color(crate::ui::colors::themed(
+                        dark,
+                        Color32::from_rgb(0xC8, 0xCE, 0xD8),
+                        Color32::from_rgb(0x1A, 0x1D, 0x24),
+                    )),
+            )
+            .on_hover_text(i18n::t("keymap.fun.bar_hint"));
             ui.add_space(4.0);
 
             let row_h = {
@@ -895,7 +904,11 @@ fn fun_assignment_bar(handle: &AppHandle, ui: &mut egui::Ui) {
                 egui::vec2(ui.available_width(), hint_h),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    ui.label(egui::RichText::new("右键键帽可快速分配").weak().size(10.0));
+                    ui.label(
+                        egui::RichText::new(i18n::t("keymap.fun.bar_tip"))
+                            .weak()
+                            .size(10.0),
+                    );
                 },
             );
         });
@@ -916,7 +929,10 @@ fn fun_combo_options(
         draft.fun_key2
     };
     if cb
-        .add(egui::Button::selectable(cur == 0, "未分配"))
+        .add(egui::Button::selectable(
+            cur == 0,
+            i18n::t("keymap.fun.unassigned"),
+        ))
         .clicked()
     {
         draft.set_fun_key(side, 0);
@@ -995,7 +1011,7 @@ fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
     painter.text(
         screen.left_top() + Vec2::new(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "屏幕布局占位",
+        i18n::t("keymap.screen.label"),
         egui::FontId::proportional(11.0),
         label_c,
     );
@@ -1010,7 +1026,7 @@ fn draw_screen(ui: &mut egui::Ui, width: f32, height: f32) {
     painter.text(
         screen.center(),
         egui::Align2::CENTER_CENTER,
-        "（待接入屏幕布局）",
+        i18n::t("keymap.screen.pending"),
         egui::FontId::proportional(12.0),
         center_c,
     );
@@ -1040,7 +1056,7 @@ fn draw_keyboard(
     painter.text(
         rect.left_top() + Vec2::new(10.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "键盘布局",
+        i18n::t("keymap.keyboard.label"),
         egui::FontId::proportional(11.0),
         crate::ui::colors::themed(
             dark,
@@ -1061,7 +1077,7 @@ fn draw_keyboard(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "暂无可用的按键配置",
+            i18n::t("keymap.keyboard.no_profile"),
             egui::FontId::proportional(14.0),
             Color32::from_gray(140),
         );
@@ -1071,7 +1087,7 @@ fn draw_keyboard(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "当前配置缺少基础按键层",
+            i18n::t("keymap.keyboard.no_base_layer"),
             egui::FontId::proportional(14.0),
             Color32::from_gray(140),
         );
@@ -1432,19 +1448,22 @@ fn draw_key(
             }
         }
         let fun_note = if fun.badge.is_some() {
-            " · 本键为 FUN 键（按住不产生输出）"
+            i18n::t("keymap.key.hover.fun_note")
         } else if slot_phys.is_some() {
-            " · 右键可设为 FUN 键"
+            i18n::t("keymap.key.hover.assignable")
         } else {
             ""
         };
-        resp.clone().on_hover_text(format!(
-            "「{label}」当前行为：{behavior}{combo_info}{fun_note}",
-            label = slot.label,
-            behavior = binding
-                .map(|b| b.label())
-                .unwrap_or_else(|| "未设置".into()),
-        ));
+        let behavior = binding
+            .map(|b| b.label())
+            .unwrap_or_else(|| i18n::t("keymap.unset").to_string());
+        resp.clone().on_hover_text(
+            i18n::t("keymap.key.hover")
+                .replace("{label}", &slot.label)
+                .replace("{behavior}", &behavior)
+                .replace("{combo_info}", &combo_info)
+                .replace("{fun_note}", fun_note),
+        );
     }
     // 右键快捷分配 FUN 键：就地操作，免于在下拉列表里对照键名。
     if let Some(n) = slot_phys {
@@ -1456,21 +1475,23 @@ fn draw_key(
             if f1 == n || f2 == n {
                 let side = if f1 == n { 1 } else { 2 };
                 ui.label(
-                    egui::RichText::new(format!("当前为 FUN 键 {side}"))
-                        .weak()
-                        .size(11.0),
+                    egui::RichText::new(
+                        i18n::t("keymap.ctx.current").replace("{side}", &side.to_string()),
+                    )
+                    .weak()
+                    .size(11.0),
                 );
-                if ui.button("取消 FUN 分配").clicked() {
+                if ui.button(i18n::t("keymap.ctx.cancel")).clicked() {
                     handle.keymap_draft.lock().unwrap().set_fun_key(side, 0);
                     ui.close();
                 }
             } else {
                 ui.set_min_width(130.0);
-                if ui.button("设为 FUN 键 1").clicked() {
+                if ui.button(i18n::t("keymap.ctx.set_fun1")).clicked() {
                     handle.keymap_draft.lock().unwrap().set_fun_key(1, n);
                     ui.close();
                 }
-                if ui.button("设为 FUN 键 2").clicked() {
+                if ui.button(i18n::t("keymap.ctx.set_fun2")).clicked() {
                     handle.keymap_draft.lock().unwrap().set_fun_key(2, n);
                     ui.close();
                 }
@@ -1660,17 +1681,22 @@ fn draw_encoder(
     }
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let status = if is_pending { "待下发" } else { "已应用" };
-        resp.clone().on_hover_text(format!(
-            "「{label}」旋钮 第 {row} 行 第 {col} 列 · {status} · 当前行为：{behavior}",
-            label = slot.label,
-            row = slot.row,
-            col = slot.col,
-            status = status,
-            behavior = binding
-                .map(|b| b.label())
-                .unwrap_or_else(|| "未设置".into())
-        ));
+        let status = if is_pending {
+            i18n::t("keymap.status.pending")
+        } else {
+            i18n::t("keymap.status.applied")
+        };
+        let behavior = binding
+            .map(|b| b.label())
+            .unwrap_or_else(|| i18n::t("keymap.unset").to_string());
+        resp.clone().on_hover_text(
+            i18n::t("keymap.encoder.hover")
+                .replace("{label}", &slot.label)
+                .replace("{row}", &slot.row.to_string())
+                .replace("{col}", &slot.col.to_string())
+                .replace("{status}", status)
+                .replace("{behavior}", &behavior),
+        );
     }
     if clicked {
         let mut sel = handle.selected_key.lock().unwrap();
@@ -1708,7 +1734,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                     let channel_name = match st.edit_channel.min(2) {
                         LAYER_FUN1 => "FUN1",
                         LAYER_FUN2 => "FUN2",
-                        _ => "单击",
+                        _ => i18n::t("keymap.channel.click"),
                     };
                     let label = selected
                         .and_then(|kref| {
@@ -1749,7 +1775,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                         ..kref
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("保存").clicked() {
+                        if ui.button(i18n::t("keymap.drawer.save")).clicked() {
                             // 保存即退出按键捕获（捕获中按 Esc 之外的自然收尾路径）
                             st.capture_keyboard = false;
                             st.capture_mod_state = 0;
@@ -1771,21 +1797,21 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                     }
                                     d.bump_version();
                                 }
+                                let chan = if channel == LAYER_BASE {
+                                    String::new()
+                                } else {
+                                    format!("{channel_name} ")
+                                };
                                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                                     crate::state::ToastKind::Success,
-                                    format!(
-                                        "已为「{label}」{chan}通道设为 {}（待同步）",
-                                        to_save.label(),
-                                        chan = if channel == LAYER_BASE {
-                                            String::new()
-                                        } else {
-                                            format!("{channel_name} ")
-                                        }
-                                    ),
+                                    i18n::t("keymap.drawer.saved")
+                                        .replace("{label}", &label)
+                                        .replace("{chan}", &chan)
+                                        .replace("{action}", &to_save.label()),
                                 ));
                             }
                         }
-                        if ui.button("清除").clicked() {
+                        if ui.button(i18n::t("keymap.drawer.clear")).clicked() {
                             if let Some(edit_ref) = edit_ref {
                                 let mut d = handle.keymap_draft.lock().unwrap();
                                 let active = d.active_profile;
@@ -1797,7 +1823,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             }
                             st.draft_action = Some(KeyAction::None);
                         }
-                        if ui.button("关闭").clicked() {
+                        if ui.button(i18n::t("keymap.drawer.close")).clicked() {
                             let mut sel = handle.selected_key.lock().unwrap();
                             *sel = None;
                         }
@@ -1810,7 +1836,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.strong("按键功能");
+                    ui.strong(i18n::t("keymap.drawer.title"));
                     ui.add_space(4.0);
                     match selected {
                         None => {
@@ -1818,7 +1844,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             st.draft_action = None;
                             st.selected_ref = None;
                             ui.label(
-                                egui::RichText::new("点击键盘图上的任意按键，开始设置触发行为")
+                                egui::RichText::new(i18n::t("keymap.drawer.empty"))
                                     .weak()
                                     .size(12.0),
                             );
@@ -1879,8 +1905,12 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                 .map(|s| s.label.clone())
                                 .unwrap_or_else(|| format!("({}, {})", kref.row, kref.col));
 
-                            ui.label(format!("位置：第 {} 行 第 {} 列", kref.row, kref.col));
-                            ui.label(format!("按键标识：{label}"));
+                            ui.label(
+                                i18n::t("keymap.drawer.pos")
+                                    .replace("{row}", &kref.row.to_string())
+                                    .replace("{col}", &kref.col.to_string()),
+                            );
+                            ui.label(i18n::t("keymap.drawer.id").replace("{label}", &label));
 
                             ui.add_space(6.0);
                             // FUN 角色快捷操作：就地分配 / 取消，与键盘下方
@@ -1891,28 +1921,38 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                         let side = if draft.fun_key1 == n { 1 } else { 2 };
                                         fun_tag(ui, side);
                                         ui.label(
-                                            egui::RichText::new(format!(
-                                                "本键是 FUN 键 {side}（按住不产生输出）"
-                                            ))
+                                            egui::RichText::new(
+                                                i18n::t("keymap.drawer.fun_self")
+                                                    .replace("{side}", &side.to_string()),
+                                            )
                                             .size(11.0),
                                         );
-                                        if ui.small_button("取消分配").clicked() {
-                                            handle.keymap_draft.lock().unwrap().set_fun_key(side, 0);
+                                        if ui
+                                            .small_button(i18n::t("keymap.drawer.fun_cancel"))
+                                            .clicked()
+                                        {
+                                            handle
+                                                .keymap_draft
+                                                .lock()
+                                                .unwrap()
+                                                .set_fun_key(side, 0);
                                         }
                                     } else {
                                         ui.label(
-                                            egui::RichText::new("FUN 角色：").weak().size(11.0),
+                                            egui::RichText::new(i18n::t("keymap.drawer.fun_role"))
+                                                .weak()
+                                                .size(11.0),
                                         );
                                         if ui
-                                            .small_button("设为 FUN1")
-                                            .on_hover_text("按住该键时触发其它键的 FUN1 层行为")
+                                            .small_button(i18n::t("keymap.drawer.set_fun1"))
+                                            .on_hover_text(i18n::t("keymap.drawer.set_fun1_hint"))
                                             .clicked()
                                         {
                                             handle.keymap_draft.lock().unwrap().set_fun_key(1, n);
                                         }
                                         if ui
-                                            .small_button("设为 FUN2")
-                                            .on_hover_text("按住该键时触发其它键的 FUN2 层行为")
+                                            .small_button(i18n::t("keymap.drawer.set_fun2"))
+                                            .on_hover_text(i18n::t("keymap.drawer.set_fun2_hint"))
                                             .clicked()
                                         {
                                             handle.keymap_draft.lock().unwrap().set_fun_key(2, n);
@@ -1928,10 +1968,10 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             // 编辑通道选择：单击 / FUN1 组合层 / FUN2 组合层。
                             // 对应 FUN 键未分配、或选中键自身就是该 FUN 键时，
                             // 禁用该通道（tooltip 说明原因）。
-                            ui.label("编辑通道：");
+                            ui.label(i18n::t("keymap.drawer.channel"));
                             ui.horizontal(|ui| {
                                 for (ch, name) in [
-                                    (LAYER_BASE, "单击"),
+                                    (LAYER_BASE, i18n::t("keymap.channel.click")),
                                     (LAYER_FUN1, "FUN1"),
                                     (LAYER_FUN2, "FUN2"),
                                 ] {
@@ -1939,16 +1979,12 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                     // 浅色主题用加深变体保证白底可读。
                                     let dark = ui.visuals().dark_mode;
                                     let text = match ch {
-                                        LAYER_FUN1 => {
-                                            egui::RichText::new(name)
-                                                .size(12.0)
-                                                .color(fun_text_accent(dark, 1))
-                                        }
-                                        LAYER_FUN2 => {
-                                            egui::RichText::new(name)
-                                                .size(12.0)
-                                                .color(fun_text_accent(dark, 2))
-                                        }
+                                        LAYER_FUN1 => egui::RichText::new(name)
+                                            .size(12.0)
+                                            .color(fun_text_accent(dark, 1)),
+                                        LAYER_FUN2 => egui::RichText::new(name)
+                                            .size(12.0)
+                                            .color(fun_text_accent(dark, 2)),
                                         _ => egui::RichText::new(name).size(12.0),
                                     };
                                     let enabled = match ch {
@@ -1962,18 +1998,17 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                             egui::Button::selectable(channel == ch, text),
                                         )
                                         .on_hover_text(match ch {
-                                            LAYER_FUN1 => "按住 FUN 键 1 时按下该键触发的行为",
-                                            LAYER_FUN2 => "按住 FUN 键 2 时按下该键触发的行为",
-                                            _ => "直接按下该键触发的行为",
+                                            LAYER_FUN1 => i18n::t("keymap.channel.fun1_hint"),
+                                            LAYER_FUN2 => i18n::t("keymap.channel.fun2_hint"),
+                                            _ => i18n::t("keymap.channel.click_hint"),
                                         });
                                     if !enabled {
                                         let reason = if is_fun_key {
-                                            "本键是 FUN 键（按住不产生输出），不能配置 FUN 层行为"
-                                                .to_string()
+                                            i18n::t("keymap.channel.fun_key_self").to_string()
                                         } else {
-                                            format!(
-                                                "请先分配 FUN 键 {}（键盘下方 FUN 分配条或右键键帽）",
-                                                if ch == LAYER_FUN1 { 1 } else { 2 }
+                                            i18n::t("keymap.channel.need_fun").replace(
+                                                "{side}",
+                                                if ch == LAYER_FUN1 { "1" } else { "2" },
                                             )
                                         };
                                         resp.clone().on_disabled_hover_text(reason);
@@ -1986,21 +2021,24 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
 
                             ui.add_space(6.0);
                             // 当前 binding（在 draft 中的快照）
-                            ui.label(format!("当前行为：{}", cur_binding.label()));
+                            ui.label(
+                                i18n::t("keymap.drawer.current")
+                                    .replace("{action}", &cur_binding.label()),
+                            );
 
                             ui.add_space(8.0);
-                            ui.label("触发行为：");
+                            ui.label(i18n::t("keymap.drawer.trigger"));
                             // 草稿动作（用户正在编辑中的版本，每帧持久）
                             let mut draft_action =
                                 st.draft_action.clone().unwrap_or(KeyAction::None);
                             let mut kind_idx = action_kind_index(&draft_action);
                             let kinds = [
-                                "未绑定",
-                                "普通键",
-                                "组合键",
-                                "多键同按",
-                                "文本注入",
-                                "固件功能",
+                                i18n::t("keymap.kind.none"),
+                                i18n::t("keymap.kind.key"),
+                                i18n::t("keymap.kind.combo"),
+                                i18n::t("keymap.kind.chord"),
+                                i18n::t("keymap.kind.text"),
+                                i18n::t("keymap.kind.function"),
                             ];
                             let prev_kind = kind_idx;
                             egui::ComboBox::from_id_salt("action-kind")
@@ -2025,7 +2063,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             ui.add_space(10.0);
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new("改动需点击下方「保存」按钮才会同步到设备。")
+                                egui::RichText::new(i18n::t("keymap.drawer.save_hint"))
                                     .weak()
                                     .size(11.0),
                             );
@@ -2252,7 +2290,7 @@ fn commit_rename(handle: &AppHandle, draft: &mut KeymapData, idx: u8, name: &str
         Err(e) => {
             let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                 crate::state::ToastKind::Error,
-                format!("设备同步名称失败：{e}（仅本地生效）"),
+                i18n::t("keymap.rename.sync_fail").replace("{error}", &e),
             ));
         }
     }
@@ -2302,18 +2340,25 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState, chord_mode: bool
                     ui.vertical(|ui| {
                         let (title, hint) = if chord_mode {
                             (
-                                "正在记录同按按键…",
-                                "依次按下要加入的键（可含 Ctrl/Shift/Alt）· 按 Esc 结束",
+                                i18n::t("keymap.capture.chord_title"),
+                                i18n::t("keymap.capture.chord_hint"),
                             )
                         } else {
-                            ("正在记录按键…", "按 Esc 退出")
+                            (
+                                i18n::t("keymap.capture.title"),
+                                i18n::t("keymap.capture.hint"),
+                            )
                         };
                         ui.label(egui::RichText::new(title).strong().color(title_color));
                         // 显式配色：weak() 取主题弱文字色，在异色底上会失配
                         ui.label(egui::RichText::new(hint).size(10.0).color(hint_color));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("取消").on_hover_text("退出按键捕获").clicked() {
+                        if ui
+                            .button(i18n::t("keymap.capture.cancel"))
+                            .on_hover_text(i18n::t("keymap.capture.cancel_hint"))
+                            .clicked()
+                        {
                             st.capture_keyboard = false;
                         }
                     });
@@ -2346,9 +2391,15 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState, chord_mode: bool
                     );
                     ui.vertical(|ui| {
                         let (title, sub) = if chord_mode {
-                            ("记录同按按键", "按下键盘上的键，直接加入同按组合")
+                            (
+                                i18n::t("keymap.capture.idle_chord_title"),
+                                i18n::t("keymap.capture.idle_chord_sub"),
+                            )
                         } else {
-                            ("记录一次按键", "把键盘按下的键作为此按键的触发行为")
+                            (
+                                i18n::t("keymap.capture.idle_title"),
+                                i18n::t("keymap.capture.idle_sub"),
+                            )
                         };
                         ui.label(egui::RichText::new(title).strong());
                         ui.label(egui::RichText::new(sub).weak().size(10.0));
@@ -2424,7 +2475,7 @@ fn edit_action_params(
             // Drawer 固定 280px，"Ctrl/Shift/Alt/Win" 4 个 toggle + 标签 + 主键 ComboBox
             // 横向放不下，用 horizontal_wrapped 让修饰键行自然换行。
             ui.horizontal_wrapped(|ui| {
-                ui.label("修饰键：");
+                ui.label(i18n::t("keymap.combo.mods"));
                 for (bit, name) in [
                     (MOD_CTRL, "Ctrl"),
                     (MOD_SHIFT, "Shift"),
@@ -2438,7 +2489,7 @@ fn edit_action_params(
                 }
             });
             ui.vertical(|ui| {
-                ui.label("主键：");
+                ui.label(i18n::t("keymap.combo.main"));
                 // ComboBox 在 vertical 子层里直接拿父容器全宽，长键名（如
                 // "Arrow Left (0x50)"）不会再被横向裁断。
                 hid_key_combo(ui, "combo-key", &mut code);
@@ -2465,7 +2516,11 @@ fn edit_action_params(
                 KeyAction::Chord(_) => vec![0x04],
                 _ => vec![0x04],
             };
-            ui.label(egui::RichText::new("同时按下以下按键：").weak().size(11.0));
+            ui.label(
+                egui::RichText::new(i18n::t("keymap.chord.label"))
+                    .weak()
+                    .size(11.0),
+            );
             let mut i = 0;
             while i < codes.len() {
                 let name = hid_key_label(codes[i])
@@ -2475,8 +2530,8 @@ fn edit_action_params(
                     ui.label(name);
                     let removable = codes.len() > 1;
                     ui.add_enabled(removable, egui::Button::new("×"))
-                        .on_disabled_hover_text("至少需要保留一个按键")
-                        .on_hover_text("移除该键")
+                        .on_disabled_hover_text(i18n::t("keymap.chord.keep_one"))
+                        .on_hover_text(i18n::t("keymap.chord.remove"))
                         .clicked()
                 });
                 if row.inner {
@@ -2497,7 +2552,7 @@ fn edit_action_params(
             let resp = ui.add(
                 crate::ui::fonts::IconTextButton::new(
                     crate::ui::icons::KEYMAP_ADD_KEY,
-                    "添加按键",
+                    i18n::t("keymap.chord.add"),
                     13.0,
                 )
                 .min_size(egui::vec2(120.0, 24.0))
@@ -2509,7 +2564,7 @@ fn edit_action_params(
             if open {
                 // 弹层：用纯文本承载"已选/未选"，避免方框字符
                 egui::ComboBox::from_id_salt("chord-add")
-                    .selected_text("选择按键…")
+                    .selected_text(i18n::t("keymap.chord.pick"))
                     .show_ui(ui, |cb| {
                         for (c, name) in HID_KEY_CHOICES.iter() {
                             if cb
@@ -2549,31 +2604,34 @@ fn edit_action_params(
             };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut text)
-                    .hint_text("按键触发时输出的文本（仅限英文与符号）")
+                    .hint_text(i18n::t("keymap.text.hint"))
                     .desired_width(ui.available_width()),
             );
             let non_ascii = text.chars().any(|c| c as u32 > 0x7F);
             let over = text.chars().count() > 128;
             ui.label(
-                egui::RichText::new(format!("{} / 128 字符", text.chars().count()))
-                    .weak()
-                    .size(10.0)
-                    .color(if over {
-                        ui.visuals().error_fg_color
-                    } else {
-                        ui.visuals().weak_text_color()
-                    }),
+                egui::RichText::new(
+                    i18n::t("keymap.text.counter")
+                        .replace("{count}", &text.chars().count().to_string()),
+                )
+                .weak()
+                .size(10.0)
+                .color(if over {
+                    ui.visuals().error_fg_color
+                } else {
+                    ui.visuals().weak_text_color()
+                }),
             );
             if non_ascii {
                 ui.label(
-                    egui::RichText::new("⚠ 含中文或特殊符号，设备端可能无法输出")
+                    egui::RichText::new(i18n::t("keymap.text.warn"))
                         .size(10.0)
                         .color(ui.visuals().warn_fg_color),
                 );
             }
             if !resp.has_focus() && text.is_empty() {
                 ui.label(
-                    egui::RichText::new("例如：常用邮箱、口令、命令行片段")
+                    egui::RichText::new(i18n::t("keymap.text.example"))
                         .weak()
                         .size(10.0),
                 );
@@ -2587,62 +2645,62 @@ fn edit_action_params(
                 _ => String::new(),
             };
             // 页面跳转：与固件 functionKeyJumpTarget 解析表同名（MainTask.cpp）
-            const PAGE_JUMP_TARGETS: &[(&str, &str)] = &[
-                ("KEY_FUNCTION_PAGE_PC", "跳转: PC状态页"),
-                ("KEY_FUNCTION_PAGE_MUSIC", "跳转: 音乐播放页"),
-                ("KEY_FUNCTION_PAGE_AUDIO", "跳转: 音效板页"),
-                ("KEY_FUNCTION_PAGE_KEYMAP", "跳转: 键映射页"),
-                ("KEY_FUNCTION_PAGE_SETTING", "跳转: 设置页"),
-                ("KEY_FUNCTION_PAGE_HA", "跳转: 智能家居页"),
+            let page_jump_targets: &[(&str, &str)] = &[
+                ("KEY_FUNCTION_PAGE_PC", i18n::t("keymap.fn.page.pc")),
+                ("KEY_FUNCTION_PAGE_MUSIC", i18n::t("keymap.fn.page.music")),
+                ("KEY_FUNCTION_PAGE_AUDIO", i18n::t("keymap.fn.page.audio")),
+                ("KEY_FUNCTION_PAGE_KEYMAP", i18n::t("keymap.fn.page.keymap")),
+                (
+                    "KEY_FUNCTION_PAGE_SETTING",
+                    i18n::t("keymap.fn.page.setting"),
+                ),
+                ("KEY_FUNCTION_PAGE_HA", i18n::t("keymap.fn.page.ha")),
             ];
             const ASR: &str = "KEY_FUNCTION_ASR";
-            const ASR_LABEL: &str = "语音识别（ASR）";
+            let asr_label = i18n::t("keymap.fn.asr");
 
             // 当前选中项显示名：命中内置用友好名，否则显示原串（自定义）
             let selected = if f == ASR {
-                ASR_LABEL.to_string()
+                asr_label.to_string()
             } else {
-                match PAGE_JUMP_TARGETS.iter().find(|(c, _)| *c == f) {
+                match page_jump_targets.iter().find(|(c, _)| *c == f) {
                     Some((_, label)) => (*label).to_string(),
                     None => {
                         if f.is_empty() {
-                            "请选择…".to_string()
+                            i18n::t("keymap.fn.select").to_string()
                         } else {
-                            format!("自定义: {f}")
+                            i18n::t("keymap.fn.custom").replace("{f}", &f)
                         }
                     }
                 }
             };
 
-            egui::ComboBox::from_label("内置功能：")
+            egui::ComboBox::from_label(i18n::t("keymap.fn.builtin"))
                 .selected_text(selected)
                 .width(220.0)
                 .show_ui(ui, |ui| {
                     ui.set_min_width(180.0);
-                    if ui.selectable_label(f == ASR, ASR_LABEL).clicked() {
+                    if ui.selectable_label(f == ASR, asr_label).clicked() {
                         f = ASR.to_string();
                     }
-                    for (code, label) in PAGE_JUMP_TARGETS {
+                    for (code, label) in page_jump_targets {
                         if ui.selectable_label(f == *code, *label).clicked() {
                             f = (*code).to_string();
                         }
                     }
                 });
             ui.add_space(4.0);
-            ui.label("自定义功能串：");
+            ui.label(i18n::t("keymap.fn.custom_label"));
             ui.add(
                 egui::TextEdit::singleline(&mut f)
-                    .hint_text("如：语音识别 / Ctrl+c …")
+                    .hint_text(i18n::t("keymap.fn.custom_hint"))
                     .desired_width(ui.available_width()),
             );
             f = f.trim().to_string();
             ui.label(
-                egui::RichText::new(
-                    "设备支持：语音识别、二级页跳转（6个页面）、组合键串（如 Ctrl+c）、单独修饰键；\
-                     其它未识别的串按键无效果，但会原样保留不丢失。",
-                )
-                .weak()
-                .size(10.0),
+                egui::RichText::new(i18n::t("keymap.fn.support_note"))
+                    .weak()
+                    .size(10.0),
             );
             *current = KeyAction::Function(f);
         }
@@ -2693,7 +2751,7 @@ fn show_keymap_diff_bar(
     // FUN 键编号 → 槽位标签（用于 FunKeys 变更的展示）
     let fun_name = |n: u8| -> String {
         match n {
-            0 => "关闭".to_string(),
+            0 => i18n::t("keymap.diff.off").to_string(),
             n => draft
                 .fun_key_slot(n)
                 .and_then(|(r, c)| {
@@ -2703,7 +2761,7 @@ fn show_keymap_diff_bar(
                         .and_then(|l| l.slots.iter().find(|s| s.row == r && s.col == c))
                         .map(|s| s.label.clone())
                 })
-                .unwrap_or_else(|| format!("键 {n}")),
+                .unwrap_or_else(|| i18n::t("keymap.fun.key_n").replace("{n}", &n.to_string())),
         }
     };
     let mut action = KeymapDiffAction::None;
@@ -2725,15 +2783,18 @@ fn show_keymap_diff_bar(
             // 撑出父面板的横向滚动条。
             ui.horizontal(|ui| {
                 ui.strong(
-                    egui::RichText::new(format!("{count} 项待同步到设备"))
-                        .color(ui.visuals().warn_fg_color),
+                    egui::RichText::new(
+                        i18n::t("keymap.diff.count").replace("{count}", &count.to_string()),
+                    )
+                    .color(ui.visuals().warn_fg_color),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("放弃修改（Esc）").clicked() {
+                    if ui.button(i18n::t("keymap.diff.discard")).clicked() {
                         action = KeymapDiffAction::Discard;
                     }
                     let apply_btn = egui::Button::new(
-                        egui::RichText::new("同步到设备（Ctrl+Enter）").color(egui::Color32::WHITE),
+                        egui::RichText::new(i18n::t("keymap.diff.apply"))
+                            .color(egui::Color32::WHITE),
                     )
                     .fill(crate::ui::ACCENT)
                     .corner_radius(egui::CornerRadius::same(6));
@@ -2750,26 +2811,23 @@ fn show_keymap_diff_bar(
                     for e in diff {
                         let label = match e {
                             KeymapDiffEntry::ActiveProfile(i) => {
-                                format!("切换到「配置 {i}」")
+                                i18n::t("keymap.diff.profile").replace("{profile}", &i.to_string())
                             }
-                            KeymapDiffEntry::FunKeys { f1, f2 } => format!(
-                                "FUN 键 1 → {}，FUN 键 2 → {}",
-                                fun_name(*f1),
-                                fun_name(*f2)
-                            ),
+                            KeymapDiffEntry::FunKeys { f1, f2 } => i18n::t("keymap.diff.fun_keys")
+                                .replace("{f1}", &fun_name(*f1))
+                                .replace("{f2}", &fun_name(*f2)),
                             KeymapDiffEntry::Binding { key, from, to } => {
                                 let layer_tag = match key.layer {
-                                    LAYER_FUN1 => "FUN1 组合：",
-                                    LAYER_FUN2 => "FUN2 组合：",
+                                    LAYER_FUN1 => i18n::t("keymap.diff.tag_fun1"),
+                                    LAYER_FUN2 => i18n::t("keymap.diff.tag_fun2"),
                                     _ => "",
                                 };
-                                format!(
-                                    "{layer_tag}第 {} 行 第 {} 列：{} → {}",
-                                    key.row,
-                                    key.col,
-                                    from.label(),
-                                    to.label()
-                                )
+                                i18n::t("keymap.diff.binding")
+                                    .replace("{layer_tag}", layer_tag)
+                                    .replace("{row}", &key.row.to_string())
+                                    .replace("{col}", &key.col.to_string())
+                                    .replace("{from}", &from.label())
+                                    .replace("{to}", &to.label())
                             }
                         };
                         ui.label(label);

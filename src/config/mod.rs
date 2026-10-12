@@ -29,8 +29,8 @@ pub enum Theme {
 impl Theme {
     pub fn label(self) -> &'static str {
         match self {
-            Theme::Dark => "深色",
-            Theme::Light => "浅色",
+            Theme::Dark => crate::i18n::t("theme.dark"),
+            Theme::Light => crate::i18n::t("theme.light"),
         }
     }
 }

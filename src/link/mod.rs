@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::i18n;
 use crate::protocol::{self, Frame, HeartbeatResp};
 use crate::state::LogKind;
 use crate::util::log::SharedLog;
@@ -181,7 +182,8 @@ impl LinkManager {
         on_reader_exit: OnReaderExit,
         counters: Counters,
     ) -> Result<Self, String> {
-        let port = serial::open(name).map_err(|e| format!("打开串口失败: {e}"))?;
+        let port = serial::open(name)
+            .map_err(|e| i18n::t("link.open_fail").replace("{e}", &e.to_string()))?;
         Self::from_port(name.to_string(), port, log, on_reader_exit, counters)
     }
 

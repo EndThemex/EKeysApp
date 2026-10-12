@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{Language, LocalConfig, Theme};
+use crate::i18n;
 use crate::link::{ConnectionState, LinkManager, LinkRequester};
 use crate::protocol::{
     AUDIO_FILE_MAX_BYTES, AUDIO_PAD_KEY_COUNT, AUDIO_UPLOAD_BLOCK_BYTES, AudioFileInfo,
@@ -279,7 +280,7 @@ impl ReconnectorHandle {
         });
         let _ = self.ui_tx.send(UiEvent::Toast(
             ToastKind::Warning,
-            format!("检测到 {port} 异常断开，开始自动重连…"),
+            i18n::t("state.reconnect.unexpected_disconnect").replace("{port}", &port),
         ));
     }
 }
@@ -633,15 +634,14 @@ impl AppHandle {
                     data,
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x05 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.keymap.req_fail").replace("{e}", &e))?;
             let v = frame.extra_value("keymap").ok_or_else(|| {
-                format!(
-                    "0x05 响应缺 keymap 字段: cmd=0x{:02X} status={:?}",
-                    frame.cmd, frame.status
-                )
+                i18n::t("state.keymap.missing_keymap")
+                    .replace("{cmd}", &format!("0x{:02X}", frame.cmd))
+                    .replace("{status}", &format!("{:?}", frame.status))
             })?;
             let entries = serde_json::from_value::<Vec<FirmwareKeyEntry>>(v.clone())
-                .map_err(|e| format!("0x05 keymap 解析失败: {e}"))?;
+                .map_err(|e| i18n::t("state.keymap.parse_fail").replace("{e}", &e.to_string()))?;
             // FUN 组合键分配（顶层可选字段，0 = 未配置；越界按未配置处理）
             let fun_key1 = frame
                 .extra_value("fun_key1")
@@ -665,9 +665,7 @@ impl AppHandle {
                 .map(|n| n as u8);
             let dev_profile = match (profile, echoed) {
                 (Some(_), None) => {
-                    return Err(
-                        "设备固件不支持按方案拉取键映射（0x05 无 profile 回显），请升级固件".into(),
-                    );
+                    return Err(i18n::t("state.keymap.fw_upgrade_required").to_string());
                 }
                 (_, Some(e)) => e,
                 (None, None) => self.settings.lock().unwrap().active_keymap_profile as u8,
@@ -711,7 +709,7 @@ impl AppHandle {
             }
             Ok(n)
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 设置 Profile 名称（0x15 CMD_PROFILE_NAME_SET）：name="" 表示清除，
@@ -730,11 +728,11 @@ impl AppHandle {
                     Some(data),
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x15 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.profile.name_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
                 return Err(frame
                     .error
-                    .unwrap_or_else(|| "设备未接受新名称".to_string()));
+                    .unwrap_or_else(|| i18n::t("state.profile.name_rejected").to_string()));
             }
             let name = frame
                 .data
@@ -749,7 +747,7 @@ impl AppHandle {
             );
             Ok(name)
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     // ==================== 音效板（Sound Pad，0x16/0x17） ====================
@@ -768,13 +766,18 @@ impl AppHandle {
                     Some(serde_json::json!({ "op": "list" })),
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x16 list 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.audio.list_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
-                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| i18n::t("state.audio.rejected").into()));
             }
-            let data = frame.data.ok_or("0x16 list 响应缺 data 字段")?;
-            let resp: AudioFileListResp =
-                serde_json::from_value(data).map_err(|e| format!("0x16 list 解析失败: {e}"))?;
+            let data = frame
+                .data
+                .ok_or_else(|| i18n::t("state.audio.list_missing_data"))?;
+            let resp: AudioFileListResp = serde_json::from_value(data).map_err(|e| {
+                i18n::t("state.audio.list_parse_fail").replace("{e}", &e.to_string())
+            })?;
             let mut a = self.audio.lock().unwrap();
             a.files = resp.files;
             a.total_bytes = resp.total_bytes;
@@ -790,7 +793,7 @@ impl AppHandle {
             );
             Ok(())
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 拉取设备键位绑定表（0x17 get）。设备返回全量 11 键，空绑定文件名为空串。
@@ -802,17 +805,22 @@ impl AppHandle {
                     Some(serde_json::json!({ "op": "get" })),
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x17 get 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.audio.pads_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
-                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| i18n::t("state.audio.rejected").into()));
             }
-            let data = frame.data.ok_or("0x17 get 响应缺 data 字段")?;
+            let data = frame
+                .data
+                .ok_or_else(|| i18n::t("state.audio.pads_missing_data"))?;
             let pads_raw = data
                 .get("pads")
                 .cloned()
-                .ok_or("0x17 get 响应缺 pads 字段")?;
-            let pads: Vec<AudioPadBinding> =
-                serde_json::from_value(pads_raw).map_err(|e| format!("0x17 get 解析失败: {e}"))?;
+                .ok_or_else(|| i18n::t("state.audio.pads_missing_pads"))?;
+            let pads: Vec<AudioPadBinding> = serde_json::from_value(pads_raw).map_err(|e| {
+                i18n::t("state.audio.pads_parse_fail").replace("{e}", &e.to_string())
+            })?;
             let mut a = self.audio.lock().unwrap();
             // 设备是绑定表的唯一权威：先清空再填充，避免残留陈旧条目
             a.pads = Default::default();
@@ -825,7 +833,7 @@ impl AppHandle {
             self.log_kind(LogKind::Rx, "GET → 音效键位绑定");
             Ok(())
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 设置单键绑定（0x17 set）；`file = ""` 清除。成功后同步本地缓存。
@@ -837,9 +845,11 @@ impl AppHandle {
                     Some(serde_json::json!({ "op": "set", "key": key, "file": file })),
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x17 set 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.audio.pad_set_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
-                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| i18n::t("state.audio.rejected").into()));
             }
             let k = key as usize;
             if k >= 1 && k <= self.audio.lock().unwrap().pads.len() {
@@ -855,7 +865,7 @@ impl AppHandle {
             );
             Ok(())
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 试播键位绑定文件（0x17 play + key）。
@@ -872,13 +882,15 @@ impl AppHandle {
         self.with_link(|lm| {
             let frame = lm
                 .request(CMD_AUDIO_PAD, Some(data), Duration::from_millis(1000))
-                .map_err(|e| format!("0x17 play 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.audio.play_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
-                return Err(frame.error.unwrap_or_else(|| "播放被拒绝".into()));
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| i18n::t("state.audio.play_rejected").into()));
             }
             Ok(())
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 停止播放（0x17 stop）。
@@ -890,13 +902,15 @@ impl AppHandle {
                     Some(serde_json::json!({ "op": "stop" })),
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x17 stop 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.audio.stop_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
-                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| i18n::t("state.audio.rejected").into()));
             }
             Ok(())
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 删除设备音效文件（0x16 delete）。固件会先清除引用该文件的键位绑定；
@@ -909,9 +923,11 @@ impl AppHandle {
                     Some(serde_json::json!({ "op": "delete", "name": name })),
                     Duration::from_millis(1000),
                 )
-                .map_err(|e| format!("0x16 delete 请求失败: {e}"))?;
+                .map_err(|e| i18n::t("state.audio.delete_req_fail").replace("{e}", &e))?;
             if frame.status() != Some(0) {
-                return Err(frame.error.unwrap_or_else(|| "设备拒绝".into()));
+                return Err(frame
+                    .error
+                    .unwrap_or_else(|| i18n::t("state.audio.rejected").into()));
             }
             let mut a = self.audio.lock().unwrap();
             if let Some(data) = frame.data.as_ref() {
@@ -938,7 +954,7 @@ impl AppHandle {
             self.log_kind(LogKind::Tx, format!("DEL → 音效文件 {name}"));
             Ok(())
         })
-        .unwrap_or_else(|| Err("未连接".into()))
+        .unwrap_or_else(|| Err(i18n::t("state.not_connected").into()))
     }
 
     /// 启动音效文件上传（0x16 begin → data×N → end，1024B/块）。
@@ -948,24 +964,20 @@ impl AppHandle {
     /// 失败/取消会向设备发 abort 回滚 `.part` 文件。
     pub fn start_audio_upload(&self, device_name: String, bytes: Vec<u8>) -> Result<(), String> {
         if !valid_audio_name(&device_name) {
-            return Err(format!(
-                "文件名不合法（a-z0-9_ + .mp3/.wav）: {device_name}"
-            ));
+            return Err(i18n::t("state.audio.bad_name").replace("{name}", &device_name));
         }
         if bytes.is_empty() || bytes.len() as u32 > AUDIO_FILE_MAX_BYTES {
-            return Err(format!(
-                "文件大小超出范围（上限 {} KB）",
-                AUDIO_FILE_MAX_BYTES / 1024
-            ));
+            return Err(i18n::t("state.audio.size_out_of_range")
+                .replace("{max_kb}", &(AUDIO_FILE_MAX_BYTES / 1024).to_string()));
         }
         {
             let a = self.audio.lock().unwrap();
             if a.upload.is_some() {
-                return Err("已有上传任务进行中".into());
+                return Err(i18n::t("state.audio.upload_busy").into());
             }
         }
         let Some(req) = self.audio_requester() else {
-            return Err("未连接".into());
+            return Err(i18n::t("state.not_connected").into());
         };
         self.audio.lock().unwrap().upload = Some(AudioUploadProgress {
             name: device_name.clone(),
@@ -993,7 +1005,7 @@ impl AppHandle {
             Err(e) => {
                 // 线程没起来：清掉进度，避免 UI 永远卡在上传态
                 self.audio.lock().unwrap().upload = None;
-                Err(format!("启动上传线程失败: {e}"))
+                Err(i18n::t("state.audio.upload_spawn_fail").replace("{e}", &e.to_string()))
             }
         }
     }
@@ -1044,11 +1056,15 @@ impl AppHandle {
         // 连接策略：设备必须使用原生 USB CDC。CH340 等 WCH 桥接芯片往返延迟大
         // （见 serial::is_wch_bridge 注释），检测到即拒绝；错误由调用方弹 Toast。
         if let Some((vid, pid)) = crate::link::serial::is_wch_bridge(name) {
-            let msg = format!(
+            // 日志保持中文；返回给 UI 的 Err 单独取 i18n 文案（Toast 用）。
+            let detail = format!(
                 "{name} 为 WCH USB 转串口芯片（{vid:04X}:{pid:04X}，CH340 系列），不支持连接，请改用设备原生 USB CDC 端口"
             );
-            self.log_kind(LogKind::App, format!("连接失败: {msg}"));
-            return Err(msg);
+            self.log_kind(LogKind::App, format!("连接失败: {detail}"));
+            return Err(i18n::t("state.connect.wch_bridge")
+                .replace("{name}", name)
+                .replace("{vid}", &format!("{vid:04X}"))
+                .replace("{pid}", &format!("{pid:04X}")));
         }
         // 把 ReconnectorHandle 包成 reader 退出回调。router 转发 State(Disconnected)
         // 是主路径；这里只在 router 也挂了时兜底触发重连。
@@ -1071,9 +1087,10 @@ impl AppHandle {
                 self.attach_link(lm);
                 self.log_kind(LogKind::App, format!("已连接到 {name}"));
                 let _ = self.ui_tx.send(UiEvent::CurrentPort(name.to_string()));
-                let _ = self
-                    .ui_tx
-                    .send(UiEvent::Toast(ToastKind::Success, "已连接".into()));
+                let _ = self.ui_tx.send(UiEvent::Toast(
+                    ToastKind::Success,
+                    i18n::t("state.connect.connected").to_string(),
+                ));
                 Ok(())
             }
             Err(e) => {
@@ -1163,10 +1180,7 @@ impl AppHandle {
             );
             let _ = self.ui_tx.send(UiEvent::Toast(
                 ToastKind::Warning,
-                format!(
-                    "已停止自动重连：{} 为 CH340 系列芯片，请改用设备原生 USB CDC 端口",
-                    job.port_name
-                ),
+                i18n::t("state.reconnect.stopped_ch340").replace("{port}", &job.port_name),
             ));
             return;
         }
@@ -1186,7 +1200,7 @@ impl AppHandle {
                         // 连接成功：attempt_connect 已经清掉 pending_reconnect 并推 Success Toast
                         let _ = self.ui_tx.send(UiEvent::Toast(
                             ToastKind::Info,
-                            format!("已自动重连到 {}", job.port_name),
+                            i18n::t("state.reconnect.auto_ok").replace("{port}", &job.port_name),
                         ));
                     }
                     Err(_) => {
@@ -1209,10 +1223,9 @@ impl AppHandle {
             *self.pending_reconnect.lock().unwrap() = None;
             let _ = self.ui_tx.send(UiEvent::Toast(
                 ToastKind::Warning,
-                format!(
-                    "{} 重连失败（已尝试 {} 次），请检查设备后手动重连",
-                    job.port_name, MAX_RECONNECT_ATTEMPTS
-                ),
+                i18n::t("state.reconnect.gave_up")
+                    .replace("{port}", &job.port_name)
+                    .replace("{attempts}", &MAX_RECONNECT_ATTEMPTS.to_string()),
             ));
             return;
         }
@@ -1225,7 +1238,9 @@ impl AppHandle {
         *self.pending_reconnect.lock().unwrap() = Some(next_job);
         let _ = self.ui_tx.send(UiEvent::Toast(
             ToastKind::Info,
-            format!("重连 {} 第 {} 次…", job.port_name, job.attempt),
+            i18n::t("state.reconnect.trying")
+                .replace("{port}", &job.port_name)
+                .replace("{attempt}", &job.attempt.to_string()),
         ));
     }
 
@@ -1546,8 +1561,13 @@ fn audio_upload_worker(
     let begin = serde_json::json!({ "op": "begin", "name": name, "size": total });
     match req.request(CMD_AUDIO_FILE, Some(begin), REQ_TIMEOUT) {
         Ok(f) if f.status() == Some(0) => {}
-        Ok(f) => err = Some(format!("begin 被拒绝: {}", f.error.unwrap_or_default())),
-        Err(e) => err = Some(format!("begin 请求失败: {e}")),
+        Ok(f) => {
+            err = Some(
+                i18n::t("state.audio.upload_begin_rejected")
+                    .replace("{e}", &f.error.unwrap_or_default()),
+            );
+        }
+        Err(e) => err = Some(i18n::t("state.audio.upload_begin_fail").replace("{e}", &e)),
     }
 
     // data×N：每块等响应（固件按 index 严格递增校验）
@@ -1580,14 +1600,19 @@ fn audio_upload_worker(
                     }
                 }
                 Ok(f) => {
-                    err = Some(format!(
-                        "第 {index} 块被拒绝: {}",
-                        f.error.unwrap_or_default()
-                    ));
+                    err = Some(
+                        i18n::t("state.audio.upload_block_rejected")
+                            .replace("{index}", &index.to_string())
+                            .replace("{e}", &f.error.unwrap_or_default()),
+                    );
                     break;
                 }
                 Err(e) => {
-                    err = Some(format!("第 {index} 块请求失败: {e}"));
+                    err = Some(
+                        i18n::t("state.audio.upload_block_fail")
+                            .replace("{index}", &index.to_string())
+                            .replace("{e}", &e),
+                    );
                     break;
                 }
             }
@@ -1599,8 +1624,13 @@ fn audio_upload_worker(
         let end = serde_json::json!({ "op": "end", "name": name, "size": total });
         match req.request(CMD_AUDIO_FILE, Some(end), REQ_TIMEOUT) {
             Ok(f) if f.status() == Some(0) => {}
-            Ok(f) => err = Some(format!("end 被拒绝: {}", f.error.unwrap_or_default())),
-            Err(e) => err = Some(format!("end 请求失败: {e}")),
+            Ok(f) => {
+                err = Some(
+                    i18n::t("state.audio.upload_end_rejected")
+                        .replace("{e}", &f.error.unwrap_or_default()),
+                );
+            }
+            Err(e) => err = Some(i18n::t("state.audio.upload_end_fail").replace("{e}", &e)),
         }
     } else {
         let abort = serde_json::json!({ "op": "abort", "name": name });

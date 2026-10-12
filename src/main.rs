@@ -4,6 +4,7 @@
 
 mod app;
 mod config;
+mod i18n;
 mod link;
 mod media;
 mod ota;
@@ -48,6 +49,8 @@ fn main() -> eframe::Result {
     util::log::init_tracing();
 
     let cfg = config::load();
+    // 界面语言：先于任何 UI 构建注入，首帧即为目标语言。
+    i18n::set_language(cfg.language);
     let handle = state::AppHandle::new();
 
     // 把 LocalConfig 注入 AppHandle

@@ -2,73 +2,76 @@
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::{AppHandle, Page, UiEvent};
 
 #[derive(Debug, Clone, Copy)]
 pub struct NavItem {
     pub page: Page,
+    /// i18n key（渲染时经 `i18n::t` 取当前语言文案）
     pub label: &'static str,
     pub icon: &'static str,
     pub enabled: bool,
+    /// i18n key
     pub hint: Option<&'static str>,
 }
 
 const ITEMS: &[NavItem] = &[
     NavItem {
         page: Page::Settings,
-        label: "设备",
+        label: "nav.device",
         icon: crate::ui::icons::NAV_SETTINGS,
         enabled: true,
-        hint: Some("设备参数配置 (Ctrl+1)"),
+        hint: Some("nav.device.hint"),
     },
     NavItem {
         page: Page::Keymap,
-        label: "键盘",
+        label: "nav.keymap",
         icon: crate::ui::icons::NAV_KEYMAP,
         enabled: true,
-        hint: Some("按键盘自定义按键功能 (Ctrl+2)"),
+        hint: Some("nav.keymap.hint"),
     },
     NavItem {
         page: Page::Lighting,
-        label: "灯效",
+        label: "nav.lighting",
         icon: crate::ui::icons::NAV_LIGHTING,
         enabled: true,
-        hint: Some("灯光效果 (Ctrl+3)"),
+        hint: Some("nav.lighting.hint"),
     },
     NavItem {
         page: Page::Wifi,
-        label: "WiFi",
+        label: "nav.wifi",
         icon: crate::ui::icons::NAV_WIFI,
         enabled: true,
-        hint: Some("无线网络 (Ctrl+4)"),
+        hint: Some("nav.wifi.hint"),
     },
     NavItem {
         page: Page::Audio,
-        label: "音效",
+        label: "nav.audio",
         icon: crate::ui::icons::NAV_AUDIO,
         enabled: true,
-        hint: Some("音效板文件与键位绑定 (Ctrl+5)"),
+        hint: Some("nav.audio.hint"),
     },
     NavItem {
         page: Page::Voice,
-        label: "语音",
+        label: "nav.voice",
         icon: crate::ui::icons::NAV_VOICE,
         enabled: true,
-        hint: Some("语音设置 (Ctrl+6)"),
+        hint: Some("nav.voice.hint"),
     },
     NavItem {
         page: Page::Log,
-        label: "日志",
+        label: "nav.log",
         icon: crate::ui::icons::NAV_LOG,
         enabled: true,
-        hint: Some("协议与应用日志 (Ctrl+7)"),
+        hint: Some("nav.log.hint"),
     },
     NavItem {
         page: Page::About,
-        label: "关于",
+        label: "nav.about",
         icon: crate::ui::icons::NAV_ABOUT,
         enabled: true,
-        hint: Some("版本信息 (Ctrl+8)"),
+        hint: Some("nav.about.hint"),
     },
 ];
 
@@ -100,13 +103,25 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     ui.add_space(10.0);
 
     // 主导航：设备相关（设置 / 键映射 / 灯效 / WiFi / 语音 / 音效 → 共 6 项）
-    nav_group(ui, handle, current, "设备", &ITEMS[..6]);
+    nav_group(
+        ui,
+        handle,
+        current,
+        i18n::t("nav.group.device"),
+        &ITEMS[..6],
+    );
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
     // 系统组：日志 / 关于
-    nav_group(ui, handle, current, "系统", &ITEMS[6..]);
+    nav_group(
+        ui,
+        handle,
+        current,
+        i18n::t("nav.group.system"),
+        &ITEMS[6..],
+    );
 }
 
 fn nav_group(ui: &mut egui::Ui, handle: &AppHandle, current: Page, title: &str, items: &[NavItem]) {
@@ -151,9 +166,12 @@ fn nav_item(ui: &mut egui::Ui, handle: &AppHandle, current: Page, item: &NavItem
     let icon_galley = ui
         .painter()
         .layout(item.icon.to_string(), icon_font, fg, f32::INFINITY);
-    let label_galley = ui
-        .painter()
-        .layout(item.label.to_string(), label_font, fg, f32::INFINITY);
+    let label_galley = ui.painter().layout(
+        i18n::t(item.label).to_string(),
+        label_font,
+        fg,
+        f32::INFINITY,
+    );
     let icon_w = icon_galley.rect.width();
     let gap = 6.0;
     let start_x = rect.left_center().x + 10.0;
@@ -177,6 +195,6 @@ fn nav_item(ui: &mut egui::Ui, handle: &AppHandle, current: Page, item: &NavItem
         let _ = handle.ui_tx.send(UiEvent::Navigate(item.page));
     }
     if let Some(hint) = item.hint {
-        resp.on_hover_text(hint);
+        resp.on_hover_text(i18n::t(hint));
     }
 }

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::state::AppHandle;
 
 fn icon_label(ui: &mut egui::Ui, icon: &str, text: &str) {
@@ -42,8 +43,20 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
 
     egui::MenuBar::new().ui(ui, |ui| {
         ui.style_mut().spacing.item_spacing.x = 14.0;
-        icon_label(ui, crate::ui::icons::UPTIME, &format!("运行时长 {uptime}"));
-        icon_label(ui, crate::ui::icons::TX, &format!("已发送 {tx}"));
-        icon_label(ui, crate::ui::icons::RX, &format!("已接收 {rx}"));
+        icon_label(
+            ui,
+            crate::ui::icons::UPTIME,
+            &i18n::t("status.uptime").replace("{uptime}", &uptime),
+        );
+        icon_label(
+            ui,
+            crate::ui::icons::TX,
+            &i18n::t("status.tx").replace("{tx}", &tx.to_string()),
+        );
+        icon_label(
+            ui,
+            crate::ui::icons::RX,
+            &i18n::t("status.rx").replace("{rx}", &rx.to_string()),
+        );
     });
 }

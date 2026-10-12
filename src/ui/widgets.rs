@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::i18n;
 use crate::protocol::{DeviceSettings, FieldMask};
 use crate::state::{AppHandle, ToastKind};
 
@@ -121,14 +122,16 @@ pub fn show_confirm(
             ui.label(body);
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary =
-                    egui::Button::new(egui::RichText::new("继续").color(egui::Color32::WHITE))
-                        .fill(crate::ui::ACCENT)
-                        .corner_radius(egui::CornerRadius::same(6));
+                let primary = egui::Button::new(
+                    egui::RichText::new(i18n::t("dlg.confirm.continue"))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(crate::ui::ACCENT)
+                .corner_radius(egui::CornerRadius::same(6));
                 if ui.add(primary).clicked() {
                     outcome = ConfirmOutcome::Yes;
                 }
-                if ui.button("取消").clicked() {
+                if ui.button(i18n::t("dlg.confirm.cancel")).clicked() {
                     outcome = ConfirmOutcome::No;
                 }
             });
@@ -148,69 +151,74 @@ pub fn show_local_settings(
     open: &mut bool,
 ) -> Option<bool> {
     let mut result = None;
-    egui::Window::new(format!("{} 本地设置", crate::ui::icons::GEAR))
-        .open(open)
-        .collapsible(false)
-        .resizable(false)
-        // 居中：固定锚点 + 显式 default_pos 避免 egui 记忆上次位置飘离屏幕中心。
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .default_pos([0.0, 0.0])
-        .default_size([420.0, 360.0])
-        .show(ctx, |ui| {
-            // 1) 语言
-            ui.group(|ui| {
-                ui.strong("语言");
-                let mut lang = handle.language();
-                egui::ComboBox::from_id_salt("lang-combo")
-                    .selected_text(lang.label())
-                    .show_ui(ui, |cb| {
-                        cb.selectable_value(&mut lang, crate::config::Language::Chinese, "中文");
-                        cb.selectable_value(&mut lang, crate::config::Language::English, "English");
-                    });
-                if lang != handle.language() {
-                    handle.local_config.lock().unwrap().language = lang;
-                }
-                ui.label("（目前仅提供中文界面；切换到英文后部分文案暂未翻译）");
-            });
-
-            // 2) 主题：两段式按钮，选中态填品牌色，与 Settings 页 tab 同款风格。
-            ui.add_space(4.0);
-            ui.group(|ui| {
-                ui.strong("主题");
-                let current = handle.theme();
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for t in [crate::config::Theme::Dark, crate::config::Theme::Light] {
-                        let selected = current == t;
-                        let mut btn = crate::ui::fonts::IconTextButton::new("", t.label(), 14.0)
-                            .gap(0.0)
-                            .fill(if selected {
-                                crate::ui::ACCENT
-                            } else {
-                                ui.visuals().faint_bg_color
-                            })
-                            .corner_radius(egui::CornerRadius::same(8));
-                        if selected {
-                            btn = btn.fg(egui::Color32::WHITE);
-                        }
-                        if ui.add(btn).clicked() && !selected {
-                            handle.local_config.lock().unwrap().theme = t;
-                            // 即时切换 visuals：避免重启应用才能看到效果；
-                            // 退出时 on_exit 会把 LocalConfig 落盘，下次启动仍生效。
-                            crate::ui::apply_theme(ui.ctx(), t);
-                        }
-                    }
+    egui::Window::new(format!(
+        "{} {}",
+        crate::ui::icons::GEAR,
+        i18n::t("dlg.local_settings.title")
+    ))
+    .open(open)
+    .collapsible(false)
+    .resizable(false)
+    // 居中：固定锚点 + 显式 default_pos 避免 egui 记忆上次位置飘离屏幕中心。
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .default_pos([0.0, 0.0])
+    .default_size([420.0, 360.0])
+    .show(ctx, |ui| {
+        // 1) 语言
+        ui.group(|ui| {
+            ui.strong(i18n::t("common.language"));
+            let mut lang = handle.language();
+            egui::ComboBox::from_id_salt("lang-combo")
+                .selected_text(lang.label())
+                .show_ui(ui, |cb| {
+                    cb.selectable_value(&mut lang, crate::config::Language::Chinese, "中文");
+                    cb.selectable_value(&mut lang, crate::config::Language::English, "English");
                 });
-            });
+            if lang != handle.language() {
+                handle.local_config.lock().unwrap().language = lang;
+                // 立即生效：UI 每帧重建，下一帧即为目标语言。
+                crate::i18n::set_language(lang);
+            }
+        });
 
-            // 3) 关闭
-            ui.add_space(8.0);
+        // 2) 主题：两段式按钮，选中态填品牌色，与 Settings 页 tab 同款风格。
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.strong(i18n::t("common.theme"));
+            let current = handle.theme();
             ui.horizontal(|ui| {
-                if ui.button("关闭").clicked() {
-                    result = Some(false);
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for t in [crate::config::Theme::Dark, crate::config::Theme::Light] {
+                    let selected = current == t;
+                    let mut btn = crate::ui::fonts::IconTextButton::new("", t.label(), 14.0)
+                        .gap(0.0)
+                        .fill(if selected {
+                            crate::ui::ACCENT
+                        } else {
+                            ui.visuals().faint_bg_color
+                        })
+                        .corner_radius(egui::CornerRadius::same(8));
+                    if selected {
+                        btn = btn.fg(egui::Color32::WHITE);
+                    }
+                    if ui.add(btn).clicked() && !selected {
+                        handle.local_config.lock().unwrap().theme = t;
+                        // 即时切换 visuals：避免重启应用才能看到效果；
+                        // 退出时 on_exit 会把 LocalConfig 落盘，下次启动仍生效。
+                        crate::ui::apply_theme(ui.ctx(), t);
+                    }
                 }
             });
         });
+
+        // 3) 关闭
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(i18n::t("common.close")).clicked() {
+                result = Some(false);
+            }
+        });
+    });
     result
 }
 
@@ -345,7 +353,9 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
         ) {
             Ok(resp) => {
                 if resp.status() == Some(1) {
-                    let msg = resp.error.unwrap_or_else(|| "未知错误".into());
+                    let msg = resp
+                        .error
+                        .unwrap_or_else(|| i18n::t("common.unknown_error").into());
                     handle.log_kind(crate::state::LogKind::App, format!("SET 失败: {msg}"));
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Error,
@@ -357,9 +367,10 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
                     // 因为这些字段设备回读永远是 "***"，UI 没有"已更新"的视觉反馈点。
                     let secret_names = secret_field_names(mask);
                     let toast_text = if secret_names.is_empty() {
-                        "已应用".to_string()
+                        i18n::t("toast.diff.applied").to_string()
                     } else {
-                        format!("已应用（含敏感字段：{}）", secret_names.join("、"))
+                        i18n::t("toast.diff.applied_secrets")
+                            .replace("{names}", &secret_names.join(i18n::t("common.list_sep")))
                     };
                     let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                         crate::state::ToastKind::Success,
@@ -371,7 +382,7 @@ pub fn apply_diff(handle: &AppHandle, diff: &DeviceSettings, mask: FieldMask) {
                 handle.log_kind(crate::state::LogKind::App, format!("SET 超时: {e}"));
                 let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
                     crate::state::ToastKind::Warning,
-                    "设备无响应".to_string(),
+                    i18n::t("toast.diff.no_response").to_string(),
                 ));
             }
         }
@@ -407,15 +418,17 @@ pub fn show_diff_bar(
             // 父面板的横向滚动条。
             ui.horizontal(|ui| {
                 ui.strong(
-                    egui::RichText::new(format!("待下发 {count} 项"))
-                        .color(ui.visuals().warn_fg_color),
+                    egui::RichText::new(
+                        i18n::t("diff.pending").replace("{count}", &count.to_string()),
+                    )
+                    .color(ui.visuals().warn_fg_color),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("放弃 (Esc)").clicked() {
+                    if ui.button(i18n::t("diff.discard")).clicked() {
                         action = DiffAction::Discard;
                     }
                     let apply_btn = egui::Button::new(
-                        egui::RichText::new("应用 (Ctrl+Enter)").color(egui::Color32::WHITE),
+                        egui::RichText::new(i18n::t("diff.apply")).color(egui::Color32::WHITE),
                     )
                     .fill(crate::ui::ACCENT)
                     .corner_radius(egui::CornerRadius::same(6));
@@ -432,57 +445,87 @@ pub fn show_diff_bar(
                     // 严格按 mask 决定展示哪些字段，合法 0 / 空串也能正确呈现。
                     // 展示用中文标签 + 可读值，不暴露协议字段名。
                     if mask.test(crate::protocol::F_WIFI_SWITCH) {
-                        ui.label(format!("WiFi 开关 → {}", on_off(diff.wifi_switch)));
+                        ui.label(
+                            i18n::t("diff.field.wifi_switch")
+                                .replace("{value}", on_off(diff.wifi_switch)),
+                        );
                     }
                     if mask.test(crate::protocol::F_WIFI_SSID) {
-                        ui.label(format!("网络名称 → {}", diff.wifi_ssid));
+                        ui.label(i18n::t("diff.field.ssid").replace("{value}", &diff.wifi_ssid));
                     }
                     if mask.test(crate::protocol::F_WIFI_PASSWORD) {
                         // 密码不下发明文到明细条，仅提示已修改。
-                        ui.label("网络密码 → 已修改");
+                        ui.label(i18n::t("diff.field.password"));
                     }
                     if mask.test(crate::protocol::F_TFT_BRIGHTNESS) {
-                        ui.label(format!("屏幕背光 → {}", diff.tft_brightness));
+                        ui.label(
+                            i18n::t("diff.field.tft_brightness")
+                                .replace("{value}", &diff.tft_brightness.to_string()),
+                        );
                     }
                     if mask.test(crate::protocol::F_TFT_THEME) {
-                        ui.label(format!(
-                            "屏幕主题 → {}",
+                        ui.label(i18n::t("diff.field.tft_theme").replace(
+                            "{value}",
                             if diff.tft_theme == 0 {
-                                "深色"
+                                i18n::t("diff.theme.dark")
                             } else {
-                                "浅色"
-                            }
+                                i18n::t("diff.theme.light")
+                            },
                         ));
                     }
                     if mask.test(crate::protocol::F_WORK_MODE) {
-                        ui.label(format!("连接方式 → {}", work_mode_label(diff.work_mode)));
+                        ui.label(
+                            i18n::t("diff.field.work_mode")
+                                .replace("{value}", work_mode_label(diff.work_mode)),
+                        );
                     }
                     if mask.test(crate::protocol::F_ACTIVE_KEYMAP_PROFILE) {
-                        ui.label(format!("按键配置 → 配置 {}", diff.active_keymap_profile));
+                        ui.label(
+                            i18n::t("diff.field.keymap_profile")
+                                .replace("{value}", &diff.active_keymap_profile.to_string()),
+                        );
                     }
                     if mask.test(crate::protocol::F_DEVICE_VOLUME) {
-                        ui.label(format!("音量 → {}", diff.device_volume));
+                        ui.label(
+                            i18n::t("diff.field.volume")
+                                .replace("{value}", &diff.device_volume.to_string()),
+                        );
                     }
                     if mask.test(crate::protocol::F_AUDIO_ENABLE) {
-                        ui.label(format!("音频输出 → {}", on_off(diff.audio_enable)));
+                        ui.label(
+                            i18n::t("diff.field.audio_enable")
+                                .replace("{value}", on_off(diff.audio_enable)),
+                        );
                     }
                     if mask.test(crate::protocol::F_POWER_MODE) {
-                        ui.label(format!("节能策略 → {}", power_mode_label(diff.power_mode)));
+                        ui.label(
+                            i18n::t("diff.field.power_mode")
+                                .replace("{value}", power_mode_label(diff.power_mode)),
+                        );
                     }
                     if mask.test(crate::protocol::F_RGB_MODE) {
-                        ui.label(format!("灯效模式 → {}", rgb_mode_label(diff.rgb_mode)));
+                        ui.label(
+                            i18n::t("diff.field.rgb_mode")
+                                .replace("{value}", rgb_mode_label(diff.rgb_mode)),
+                        );
                     }
                     if mask.test(crate::protocol::F_RGB_SINGLE_COLOR) {
-                        ui.label(format!("单色颜色 → 调色板 {}", diff.rgb_single_color));
+                        ui.label(
+                            i18n::t("diff.field.rgb_single_color")
+                                .replace("{value}", &diff.rgb_single_color.to_string()),
+                        );
                     }
                     if mask.test(crate::protocol::F_RGB_CLICK_MODE) {
-                        ui.label(format!(
-                            "按下灯光反馈 → {}",
-                            rgb_click_label(diff.rgb_click_mode)
-                        ));
+                        ui.label(
+                            i18n::t("diff.field.rgb_click_mode")
+                                .replace("{value}", rgb_click_label(diff.rgb_click_mode)),
+                        );
                     }
                     if mask.test(crate::protocol::F_RGB_BRIGHTNESS) {
-                        ui.label(format!("整体亮度 → {}", diff.rgb_brightness));
+                        ui.label(
+                            i18n::t("diff.field.rgb_brightness")
+                                .replace("{value}", &diff.rgb_brightness.to_string()),
+                        );
                     }
                 });
             }
@@ -503,55 +546,59 @@ fn diff_field_count(_d: &DeviceSettings, mask: FieldMask) -> usize {
     mask.bits().count_ones() as usize
 }
 
-/// 0/1 开关值 → 中文（Diff 明细条展示用）。
+/// 0/1 开关值 → 当前语言文案（Diff 明细条展示用）。
 fn on_off(v: i32) -> &'static str {
-    if v != 0 { "开" } else { "关" }
+    if v != 0 {
+        i18n::t("diff.value.on")
+    } else {
+        i18n::t("diff.value.off")
+    }
 }
 
-/// 工作模式值 → 中文（与 Settings 页下拉选项一致）。
+/// 工作模式值 → 当前语言文案（与 Settings 页下拉选项一致）。
 fn work_mode_label(m: i32) -> &'static str {
     match m {
-        0 => "USB 有线",
-        1 => "蓝牙",
-        2 => "2.4G 无线",
-        _ => "未知",
+        0 => i18n::t("diff.work_mode.usb"),
+        1 => i18n::t("diff.work_mode.ble"),
+        2 => i18n::t("diff.work_mode.wireless"),
+        _ => i18n::t("diff.unknown"),
     }
 }
 
-/// 节能策略值 → 中文。
+/// 节能策略值 → 当前语言文案。
 fn power_mode_label(m: i32) -> &'static str {
     match m {
-        0 => "性能优先",
-        1 => "省电优先",
-        _ => "未知",
+        0 => i18n::t("diff.power_mode.performance"),
+        1 => i18n::t("diff.power_mode.saving"),
+        _ => i18n::t("diff.unknown"),
     }
 }
 
-/// 灯效模式值 → 中文（与灯效页卡片标签一致）。
+/// 灯效模式值 → 当前语言文案（与灯效页卡片标签一致）。
 fn rgb_mode_label(m: i32) -> &'static str {
     match m {
-        0 => "关闭",
-        1 => "单色",
-        2 => "彩虹",
-        3 => "彩浪",
-        4 => "循环",
-        5 => "电平",
-        6 => "火焰",
-        7 => "脉冲",
-        8 => "拾音",
-        9 => "律动",
-        10 => "渐变",
-        _ => "未知",
+        0 => i18n::t("diff.rgb.off"),
+        1 => i18n::t("diff.rgb.solid"),
+        2 => i18n::t("diff.rgb.rainbow"),
+        3 => i18n::t("diff.rgb.wave"),
+        4 => i18n::t("diff.rgb.cycle"),
+        5 => i18n::t("diff.rgb.level"),
+        6 => i18n::t("diff.rgb.flame"),
+        7 => i18n::t("diff.rgb.pulse"),
+        8 => i18n::t("diff.rgb.voice"),
+        9 => i18n::t("diff.rgb.rhythm"),
+        10 => i18n::t("diff.rgb.gradient"),
+        _ => i18n::t("diff.unknown"),
     }
 }
 
-/// 按下灯光反馈值 → 中文（与灯效页卡片标签一致）。
+/// 按下灯光反馈值 → 当前语言文案（与灯效页卡片标签一致）。
 fn rgb_click_label(m: i32) -> &'static str {
     match m {
-        0 => "关闭",
-        1 => "单色",
-        2 => "渐变",
-        _ => "未知",
+        0 => i18n::t("diff.rgb.off"),
+        1 => i18n::t("diff.rgb.solid"),
+        2 => i18n::t("diff.rgb.gradient"),
+        _ => i18n::t("diff.unknown"),
     }
 }
 
@@ -561,13 +608,13 @@ fn rgb_click_label(m: i32) -> &'static str {
 fn secret_field_names(mask: FieldMask) -> Vec<&'static str> {
     let mut names = Vec::new();
     if mask.test(crate::protocol::F_WIFI_PASSWORD) {
-        names.push("WiFi 密码");
+        names.push(i18n::t("diff.secret.wifi_password"));
     }
     if mask.test(crate::protocol::F_VOICE_TENCENT_SECRET_ID) {
-        names.push("SecretId");
+        names.push(i18n::t("diff.secret.secret_id"));
     }
     if mask.test(crate::protocol::F_VOICE_TENCENT_SECRET_KEY) {
-        names.push("SecretKey");
+        names.push(i18n::t("diff.secret.secret_key"));
     }
     names
 }
