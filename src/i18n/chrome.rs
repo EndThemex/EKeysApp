@@ -75,6 +75,12 @@ pub(super) const ENTRIES: &[Entry] = &[
         "{name} ({product})",
     ),
     ("top.port.unselected", "(未选择端口)", "(no port selected)"),
+    ("top.port.show_all", "显示全部端口", "Show all ports"),
+    (
+        "top.port.show_all.hint",
+        "关闭时只列出疑似 ESP32 的端口（Espressif 原生 USB 与常见 USB 转串口桥）",
+        "When off, only ports that could be an ESP32 are listed (Espressif native USB and common USB-UART bridges)",
+    ),
     ("top.scan", "扫描", "Scan"),
     // ---- 顶栏：连接 / 断开 ----
     ("top.connect", "● 连接", "● Connect"),

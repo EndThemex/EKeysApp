@@ -370,6 +370,8 @@ pub const TAB_DISPLAY:  &str = r::MONITOR;
   1. 状态胶囊（最左，`add_space(0)`）。
   2. `add_space(6.0)`。
   3. 端口 ComboBox + 扫描按钮（`horizontal`）。
+     端口列表默认按白名单过滤（`PortInfo::plausible()`：Espressif 0x303A + 常见 USB 转串口桥 + 连接方式未知；过滤 PCI / 蓝牙 / 白名单外的 USB 设备），
+     弹层底部有「显示全部端口」checkbox（`st.show_all_ports`）可关掉过滤。
   4. `add_space(4.0)`。
   5. 连接 / 断开按钮组。
   6. `add_space(6.0)`。

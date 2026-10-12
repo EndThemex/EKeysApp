@@ -26,21 +26,35 @@ pub struct ConnectPanelState {
     pub selected: Option<String>,
     /// 自动连接是否已尝试过（避免每次刷新都触发）
     pub auto_connect_done: bool,
+    /// 端口下拉是否显示全部端口（默认按白名单过滤掉肯定不是 ESP32 的端口）
+    pub show_all_ports: bool,
 }
 
 impl ConnectPanelState {
     pub fn refresh(&mut self) {
         self.ports = LinkManager::list_ports();
-        if self.selected.is_none() {
-            self.selected = self.ports.first().map(|p| p.name.clone());
-        } else if !self
-            .ports
-            .iter()
-            .any(|p| Some(&p.name) == self.selected.as_ref())
-        {
-            // 之前选中的端口已消失
-            self.selected = self.ports.first().map(|p| p.name.clone());
+        let selected_gone = match &self.selected {
+            Some(name) => !self.ports.iter().any(|p| &p.name == name),
+            // 尚未选中，或之前选中的端口已消失
+            None => true,
+        };
+        if selected_gone {
+            // 默认落到过滤后仍可见的端口，避免选中一个被隐藏的端口
+            self.selected = self
+                .ports
+                .iter()
+                .find(|p| p.plausible())
+                .or_else(|| self.ports.first())
+                .map(|p| p.name.clone());
         }
+    }
+
+    /// 当前应显示的端口：show_all_ports 时不过滤。
+    fn visible_ports(&self) -> Vec<&PortInfo> {
+        self.ports
+            .iter()
+            .filter(|p| self.show_all_ports || p.plausible())
+            .collect()
     }
 }
 
@@ -127,6 +141,26 @@ pub fn show(
                 .selected
                 .clone()
                 .unwrap_or_else(|| i18n::t("top.port.none").to_string());
+            // 先取出要显示的端口（名字 + 显示文案），避免在弹层里同时
+            // 借用 st.ports（不可变）与 st.selected（可变）。
+            let port_items: Vec<(String, String)> = st
+                .visible_ports()
+                .into_iter()
+                .map(|p| {
+                    // CH340 系列桥接端口：列表里直接标注不支持
+                    // （连接时 attempt_connect 也会拒绝并弹 Toast）
+                    let label = if p.vid == Some(WCH_VID) {
+                        i18n::t("top.port.ch340").replace("{name}", &p.name)
+                    } else if let Some(prod) = &p.product {
+                        i18n::t("top.port.product")
+                            .replace("{name}", &p.name)
+                            .replace("{product}", prod)
+                    } else {
+                        p.name.clone()
+                    };
+                    (p.name.clone(), label)
+                })
+                .collect();
             // ComboBox 自身在两种主题下的边框都偏淡，套一层 Frame 强制画出
             // 清晰轮廓 + 次级底色，让下拉看上去是可交互的控件。
             egui::Frame::new()
@@ -138,19 +172,23 @@ pub fn show(
                         .selected_text(display)
                         .width(90.0)
                         .show_ui(ui, |cb| {
-                            for p in &st.ports {
-                                // CH340 系列桥接端口：列表里直接标注不支持
-                                // （连接时 attempt_connect 也会拒绝并弹 Toast）
-                                let label = if p.vid == Some(WCH_VID) {
-                                    i18n::t("top.port.ch340").replace("{name}", &p.name)
-                                } else if let Some(prod) = &p.product {
-                                    i18n::t("top.port.product")
-                                        .replace("{name}", &p.name)
-                                        .replace("{product}", prod)
-                                } else {
-                                    p.name.clone()
-                                };
-                                cb.selectable_value(&mut st.selected, Some(p.name.clone()), label);
+                            for (name, label) in &port_items {
+                                cb.selectable_value(
+                                    &mut st.selected,
+                                    Some(name.clone()),
+                                    label.as_str(),
+                                );
+                            }
+                            // 「显示全部端口」：关闭时只列疑似 ESP32 的端口，
+                            // 误过滤时可以一键看全。
+                            cb.separator();
+                            let mut show_all = st.show_all_ports;
+                            if cb
+                                .checkbox(&mut show_all, i18n::t("top.port.show_all"))
+                                .on_hover_text(i18n::t("top.port.show_all.hint"))
+                                .changed()
+                            {
+                                st.show_all_ports = show_all;
                             }
                         });
                 });

@@ -25,6 +25,30 @@ pub fn is_wch_bridge(name: &str) -> Option<(u16, u16)> {
         })
 }
 
+/// 端口的连接方式；用于「扫描时过滤掉肯定不是 ESP32 的端口」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PortKind {
+    /// USB 端口（VID/PID 可读）
+    Usb,
+    /// 主板 PCI 串口
+    Pci,
+    /// 蓝牙串口
+    Bluetooth,
+    /// 连接方式无法判定（拿不到 VID 信息）
+    Unknown,
+}
+
+/// 扫描时保留的 USB VID 白名单：命中的才可能是 EKeys 设备。
+/// 白名单外的 USB 设备（打印机 / 摄像头 / 手机 / 集线器等）一律过滤掉。
+const ALLOWED_USB_VIDS: &[u16] = &[
+    ESP32_S3_VID, // Espressif 原生 USB CDC（EKeys 设备本体）
+    WCH_VID,      // 沁恒 CH34x / CH910x（拒连但需在列表里给出提示）
+    0x0403,       // FTDI FT232 / FT2232
+    0x067B,       // Prolific PL230x
+    0x10C4,       // Silicon Labs CP210x
+    0x0483,       // STMicroelectronics USB VCP
+];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PortInfo {
     pub name: String,
@@ -33,19 +57,41 @@ pub struct PortInfo {
     pub serial_number: Option<String>,
     pub vid: Option<u16>,
     pub pid: Option<u16>,
+    pub kind: PortKind,
+}
+
+impl PortInfo {
+    /// 是否可能是 ESP32 —— 端口下拉的白名单过滤依据。
+    ///
+    /// - USB：VID 命中白名单才保留；
+    /// - PCI / 蓝牙：确定不是设备，过滤；
+    /// - 连接方式未知：拿不到 VID 信息，保留，交由连接阶段判定。
+    pub fn plausible(&self) -> bool {
+        match self.kind {
+            PortKind::Usb => match self.vid {
+                Some(v) => ALLOWED_USB_VIDS.contains(&v),
+                None => true,
+            },
+            PortKind::Unknown => true,
+            PortKind::Pci | PortKind::Bluetooth => false,
+        }
+    }
 }
 
 impl From<&SerialPortInfo> for PortInfo {
     fn from(p: &SerialPortInfo) -> Self {
-        let (vid, pid, manufacturer, product, serial_number) = match &p.port_type {
+        let (kind, vid, pid, manufacturer, product, serial_number) = match &p.port_type {
             SerialPortType::UsbPort(info) => (
+                PortKind::Usb,
                 Some(info.vid),
                 Some(info.pid),
                 info.manufacturer.clone(),
                 info.product.clone(),
                 info.serial_number.clone(),
             ),
-            _ => (None, None, None, None, None),
+            SerialPortType::PciPort => (PortKind::Pci, None, None, None, None, None),
+            SerialPortType::BluetoothPort => (PortKind::Bluetooth, None, None, None, None, None),
+            SerialPortType::Unknown => (PortKind::Unknown, None, None, None, None, None),
         };
         Self {
             name: p.port_name.clone(),
@@ -54,6 +100,7 @@ impl From<&SerialPortInfo> for PortInfo {
             serial_number,
             vid,
             pid,
+            kind,
         }
     }
 }
