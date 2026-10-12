@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 连接管理：原生 USB CDC 串口、CH340 等 WCH 桥接识别 + 自动拒绝、心跳保活、
   指数退避自动重连（1→2→4→5s，5 次后放弃）、启动自动连接上次端口。
 - 全量配置 GET / SET：25 字段 `DeviceSettings`，增量下发 + 协议侧钳位。
-- 8 个功能页：设备设置、键映射（4 层 × 11 物理键）、灯效、WiFi、语音（腾讯云
+- 8 个功能页：设备、键映射（4 层 × 11 物理键）、灯效、WiFi、语音（腾讯云
   一句话识别）、音效板（上传 + 绑定 + 试播）、日志、关于。
 - 键映射编辑：本地 `KeymapData` ↔ 固件 `FirmwareKeyEntry` 模型映射，FUN 组合键、
   Profile 名称 / 自定义图标，进入页面边沿拉取。

@@ -88,7 +88,7 @@ pub struct SettingsPanelState {
 }
 
 pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) {
-    ui.heading("设备设置");
+    ui.heading("设备");
     ui.add_space(4.0);
 
     // 在线但尚未成功读到 0x07 全量快照 → 提示用户当前展示的不是设备真实配置

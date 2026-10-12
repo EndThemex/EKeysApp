@@ -16,7 +16,7 @@ pub struct NavItem {
 const ITEMS: &[NavItem] = &[
     NavItem {
         page: Page::Settings,
-        label: "设备设置",
+        label: "设备",
         icon: crate::ui::icons::NAV_SETTINGS,
         enabled: true,
         hint: Some("设备参数配置 (Ctrl+1)"),

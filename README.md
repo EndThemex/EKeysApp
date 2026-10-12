@@ -35,7 +35,7 @@
 
 - **连接管理**：原生 USB CDC 串口、CH340 等 WCH 桥接芯片识别 + 自动拒绝、心跳保活、指数退避自动重连（1→2→4→5s，5 次后放弃）、启动自动连接上次端口
 - **全量配置 GET / SET**：25 字段 `DeviceSettings`，增量下发（仅 `data.config` 携带差异字段）+ 协议侧钳位
-- **8 个功能页**：设备设置（多组卡片）、键映射（4 层 × 物理键 → 设备 11 键映射）、灯效、WiFi、语音（腾讯云一句话识别）、音效板（音频上传 + 11 键绑定 + 试播）、日志、关于
+- **8 个功能页**：设备（多组卡片）、键映射（4 层 × 物理键 → 设备 11 键映射）、灯效、WiFi、语音（腾讯云一句话识别）、音效板（音频上传 + 11 键绑定 + 试播）、日志、关于
 - **键映射编辑**：本地 `KeymapData` ↔ 固件 `FirmwareKeyEntry` 模型映射、FUN 组合键、Profile 名称 / 自定义图标、进入页面边沿拉取
 - **OTA**：本地一次性 HTTP 服务 + MD5 校验，局域网下发 `.bin` 固件（详见 [`docs/ota.md`](./docs/ota.md)）
 - **PC 状态推送**：采集键盘 Lock / 网络 / CPU / 内存，每秒 diff-based 推送到设备（`0x0D`），可在 Settings → PC 状态 开关
@@ -92,7 +92,7 @@ cargo test --all-targets --locked
 | -------- | ------------------------------------------ |
 | `F5`     | 跳到设置页（并触发 `CMD_CONFIG_GET` 刷新） |
 | `Ctrl+L` | 跳到日志页                                 |
-| `Ctrl+1` | 设备设置（Settings）                       |
+| `Ctrl+1` | 设备（Settings）                           |
 | `Ctrl+2` | 键盘（Keymap）                             |
 | `Ctrl+3` | 灯效（Lighting）                           |
 | `Ctrl+4` | WiFi                                       |
@@ -158,7 +158,7 @@ EKeysApp/
     │   ├── topbar.rs           # 顶部状态条 + 连接块（端口 / 扫描 / 状态胶囊 / 自动连接）
     │   ├── sidenav.rs          # 左侧导航（8 项）
     │   ├── statusbar.rs        # 底部状态条（Uptime / 收发计数 / 心跳）
-    │   ├── panel_settings.rs   # 设备设置（多组卡片 + 草稿 + 字段钳位）
+    │   ├── panel_settings.rs   # 设备（多组卡片 + 草稿 + 字段钳位）
     │   ├── panel_keymap.rs     # 键映射（自带 top / central / bottom 三段）
     │   ├── panel_lighting.rs   # 灯效
     │   ├── panel_wifi.rs       # WiFi
