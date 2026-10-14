@@ -15,8 +15,9 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::i18n;
 use crate::protocol::{
-    HID_KEY_CHOICES, KeyAction, KeymapData, KeymapDiffEntry, LAYER_BASE, LAYER_FUN1, LAYER_FUN2,
-    MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT, SlotKind, hid_key_label,
+    HID_KEY_CHOICES, MACRO_DEFAULT_INTERVAL_MS, MACRO_MAX_INTERVAL_MS, MACRO_MAX_STEPS,
+    MacroStep, KeyAction, KeymapData, KeymapDiffEntry, LAYER_BASE, LAYER_FUN1, LAYER_FUN2,
+    MOD_ALT, MOD_CTRL, MOD_GUI, MOD_SHIFT, SlotKind, hid_key_label, macro_step_display,
 };
 use crate::state::AppHandle;
 
@@ -67,6 +68,26 @@ pub struct KeymapPanelState {
     pub cached_diff: Vec<crate::protocol::KeymapDiffEntry>,
     /// 上次缓存对应的 `(draft.version, snap.version)`。
     pub cached_diff_versions: (u64, u64),
+    /// 宏录制会话（Some = 录制中），仅 UI 线程内跨帧存活
+    pub macro_recording: Option<MacroRecording>,
+}
+
+/// 宏录制状态机（`KeymapPanelState::macro_recording`）。
+/// 时间戳全部来自 `Instant::now()`（egui 0.33 的 `Event::Key` 无时间戳，
+/// 帧粒度精度足够按键节奏）。
+#[derive(Default)]
+pub struct MacroRecording {
+    steps: Vec<MacroStep>,
+    /// 上一次按键按下时刻（计算本步与上一步的间隔）
+    last_press: Option<Instant>,
+    /// 末步抬起时刻（结束后把按住时长写回末步间隔）
+    last_release: Option<Instant>,
+    /// 上一帧修饰键掩码（MOD_* 位，边沿检测）
+    prev_mods: u8,
+    /// Shift 上升沿挂起：下一个字母键带 Shift；单独按放 Shift → 0xE1 独立步
+    pending_shift: bool,
+    /// 用户点击「结束录制」按钮（区别于 Esc 结束）
+    stop_requested: bool,
 }
 
 /// 取（必要时重算）当前 draft vs snapshot 的 diff。
@@ -2039,13 +2060,27 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                                 i18n::t("keymap.kind.chord"),
                                 i18n::t("keymap.kind.text"),
                                 i18n::t("keymap.kind.function"),
+                                i18n::t("keymap.kind.macro"),
                             ];
                             let prev_kind = kind_idx;
                             egui::ComboBox::from_id_salt("action-kind")
                                 .selected_text(kinds[kind_idx])
                                 .show_ui(ui, |cb| {
                                     for (i, k) in kinds.iter().enumerate() {
-                                        cb.selectable_value(&mut kind_idx, i, *k);
+                                        // 宏仅单击层（固件 combo1/combo2 无宏通道）
+                                        let enabled = i != 6 || st.edit_channel == LAYER_BASE;
+                                        let resp = cb.add_enabled(
+                                            enabled,
+                                            egui::SelectableLabel::new(false, *k),
+                                        );
+                                        if enabled && resp.clicked() {
+                                            kind_idx = i;
+                                        }
+                                        if !enabled {
+                                            resp.on_disabled_hover_text(i18n::t(
+                                                "keymap.macro.base_only",
+                                            ));
+                                        }
                                     }
                                 });
                             // 类型切换时，把 draft_action 替换成该类型的默认值（保留
@@ -2055,7 +2090,7 @@ fn drawer(ui: &mut egui::Ui, handle: &AppHandle, st: &mut KeymapPanelState, draf
                             }
 
                             // 各类型的参数（就地改 draft_action，写回 st）
-                            edit_action_params(ui, kind_idx, &mut draft_action, st);
+                            edit_action_params(ui, kind_idx, &mut draft_action, st, handle);
                             st.draft_action = Some(draft_action.clone());
                             // 把 capture 状态同步到 AppHandle，供 app.rs 全局快捷键判断
                             *handle.capture_keyboard.lock().unwrap() = st.capture_keyboard;
@@ -2082,6 +2117,7 @@ fn action_kind_index(a: &KeyAction) -> usize {
         KeyAction::Chord(_) => 3,
         KeyAction::Text(_) => 4,
         KeyAction::Function(_) => 5,
+        KeyAction::Macro(_) => 6,
     }
 }
 
@@ -2419,6 +2455,138 @@ fn capture_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState, chord_mode: bool
     }
 }
 
+/// 宏录制入口条（非激活态：可点击进入录制）。激活态 UI 直接画在
+/// `edit_action_params` kind 6 分支内（需要同时借用录制状态）。
+fn macro_record_bar_ui(ui: &mut egui::Ui, st: &mut KeymapPanelState) {
+    if st.macro_recording.is_some() {
+        return;
+    }
+    let resp = egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(crate::ui::icons::KEYMAP_CAPTURE)
+                        .font(crate::ui::fonts::icon_font_id(16.0))
+                        .color(crate::ui::ACCENT),
+                );
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(i18n::t("keymap.macro.record")).strong());
+                    ui.label(
+                        egui::RichText::new(i18n::t("keymap.macro.record_hint"))
+                            .weak()
+                            .size(10.0),
+                    );
+                });
+            });
+        });
+    // 点击进入录制（修饰键掩码初始化为当前值，避免已在按住的修饰键
+    // 首帧被上升沿误判为新按下；同时置 capture_keyboard 供全局快捷键抑制）
+    let rect = resp.response.rect;
+    if ui
+        .interact(rect, ui.id().with("macro-record-bar"), Sense::click())
+        .clicked()
+    {
+        st.capture_keyboard = true;
+        st.macro_recording = Some(MacroRecording {
+            prev_mods: ui.ctx().input(|i| modifiers_bitmask(i.modifiers)),
+            ..Default::default()
+        });
+    }
+}
+
+/// 宏录制事件采集：修饰键边沿 + 本帧 Key 事件 → 追加步骤。
+/// 返回 `true` 表示录制应结束（Esc 按下或已达 5 步上限）。
+fn macro_record_step(ctx: &egui::Context, rec: &mut MacroRecording) -> bool {
+    let mut finished = false;
+    ctx.input(|i| {
+        let cur = modifiers_bitmask(i.modifiers);
+        let rising = cur & !rec.prev_mods;
+        let falling = !cur & rec.prev_mods;
+        let now = Instant::now();
+        // Ctrl/Alt 上升沿：独立修饰键步骤（Shift 走 pending 挂起逻辑）
+        for (bit, code) in [(MOD_CTRL, 0xE0u16), (MOD_ALT, 0xE2)] {
+            if rising & bit != 0 {
+                macro_rec_push(rec, code, false, now);
+            }
+        }
+        // Shift 上升沿：挂起，附加给下一个字母键
+        if rising & MOD_SHIFT != 0 {
+            rec.pending_shift = true;
+        }
+        rec.prev_mods = cur;
+
+        for event in &i.events {
+            let egui::Event::Key {
+                key,
+                pressed,
+                repeat,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if *repeat {
+                continue;
+            }
+            if *key == egui::Key::Escape {
+                if *pressed {
+                    finished = true;
+                }
+                continue;
+            }
+            let Some(c) = egui_key_to_hid(*key) else {
+                continue;
+            };
+            if *pressed {
+                // 仅字母键（0x04~0x1D）消费挂起的 Shift（固件 resolveKeyWithModifier
+                // 对大写字母自动附 Shift；Shift+符号无法无损编码，仅记录主键）
+                let is_letter = (0x04..=0x1D).contains(&c);
+                macro_rec_push(rec, c, rec.pending_shift && is_letter, Instant::now());
+                if rec.steps.len() >= MACRO_MAX_STEPS {
+                    finished = true;
+                }
+            } else {
+                rec.last_release = Some(Instant::now());
+            }
+        }
+
+        // Shift 下降沿仍挂起（单独按放 Shift，没等到字母键）→ 0xE1 独立步
+        if falling & MOD_SHIFT != 0 && rec.pending_shift {
+            macro_rec_push(rec, 0xE1, false, Instant::now());
+            rec.pending_shift = false;
+            if rec.steps.len() >= MACRO_MAX_STEPS {
+                finished = true;
+            }
+        }
+    });
+    finished
+}
+
+/// 追加一步宏：间隔 = 距上一步按下的时长（无参照用默认 20ms），达上限静默丢弃。
+fn macro_rec_push(rec: &mut MacroRecording, code: u16, shift: bool, now: Instant) {
+    if rec.steps.len() >= MACRO_MAX_STEPS {
+        return;
+    }
+    let interval_ms = match rec.last_press {
+        Some(prev) => ((now - prev).as_millis() as u32).min(MACRO_MAX_INTERVAL_MS),
+        None => MACRO_DEFAULT_INTERVAL_MS,
+    };
+    rec.last_press = Some(now);
+    rec.steps.push(MacroStep {
+        code,
+        shift,
+        interval_ms,
+    });
+}
+
 /// HID 主键选择下拉（覆盖 App 编辑器提供的全部键位）。
 fn hid_key_combo(ui: &mut egui::Ui, id_salt: &str, code: &mut u16) {
     let display = hid_key_label(*code)
@@ -2438,6 +2606,7 @@ fn edit_action_params(
     kind: usize,
     current: &mut KeyAction,
     st: &mut KeymapPanelState,
+    handle: &AppHandle,
 ) {
     match kind {
         0 => {
@@ -2704,6 +2873,200 @@ fn edit_action_params(
             );
             *current = KeyAction::Function(f);
         }
+        6 => {
+            // 宏序列：最多 5 步（"键名:间隔ms" "+" 连接，固件逐步
+            // press→delay→release 回放）；仅单击层有宏通道
+            let mut steps = match current {
+                KeyAction::Macro(m) if !m.is_empty() => m.clone(),
+                _ => vec![MacroStep {
+                    code: 0x04,
+                    shift: false,
+                    interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+                }],
+            };
+
+            let mut finished = false;
+            if let Some(rec) = st.macro_recording.as_mut() {
+                // 录制态：激活提示条 + 实时步骤回显 + 事件捕获
+                let live = rec.steps.clone();
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(0x40, 0x28, 0x10))
+                    .stroke(Stroke::new(2.0, Color32::from_rgb(0xFF, 0xA0, 0x40)))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("●")
+                                    .size(16.0)
+                                    .color(Color32::from_rgb(0xFF, 0xA0, 0x40)),
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(i18n::t("keymap.macro.record"))
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} / {}",
+                                        live.len(),
+                                        MACRO_MAX_STEPS
+                                    ))
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(0xD8, 0xC8, 0xA8)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(i18n::t("keymap.macro.record_hint"))
+                                        .size(10.0)
+                                        .color(Color32::from_rgb(0xD8, 0xC8, 0xA8)),
+                                );
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button(i18n::t("keymap.macro.record_stop")).clicked() {
+                                    rec.stop_requested = true;
+                                }
+                            });
+                        });
+                        for (i, s) in live.iter().enumerate() {
+                            // 键名后跟该步间隔（= 距上一步按下的实测时长）
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}. {} {}ms",
+                                    i + 1,
+                                    macro_step_display(s),
+                                    s.interval_ms
+                                ))
+                                .size(11.0)
+                                .color(Color32::WHITE),
+                            );
+                        }
+                    });
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(60));
+                finished = macro_record_step(ui.ctx(), rec) || rec.stop_requested;
+            }
+
+            if finished {
+                if let Some(rec) = st.macro_recording.take() {
+                    st.capture_keyboard = false;
+                    let mut rec_steps = rec.steps;
+                    // 末键已抬起时，把末步间隔改写为按住时长（更贴近回放节奏）；
+                    // 仍按住时无从得知时长，保留按上一步推算的间隔
+                    if let (Some(lp), Some(lr)) = (rec.last_press, rec.last_release) {
+                        if lr > lp {
+                            if let Some(last) = rec_steps.last_mut() {
+                                last.interval_ms =
+                                    ((lr - lp).as_millis() as u32).min(MACRO_MAX_INTERVAL_MS);
+                            }
+                        }
+                    }
+                    if rec_steps.is_empty() {
+                        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                            crate::state::ToastKind::Info,
+                            i18n::t("keymap.macro.record_cancelled").to_string(),
+                        ));
+                    } else {
+                        let _ = handle.ui_tx.send(crate::state::UiEvent::Toast(
+                            crate::state::ToastKind::Success,
+                            i18n::t("keymap.macro.record_done")
+                                .replace("{count}", &rec_steps.len().to_string()),
+                        ));
+                        steps = rec_steps;
+                    }
+                }
+            } else if st.macro_recording.is_none() {
+                // 非录制态：步骤编辑器 + 录制入口条
+                ui.label(
+                    egui::RichText::new(i18n::t("keymap.chord.label"))
+                        .weak()
+                        .size(11.0),
+                );
+                let mut i = 0;
+                while i < steps.len() {
+                    let row = ui.horizontal(|ui| {
+                        hid_key_combo(ui, format!("macro-step-{i}").as_str(), &mut steps[i].code);
+                        // ⇧ 仅字母键（0x04~0x1D）有意义：固件对大写字母自动附 Shift
+                        if (0x04..=0x1D).contains(&steps[i].code) {
+                            ui.toggle_value(&mut steps[i].shift, "⇧")
+                                .on_hover_text(i18n::t("keymap.macro.shift_hint"));
+                        }
+                        ui.add(
+                            egui::DragValue::new(&mut steps[i].interval_ms)
+                                .range(0..=MACRO_MAX_INTERVAL_MS)
+                                .suffix("ms"),
+                        )
+                        .on_hover_text(i18n::t("keymap.macro.step_label"));
+                        let removable = steps.len() > 1;
+                        ui.add_enabled(removable, egui::Button::new("×"))
+                            .on_disabled_hover_text(i18n::t("keymap.macro.keep_one"))
+                            .on_hover_text(i18n::t("keymap.macro.remove"))
+                            .clicked()
+                    });
+                    if row.inner {
+                        steps.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                // 添加步骤按钮 + 挂起 ComboBox（同 Chord 添加模式）
+                if steps.len() >= MACRO_MAX_STEPS {
+                    ui.label(
+                        egui::RichText::new(i18n::t("keymap.macro.max_steps"))
+                            .weak()
+                            .size(10.0)
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                let mut add: u16 = 0;
+                let combo_id = ui.id().with("macro-add-combo");
+                let mut open = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(combo_id).unwrap_or(false));
+                let resp = ui.add(
+                    crate::ui::fonts::IconTextButton::new(
+                        crate::ui::icons::KEYMAP_ADD_KEY,
+                        i18n::t("keymap.macro.add"),
+                        13.0,
+                    )
+                    .min_size(egui::vec2(120.0, 24.0))
+                    .corner_radius(egui::CornerRadius::same(6)),
+                );
+                if resp.clicked() {
+                    open = !open;
+                }
+                if open {
+                    egui::ComboBox::from_id_salt("macro-add")
+                        .selected_text(i18n::t("keymap.chord.pick"))
+                        .show_ui(ui, |cb| {
+                            for (c, name) in HID_KEY_CHOICES.iter() {
+                                if cb
+                                    .selectable_label(add == *c, format!("{name} (0x{c:02X})"))
+                                    .clicked()
+                                {
+                                    add = *c;
+                                    open = false;
+                                }
+                            }
+                        });
+                }
+                ui.ctx().data_mut(|d| d.insert_temp(combo_id, open));
+                if add != 0 && steps.len() < MACRO_MAX_STEPS {
+                    steps.push(MacroStep {
+                        code: add,
+                        shift: false,
+                        interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+                    });
+                }
+
+                // 录制入口条（点击进入捕获，替代手动逐键添加）
+                ui.add_space(4.0);
+                macro_record_bar_ui(ui, st);
+            }
+            *current = KeyAction::Macro(steps);
+        }
         _ => {}
     }
 }
@@ -2730,6 +3093,25 @@ fn default_for_kind(kind: usize, prev: &KeyAction) -> KeyAction {
         },
         4 => KeyAction::Text(String::new()),
         5 => KeyAction::Function(String::new()),
+        6 => match prev {
+            // Keyboard/Combo 主键迁移为单步宏；同类变体保持现值
+            KeyAction::Keyboard(c) => KeyAction::Macro(vec![MacroStep {
+                code: *c,
+                shift: false,
+                interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+            }]),
+            KeyAction::Combo { code, .. } => KeyAction::Macro(vec![MacroStep {
+                code: *code,
+                shift: false,
+                interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+            }]),
+            KeyAction::Macro(m) if !m.is_empty() => KeyAction::Macro(m.clone()),
+            _ => KeyAction::Macro(vec![MacroStep {
+                code: 0x04,
+                shift: false,
+                interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+            }]),
+        },
         _ => KeyAction::None,
     }
 }

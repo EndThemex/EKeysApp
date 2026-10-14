@@ -96,6 +96,7 @@ pub(super) const ENTRIES: &[Entry] = &[
     // ---- 动作标签（KeyAction::label）----
     ("proto.action.none", "未绑定", "Unbound"),
     ("proto.action.text", "文本:{text}", "Text: {text}"),
+    ("proto.action.macro", "宏:{steps}", "Macro: {steps}"),
     // ---- 音频内容校验错误（validate_audio_content → Toast）----
     (
         "proto.audio.container_mp4",

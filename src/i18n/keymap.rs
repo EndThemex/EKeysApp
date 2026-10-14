@@ -306,6 +306,32 @@ pub(super) const ENTRIES: &[Entry] = &[
     ("keymap.chord.remove", "移除该键", "Remove this key"),
     ("keymap.chord.add", "添加按键", "Add key"),
     ("keymap.chord.pick", "选择按键…", "Choose a key…"),
+    // ---- 宏序列 ----
+    ("keymap.kind.macro", "宏序列", "Macro sequence"),
+    (
+        "keymap.macro.base_only",
+        "宏仅支持单击层（FUN 组合层无宏通道）",
+        "Macro only on the click layer (no macro channel on FUN layers)",
+    ),
+    ("keymap.macro.step_label", "间隔 (ms)", "Delay (ms)"),
+    (
+        "keymap.macro.shift_hint",
+        "固件对大写字母自动加 Shift",
+        "Firmware adds Shift for uppercase letters",
+    ),
+    ("keymap.macro.add", "添加步骤", "Add step"),
+    ("keymap.macro.remove", "移除该步", "Remove this step"),
+    ("keymap.macro.keep_one", "至少保留 1 步", "At least one step"),
+    ("keymap.macro.max_steps", "最多 5 步", "Max 5 steps"),
+    ("keymap.macro.record", "录制", "Record"),
+    ("keymap.macro.record_stop", "结束录制", "Stop recording"),
+    (
+        "keymap.macro.record_hint",
+        "在本窗口依次按键实录节奏；Esc 或按钮结束（最多 5 步，Esc 步骤请用下拉添加；Shift+数字等符号键仅记录主键）",
+        "Press keys in this window to capture timing; Esc or button ends (max 5 steps; add Esc via dropdown; shifted symbols record the base key only)",
+    ),
+    ("keymap.macro.record_done", "已录制 {count} 步", "Recorded {count} steps"),
+    ("keymap.macro.record_cancelled", "录制已取消", "Recording cancelled"),
     // ---- 文本注入 ----
     (
         "keymap.text.hint",

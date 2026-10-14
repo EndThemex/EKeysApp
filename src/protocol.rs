@@ -1271,6 +1271,8 @@ pub const MOD_GUI: u8 = 1 << 3; // LWin 0xE3
 /// - 固件 `normal` 通道：`+` 分隔多段**同时按下**，段可为单字符键名 / `0xNN` /
 ///   修饰键名（Ctrl/Shift/Alt/Win，大小写不敏感）；
 /// - 固件 `text` 通道：ASCII 文本注入（≤128 字符），按键触发整串输出一次；
+/// - 固件 `macro` 通道：宏序列（仅单击层），每步 `键名[:间隔ms]`、`+` 分隔，
+///   逐步 press→间隔→release 播放；
 /// - 固件 `function` 通道：单槽组合键（如 `Ctrl+c`，整串传入）、单独修饰键、
 ///   功能串 `KEY_FUNCTION_ASR`；`MEDIA_*` / `MOUSE_*` 等其它串固件
 ///   **无法解析**（按键无效），App 仅原样透传展示，不伪造语义。
@@ -1286,9 +1288,29 @@ pub enum KeyAction {
     Chord(Vec<u16>),
     /// 文本注入：按键触发整串输出一次（ASCII ≤128）
     Text(String),
+    /// 宏序列：逐步 press→间隔→release（固件 macro 通道，仅单击层）
+    Macro(Vec<MacroStep>),
     /// 固件功能串原样透传（`KEY_FUNCTION_ASR` / `MEDIA_PLAY` / 任意未识别串）
     Function(String),
 }
+
+/// 宏步骤：单键 token + 间隔 ms。
+///
+/// `shift=true` 仅对字母键（0x04~0x1D）有意义：编码为大写字母名
+/// （固件 resolveKeyWithModifier 对 'A'~'Z' 自动附 Shift）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroStep {
+    pub code: u16,
+    pub shift: bool,
+    pub interval_ms: u32,
+}
+
+/// 固件宏通道步数上限（kKeyMappingMacrosCount）。
+pub const MACRO_MAX_STEPS: usize = 5;
+/// 宏步骤无 ":ms" 后缀时的默认间隔（固件 kMacroStepDefaultMs）。
+pub const MACRO_DEFAULT_INTERVAL_MS: u32 = 20;
+/// 宏步骤间隔上限（固件 kMacroStepMaxMs，越界视为畸形串）。
+pub const MACRO_MAX_INTERVAL_MS: u32 = 60_000;
 
 impl Default for KeyAction {
     fn default() -> Self {
@@ -1385,6 +1407,19 @@ impl KeyAction {
                 }
                 i18n::t("proto.action.text").replace("{text}", &d)
             }
+            KeyAction::Macro(steps) => {
+                // 摘要仿 Text 分支：超 12 字符截断加 …，避免 DiffBar/Drawer 撑爆
+                let summary = steps
+                    .iter()
+                    .map(macro_step_display)
+                    .collect::<Vec<_>>()
+                    .join("→");
+                let mut d: String = summary.chars().take(12).collect();
+                if summary.chars().count() > 12 {
+                    d.push('…');
+                }
+                i18n::t("proto.action.macro").replace("{steps}", &d)
+            }
             KeyAction::Function(f) => function_label(f),
         }
     }
@@ -1430,6 +1465,22 @@ impl KeyAction {
                 // 固件上限 128 字符（kMaxTextLen），App 端先行截断兜底
                 e.text = t.chars().take(128).collect();
             }
+            KeyAction::Macro(steps) => {
+                // 每步始终带 ":ms"（往返无损）；Shift+字母编码为大写字母名，
+                // 其余用 0xNN 字面量（固件可无损解析）
+                e.macro_ = steps
+                    .iter()
+                    .map(|s| {
+                        let name = if s.shift && (0x04..=0x1D).contains(&s.code) {
+                            ((b'A' + (s.code - 0x04) as u8) as char).to_string()
+                        } else {
+                            format!("0x{:02X}", s.code)
+                        };
+                        format!("{name}:{}", s.interval_ms)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("+");
+            }
             KeyAction::Function(f) => e.function = f.trim().to_string(),
         }
         e
@@ -1454,12 +1505,68 @@ impl KeyAction {
         }
         let m = e.macro_.trim();
         if !m.is_empty() {
-            // 固件宏通道暂未实现播放（协议文档 §7.1"请勿使用"）；
-            // 原样透传到 function 通道仅保留可见性，不会凭空产生输出。
-            return KeyAction::Function(m.to_string());
+            // 严格解析 "键名[:间隔ms]" 步骤；畸形整体回退 Function(原文)
+            return parse_macro_string(m);
         }
         KeyAction::None
     }
+}
+
+/// 宏步骤展示名：Shift+字母 → 大写字母，其余走 `hid_key_label`。
+pub fn macro_step_display(s: &MacroStep) -> String {
+    if s.shift && (0x04..=0x1D).contains(&s.code) {
+        return ((b'A' + (s.code - 0x04) as u8) as char).to_string();
+    }
+    hid_key_label(s.code)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("0x{:02X}", s.code))
+}
+
+/// 解析固件 `macro` 通道字符串（每步 `键名[:间隔ms]`，`+` 分隔）。
+///
+/// 严格解析：任一步畸形（空段 / 步数超上限 / 键名不认识 / 间隔非数字或
+/// 越界）→ 整体回退 `Function(原文)`，保证 GET→应用→SET 的整表下发
+/// **不会静默清掉**设备上 App 不认识的配置。旧串（如 `Ctrl+c`）因修饰键名
+/// 非单键 token 天然回退。单字符大写字母 → `shift=true`（固件自动附 Shift）。
+fn parse_macro_string(m: &str) -> KeyAction {
+    let mut steps: Vec<MacroStep> = Vec::new();
+    for seg in m.split('+') {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            return KeyAction::Function(m.to_string());
+        }
+        let (name, interval) = match seg.rsplit_once(':') {
+            Some((n, tail)) if tail.is_empty() => (n, MACRO_DEFAULT_INTERVAL_MS),
+            Some((n, tail)) if tail.bytes().all(|b| b.is_ascii_digit()) => {
+                match tail.parse::<u32>() {
+                    Ok(v) if v <= MACRO_MAX_INTERVAL_MS => (n, v),
+                    _ => return KeyAction::Function(m.to_string()),
+                }
+            }
+            // 无 ":"（纯键名）或 ":" 后非纯数字（键名本身含 ":" 之外的形状
+            // 交由 name_to_hid 判定，畸形最终回退）
+            _ => (seg, MACRO_DEFAULT_INTERVAL_MS),
+        };
+        let name = name.trim();
+        let mut chars = name.chars();
+        let shift = matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+            && chars.next().is_none();
+        let Some(code) = name_to_hid(name) else {
+            return KeyAction::Function(m.to_string());
+        };
+        steps.push(MacroStep {
+            code,
+            shift,
+            interval_ms: interval,
+        });
+        if steps.len() > MACRO_MAX_STEPS {
+            return KeyAction::Function(m.to_string());
+        }
+    }
+    if steps.is_empty() {
+        return KeyAction::Function(m.to_string());
+    }
+    KeyAction::Macro(steps)
 }
 
 /// 解析固件 `normal` 通道字符串（`+` 分段同时按下）。
@@ -2099,7 +2206,10 @@ impl KeymapData {
                         .unwrap_or(KeyAction::None)
                 };
                 let mut e = get(LAYER_BASE).to_firmware_entry(i as u8 + 1);
-                // FUN 组合层：借用 to_firmware_entry 的通道编码，拷进 combo 字段
+                // FUN 组合层：借用 to_firmware_entry 的通道编码，拷进 combo 字段。
+                // 注意：fun 分支若绑定宏（KeyAction::Macro）只会产出 macro_ 串，
+                // 这里不拷进 combo 字段是**正确行为**——固件 FUN 组合层无宏通道；
+                // UI 侧已对 FUN 层禁选宏（panel_keymap action-kind ComboBox）。
                 let c1 = get(LAYER_FUN1).to_firmware_entry(e.physical);
                 e.combo1_normal = c1.normal;
                 e.combo1_text = c1.text;
@@ -3002,7 +3112,7 @@ mod tests {
             KeyAction::Function("MEDIA_PLAY".into())
         );
 
-        // macro 通道内容透传保留（固件宏未实现，不静默丢弃）
+        // macro 通道：无 ":ms" 后缀的步用默认间隔 20ms（已实现播放）
         let e = FirmwareKeyEntry {
             physical: 1,
             macro_: "a+b".into(),
@@ -3010,12 +3120,140 @@ mod tests {
         };
         assert_eq!(
             KeyAction::from_firmware_entry(&e),
-            KeyAction::Function("a+b".into())
+            KeyAction::Macro(vec![
+                MacroStep {
+                    code: 0x04,
+                    shift: false,
+                    interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+                },
+                MacroStep {
+                    code: 0x05,
+                    shift: false,
+                    interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+                },
+            ])
         );
 
         // 空 → None
         let e = FirmwareKeyEntry::default();
         assert_eq!(KeyAction::from_firmware_entry(&e), KeyAction::None);
+    }
+
+    /// 宏通道编码/解析往返与畸形回退。
+    #[test]
+    fn macro_string_roundtrip_and_fallback() {
+        // 编码往返：0xNN 字面量 + Shift+字母（大写名），始终带 ":ms"
+        let action = KeyAction::Macro(vec![
+            MacroStep {
+                code: 0x04,
+                shift: false,
+                interval_ms: 80,
+            },
+            MacroStep {
+                code: 0x09,
+                shift: true,
+                interval_ms: 120,
+            },
+        ]);
+        let e = action.to_firmware_entry(1);
+        assert_eq!(e.macro_, "0x04:80+F:120");
+        assert_eq!(KeyAction::from_firmware_entry(&e), action);
+
+        // 默认间隔 + 具名键
+        let e = FirmwareKeyEntry {
+            physical: 1,
+            macro_: "0x04+0x28:50".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            KeyAction::from_firmware_entry(&e),
+            KeyAction::Macro(vec![
+                MacroStep {
+                    code: 0x04,
+                    shift: false,
+                    interval_ms: MACRO_DEFAULT_INTERVAL_MS,
+                },
+                MacroStep {
+                    code: 0x28,
+                    shift: false,
+                    interval_ms: 50,
+                },
+            ])
+        );
+
+        // 畸形串整体回退 Function(原文)：
+        // 修饰键名多段步骤 / 非数字间隔 / 间隔越界 / 空段 / 超 5 步
+        for bad in [
+            "Ctrl+c",
+            "0x04:abc",
+            "0x04:999999",
+            "0x04++0x05",
+            "0x04+0x05+0x06+0x07+0x08+0x09",
+        ] {
+            let e = FirmwareKeyEntry {
+                physical: 1,
+                macro_: bad.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                KeyAction::from_firmware_entry(&e),
+                KeyAction::Function(bad.into()),
+                "畸形宏串应整体回退 Function: {bad}"
+            );
+        }
+    }
+
+    /// KeymapData：Base 层绑宏 → macro_ 通道往返；FUN 层绑宏被丢弃
+    /// （固件组合层无宏通道，预期行为）。
+    #[test]
+    fn keymap_macro_layer_semantics() {
+        let mut kd = KeymapData::demo_60();
+        let macro_action = KeyAction::Macro(vec![MacroStep {
+            code: 0x04,
+            shift: false,
+            interval_ms: 80,
+        }]);
+        {
+            let p = kd.profile_mut(0).unwrap();
+            p.bindings.insert(
+                KeyRef {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                macro_action.clone(),
+            );
+            p.bindings.insert(
+                KeyRef {
+                    layer: 1,
+                    row: 0,
+                    col: 1,
+                },
+                macro_action.clone(),
+            );
+        }
+        let entries = kd.to_firmware_entries();
+        assert_eq!(entries[0].macro_, "0x04:80");
+        // FUN1 层绑宏：combo 字段不承载宏
+        assert_eq!(entries[1].macro_, "");
+        assert!(
+            entries[1].combo1_normal.is_empty()
+                && entries[1].combo1_text.is_empty()
+                && entries[1].combo1_function.is_empty()
+        );
+
+        // 回写还原 Base 层宏
+        let mut kd2 = KeymapData::demo_60();
+        assert!(kd2.apply_firmware_entries(&entries));
+        let p = kd2.profile(0).unwrap();
+        assert_eq!(
+            p.bindings.get(&KeyRef {
+                layer: 0,
+                row: 0,
+                col: 0
+            }),
+            Some(&macro_action)
+        );
     }
 
     /// KeymapData ↔ 固件 11 键往返：demo 布局 11 个按键全部可还原。
