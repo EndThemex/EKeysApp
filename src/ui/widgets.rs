@@ -101,6 +101,18 @@ pub enum ConfirmOutcome {
     No,
 }
 
+/// 弹窗底部按钮行：内容与按钮之间加一条分隔线，按钮右对齐（次操作在左、
+/// 主操作在右），统一两个弹窗的按钮位置，避免看起来随意摆放。
+fn dialog_button_row(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(2.0);
+    ui.with_layout(
+        egui::Layout::right_to_left(egui::Align::Center),
+        add_buttons,
+    );
+}
+
 pub fn show_confirm(
     ctx: &egui::Context,
     title: &str,
@@ -119,15 +131,18 @@ pub fn show_confirm(
         .min_size([320.0, 140.0])
         .max_size([520.0, 320.0])
         .show(ctx, |ui| {
-            ui.label(body);
-            ui.add_space(12.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // 正文：让长文本按弹窗宽度自然换行，不用 label 的自动换行
+            // 把窗口越撑越宽。
+            ui.add(egui::Label::new(egui::RichText::new(body).size(14.0)).wrap());
+            dialog_button_row(ui, |ui| {
+                // right_to_left：先添加的在最右，主操作（继续）放最右。
                 let primary = egui::Button::new(
                     egui::RichText::new(i18n::t("dlg.confirm.continue"))
                         .color(egui::Color32::WHITE),
                 )
                 .fill(crate::ui::ACCENT)
-                .corner_radius(egui::CornerRadius::same(6));
+                .corner_radius(egui::CornerRadius::same(6))
+                .min_size(egui::vec2(76.0, 24.0));
                 if ui.add(primary).clicked() {
                     outcome = ConfirmOutcome::Yes;
                 }
@@ -211,10 +226,17 @@ pub fn show_local_settings(
             });
         });
 
-        // 3) 关闭
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button(i18n::t("common.close")).clicked() {
+        // 3) 关闭：与确认弹窗同一套底部按钮行（分隔线 + 右对齐）
+        dialog_button_row(ui, |ui| {
+            if ui
+                .add(
+                    egui::Button::new(i18n::t("common.close"))
+                        .fill(crate::ui::ACCENT)
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .min_size(egui::vec2(76.0, 24.0)),
+                )
+                .clicked()
+            {
                 result = Some(false);
             }
         });
