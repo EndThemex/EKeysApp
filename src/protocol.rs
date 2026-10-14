@@ -935,8 +935,10 @@ pub struct PcStatus {
     pub cpu_usage_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_usage_percent: Option<f32>,
+    /// GPU 使用率（0~100，`\GPU Engine(*engtype_3D)\Utilization Percentage`
+    /// 多实例求和；原 cpu_temp_c 字段从未采集，废弃改名）
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_temp_c: Option<f32>,
+    pub gpu_usage_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_io_percent: Option<f32>,
     /// 磁盘空间使用率（0~100，全固定盘加权；GetDiskFreeSpaceExW）
@@ -3480,7 +3482,7 @@ mod tests {
         };
         let v = serde_json::to_value(&s).to("v");
         assert_eq!(v["caps_lock"], true);
-        assert!(v.get("cpu_temp_c").is_none());
+        assert!(v.get("gpu_usage_percent").is_none());
         assert!(v.get("network_down_kbps").is_none());
     }
 

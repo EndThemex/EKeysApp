@@ -1346,6 +1346,12 @@ impl AppHandle {
         if pc_status_float_changed(old.disk_space_percent, new.disk_space_percent) {
             return true;
         }
+        if pc_status_float_changed(old.disk_io_percent, new.disk_io_percent) {
+            return true;
+        }
+        if pc_status_float_changed(old.gpu_usage_percent, new.gpu_usage_percent) {
+            return true;
+        }
         // 网速每拍都在抖，接通采集后推送会接近节流间隔节奏（约 1Hz），
         // 与音乐状态推送同量级，固件侧可承受
         if pc_status_float_changed(old.network_up_kbps, new.network_up_kbps) {
@@ -1354,8 +1360,6 @@ impl AppHandle {
         if pc_status_float_changed(old.network_down_kbps, new.network_down_kbps) {
             return true;
         }
-        // 暂未采集的扩展字段（cpu_temp_c / disk_io_percent）：
-        // 两侧都是 None，相等即不变；将来真接上采集后此函数需要再追加。
         false
     }
 
@@ -1394,6 +1398,11 @@ impl AppHandle {
         if !due {
             return;
         }
+        // 到拍即先推进节流时刻：无论后续"无变化不发"还是"发送失败"，
+        // 采集/比较都保持严格 1s 节奏。若只在发送成功时更新，"无变化"分支
+        // 会让 last_at 永远停在旧时刻 → 下一帧 due 仍为 true → snapshot()
+        // 变成每帧执行（CPU 采样窗口退化到一帧，PDH rate 噪声大且空耗）。
+        *self.last_pc_status_sent_at.lock().unwrap() = Some(Instant::now());
 
         // 采集
         let new_snap = crate::pc_status::snapshot();
@@ -1405,10 +1414,7 @@ impl AppHandle {
             Some(prev) => Self::pc_status_has_changed(prev, &new_snap),
         };
         if !changed {
-            // 即使不发送也要刷新节流时刻，否则下一拍立刻又会重做采集 +
-            // 比较；下一拍会再次因 elapsed>=INTERVAL 而进入到这里。
-            // 这里**不**更新 last_at（保持原有节流节奏），让下一拍正常
-            // 1s 后再尝试——避免抖动场景下"持续判无变化 → 永远不发但持续采集"。
+            // 无显著变化：本拍不发送；节流时刻已推进，下一拍 1s 后再试。
             return;
         }
 
@@ -1702,7 +1708,7 @@ mod tests {
             network_connected: Some(net),
             cpu_usage_percent: cpu,
             memory_usage_percent: mem,
-            cpu_temp_c: None,
+            gpu_usage_percent: None,
             disk_io_percent: None,
             disk_space_percent: None,
             network_up_kbps: None,

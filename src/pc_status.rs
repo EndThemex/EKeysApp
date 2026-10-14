@@ -4,19 +4,21 @@
 //! 字段全集：
 //! - `caps_lock` / `num_lock` / `scroll_lock`（Win32 `GetAsyncKeyState`）
 //! - `network_connected`（wininet `InternetGetConnectedState`）
-//! - `cpu_usage_percent`（Win32 `GetSystemTimes`；模块内置 CPU 采样器
-//!   记录上一拍 idle/kernel/user 时间以计算 delta）
+//! - `cpu_usage_percent`（PDH `\Processor Information(_Total)\% Processor Utility`，
+//!   与 Win10+ 任务管理器同源，按实际运行频率加权）
 //! - `memory_usage_percent`（Win32 `GlobalMemoryStatusEx`）
 //!
-//! `cpu_temp_c` / `disk_io_percent`
-//! 需要 PDH / WMI / `GetIfTable` 等更重量级的 API，本轮先不采集（保持 None，
-//! 序列化时自动跳过）。
+//! `cpu_temp_c` 已废弃（从未采集）：设备端"CPU-T"槽位改为显示 GPU 使用率，
+//! 对应协议字段 `gpu_usage_percent`（PDH `\GPU Engine(*engtype_3D)` 求和）。
 //!
 //! 本轮已接通：
 //! - `network_up_kbps` / `network_down_kbps`（`GetIfTable` 网卡字节计数差值，
 //!   跳过环回与非操作状态接口）
 //! - `disk_space_percent`（`GetLogicalDrives` + `GetDriveTypeW` 过滤固定盘，
 //!   `GetDiskFreeSpaceExW` 加权汇总）
+//! - `disk_io_percent`（PDH `\PhysicalDisk(_Total)\% Disk Time`）
+//! - `gpu_usage_percent`（PDH `\GPU Engine(*engtype_3D)\Utilization Percentage`
+//!   多实例求和，实例列表每 10s 重建一次）
 
 use crate::protocol::PcStatus;
 
@@ -27,13 +29,19 @@ mod platform {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetIfTable, IF_OPER_STATUS_OPERATIONAL, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IFTABLE,
     };
+    use windows_sys::Win32::Networking::WinInet::InternetGetConnectedState;
     use windows_sys::Win32::Storage::FileSystem::{
         GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
     };
+    use windows_sys::Win32::System::Performance::{
+        PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_0, PDH_FMT_DOUBLE, PDH_MORE_DATA,
+        PdhAddCounterW, PdhCloseQuery, PdhCollectQueryData, PdhExpandWildCardPathW,
+        PdhGetFormattedCounterValue, PdhOpenQueryW,
+    };
+    use windows_sys::Win32::System::SystemInformation::{
+        GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
     use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
-    use windows_sys::Win32::Networking::WinInet::InternetGetConnectedState;
-    use windows_sys::Win32::System::SystemInformation::{GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    use windows_sys::Win32::System::Threading::GetSystemTimes;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_CAPITAL, VK_NUMLOCK, VK_SCROLL,
     };
@@ -73,36 +81,6 @@ mod platform {
         unsafe { InternetGetConnectedState(&mut flags, 0) != 0 }
     }
 
-    /// Win32 FILETIME（100ns 单位，无符号 64 位）。
-    /// 直接转 u128 防止加法溢出（边角场景：连续高负载时间累加可能溢出 u64）。
-    type Filetime = u128;
-
-    fn filetime_to_u128(ft: &windows_sys::Win32::Foundation::FILETIME) -> Filetime {
-        ((ft.dwHighDateTime as u128) << 32) | (ft.dwLowDateTime as u128)
-    }
-
-    /// 当前 idle / kernel / user 时间（100ns 累计）。失败返回 None。
-    fn system_times() -> Option<(Filetime, Filetime, Filetime)> {
-        // FILETIME 在 windows-sys 0.52 是 `MaybeUninit` 风格？实测需要 `unsafe`
-        // zeroed（struct 含 padding）。直接 MaybeUninit + assume_init 更显式，
-        // 但 zeroed() 在 FILETIME 上是 OK 的（两个 DWORD，无 invalid bit pattern）。
-        let mut idle: windows_sys::Win32::Foundation::FILETIME = unsafe { std::mem::zeroed() };
-        let mut kernel: windows_sys::Win32::Foundation::FILETIME = unsafe { std::mem::zeroed() };
-        let mut user: windows_sys::Win32::Foundation::FILETIME = unsafe { std::mem::zeroed() };
-        // GetSystemTimes 第二个参数历史上文档有些模糊（"system" 含 idle
-        // 时间还是分开返回）；windows-sys 与 Win32 文档均明确 kernel +
-        // user 分别走两个参数。GetSystemTimes(idle, kernel, user)。
-        let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
-        if ok == 0 {
-            return None;
-        }
-        Some((
-            filetime_to_u128(&idle),
-            filetime_to_u128(&kernel),
-            filetime_to_u128(&user),
-        ))
-    }
-
     /// 系统内存使用率（0~100）。
     ///
     /// 返回 `None` 表示 `GlobalMemoryStatusEx` 失败（极少发生，主要是 OS API
@@ -126,62 +104,109 @@ mod platform {
         Some(ms.dwMemoryLoad as f32)
     }
 
-    /// CPU 采样器：记录上一拍的 idle / kernel / user 时间，
-    /// 下次调用时计算两次采样的差值得出 CPU 占用率。
+    /// CPU 采样器：PDH `\Processor Information(_Total)\% Processor Utility`。
+    ///
+    /// 选用理由：Win10+ 任务管理器的 CPU% 就是这个计数器——按**实际运行频率**
+    /// 加权（P-state / Turbo 状态下"100% 活跃但降频"会算出 < 100%）。
+    /// 旧实现 `GetSystemTimes` 是"忙时间简单平均"，不考虑频率，与任务管理器
+    /// 存在系统性偏差（异构核 / 睿频机器上常见 10%+ 差距）。
+    ///
+    /// 与旧实现的差异：
+    /// - `% Processor Utility` 返回 PDH 每次 collect 之间的**瞬时速率**（0~100
+    ///   已归一化），无需自行做 delta；首拍即可产出有效值（仍按惯例首拍返回
+    ///   None 建基线，保持与其它采样器一致的调用方语义）。
+    /// - 该计数器在极老旧系统 / 精简镜像上不存在 → AddCounter 失败 → 恒 None，
+    ///   调用方（协议 skip_serializing_if）自动跳过该字段。
+    ///
+    /// 查询常驻打开；collect 失败关闭重建，下次采样自愈。
     ///
     /// 使用 `OnceLock<Mutex<_>>` 全局共享：ui / tick_pc_status_push 与
     /// settings 面板的实时预览都会触发采集，必须在同一进程内看到一致的
     /// CPU% 序列。`Mutex` 仅在采集瞬间持有，开销可忽略。
     pub struct CpuSampler {
-        last_idle: Filetime,
-        last_kernel: Filetime,
-        last_user: Filetime,
-        /// 首次采样标志：首次没有 delta 数据，返回 None 让调用方跳过。
+        query: isize,
+        counter: isize,
         primed: bool,
+        last_collect_ms: u64,
     }
+
+    /// 最小采样窗口：推送 tick 与设置页预览共用本采样器，两者交错时可能在
+    /// 很短时间内连续 collect。PDH rate 计数器窗口过短会放大量化噪声（任务
+    /// 管理器同样是 ~1s 窗口），短于该值的调用直接返回 None。
+    const CPU_MIN_WINDOW_MS: u64 = 500;
 
     impl CpuSampler {
         const fn new() -> Self {
             Self {
-                last_idle: 0,
-                last_kernel: 0,
-                last_user: 0,
+                query: 0,
+                counter: 0,
                 primed: false,
+                last_collect_ms: 0,
             }
+        }
+
+        fn close(&mut self) {
+            if self.query != 0 {
+                unsafe { PdhCloseQuery(self.query) };
+            }
+            self.query = 0;
+            self.counter = 0;
+            self.primed = false;
+            self.last_collect_ms = 0;
+        }
+
+        fn ensure_open(&mut self) -> bool {
+            if self.query != 0 {
+                return true;
+            }
+            let Some(query) = open_query() else {
+                return false;
+            };
+            let path = wide(r"\Processor Information(_Total)\% Processor Utility");
+            let mut counter: isize = 0;
+            let rc = unsafe { PdhAddCounterW(query, path.as_ptr(), 0, &mut counter) };
+            if rc != 0 {
+                unsafe { PdhCloseQuery(query) };
+                return false;
+            }
+            self.query = query;
+            self.counter = counter;
+            self.primed = false;
+            true
         }
 
         /// 读取当前 CPU 占用率（0~100）。
         ///
-        /// 首次调用返回 `None`（建立基线）；之后基于 delta 计算。
-        /// kernel 时间含 idle 时间，所以公式为：
-        ///   busy = (Δkernel + Δuser) - Δidle
-        ///   total = Δkernel + Δuser
-        ///   cpu% = busy / total * 100
+        /// 首次调用返回 `None`（建立基线，同时让 PDH 内部完成第一次 rate 采样）；
+        /// 之后每次 collect 直接产出该拍的瞬时利用率。
+        /// 两次 collect 间隔 < [`CPU_MIN_WINDOW_MS`] 时返回 None（不推进基线），
+        /// 把有效采样留给下一次调用，避免过短窗口放大噪声。
         pub fn sample(&mut self) -> Option<f32> {
-            let (idle, kernel, user) = system_times()?;
+            if !self.ensure_open() {
+                return None;
+            }
+            let now = unsafe { GetTickCount64() };
+            if self.primed && now.saturating_sub(self.last_collect_ms) < CPU_MIN_WINDOW_MS {
+                return None;
+            }
+            if unsafe { PdhCollectQueryData(self.query) } != 0 {
+                self.close();
+                return None;
+            }
+            self.last_collect_ms = now;
             if !self.primed {
-                self.last_idle = idle;
-                self.last_kernel = kernel;
-                self.last_user = user;
+                // rate 计数器首拍无有效 delta（PDH 内部要两次 collect 才有速率）
                 self.primed = true;
                 return None;
             }
-            let d_idle = idle.saturating_sub(self.last_idle);
-            let d_kernel = kernel.saturating_sub(self.last_kernel);
-            let d_user = user.saturating_sub(self.last_user);
-            let total = d_kernel + d_user;
-            if total == 0 {
-                // 两次采样之间几乎无时间流逝（如 100ns 精度下相邻 tick），
-                // 返回 None 让调用方跳过本次推送（避免出现 0 / NaN）。
-                return None;
-            }
-            let busy = total.saturating_sub(d_idle);
-            self.last_idle = idle;
-            self.last_kernel = kernel;
-            self.last_user = user;
-            // 钳位 0~100，理论 total >= busy，busy/total 不应 >1，但浮点
-            // 误差下偶发 100.0000001，这里直接 clamp 保护固件 UI 显示。
-            Some(((busy as f64) / (total as f64) * 100.0).clamp(0.0, 100.0) as f32)
+            // CStatus 非零 = 样本无效（formatted_double 内部处理），返回 None
+            formatted_double(self.counter).map(|v| v.clamp(0.0, 100.0) as f32)
+        }
+    }
+
+    impl Drop for CpuSampler {
+        fn drop(&mut self) {
+            self.close();
         }
     }
 
@@ -323,6 +348,263 @@ mod platform {
         }
         Some(((total - free) as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as f32)
     }
+
+    // ---------- PDH 通用辅助（disk_io / gpu 共用） ----------
+
+    /// 字符串转 UTF-16 + NUL 终止（PDH 路径入参）。
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// 打开实时查询（数据源 NULL = 本机活动数据）。失败返回 None。
+    fn open_query() -> Option<isize> {
+        let mut query: isize = 0;
+        let rc = unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) };
+        if rc != 0 {
+            return None;
+        }
+        Some(query)
+    }
+
+    /// 读取单个计数器的 double 格式化值（CStatus 非零 = 样本无效）。
+    fn formatted_double(counter: isize) -> Option<f64> {
+        let mut value = PDH_FMT_COUNTERVALUE {
+            CStatus: 0,
+            Anonymous: PDH_FMT_COUNTERVALUE_0 { doubleValue: 0.0 },
+        };
+        let rc = unsafe {
+            PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, std::ptr::null_mut(), &mut value)
+        };
+        if rc != 0 || value.CStatus != 0 {
+            return None;
+        }
+        Some(unsafe { value.Anonymous.doubleValue })
+    }
+
+    /// 磁盘 IO 活动率采样器（0~100，`% Disk Time`）。
+    ///
+    /// `% Disk Time` 是 rate 型计数器：需两次 collect 才有有效值，
+    /// 首拍建基线返回 None（与 CPU/网速采样器语义一致）。
+    /// 查询常驻打开；collect 失败（极少见）关闭重建，下次采样自愈。
+    pub struct DiskIoSampler {
+        query: isize,
+        counter: isize,
+        primed: bool,
+    }
+
+    impl DiskIoSampler {
+        const fn new() -> Self {
+            Self {
+                query: 0,
+                counter: 0,
+                primed: false,
+            }
+        }
+
+        fn close(&mut self) {
+            if self.query != 0 {
+                unsafe { PdhCloseQuery(self.query) };
+            }
+            self.query = 0;
+            self.counter = 0;
+            self.primed = false;
+        }
+
+        fn ensure_open(&mut self) -> bool {
+            if self.query != 0 {
+                return true;
+            }
+            let Some(query) = open_query() else {
+                return false;
+            };
+            let path = wide(r"\PhysicalDisk(_Total)\% Disk Time");
+            let mut counter: isize = 0;
+            let rc = unsafe { PdhAddCounterW(query, path.as_ptr(), 0, &mut counter) };
+            if rc != 0 {
+                unsafe { PdhCloseQuery(query) };
+                return false;
+            }
+            self.query = query;
+            self.counter = counter;
+            self.primed = false;
+            true
+        }
+
+        fn sample(&mut self) -> Option<f32> {
+            if !self.ensure_open() {
+                return None;
+            }
+            if unsafe { PdhCollectQueryData(self.query) } != 0 {
+                self.close();
+                return None;
+            }
+            if !self.primed {
+                // rate 计数器首拍无有效 delta
+                self.primed = true;
+                return None;
+            }
+            formatted_double(self.counter).map(|v| v.clamp(0.0, 100.0) as f32)
+        }
+    }
+
+    impl Drop for DiskIoSampler {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    pub fn disk_io_sampler() -> &'static std::sync::Mutex<DiskIoSampler> {
+        static SAMPLER: OnceLock<std::sync::Mutex<DiskIoSampler>> = OnceLock::new();
+        SAMPLER.get_or_init(|| std::sync::Mutex::new(DiskIoSampler::new()))
+    }
+
+    /// 便捷包装：磁盘 IO 活动率（0~100），未就绪返回 None。
+    pub fn disk_io_percent() -> Option<f32> {
+        disk_io_sampler().lock().ok()?.sample()
+    }
+
+    /// GPU 使用率采样器（0~100）：`\GPU Engine(*engtype_3D)\Utilization Percentage`
+    /// 多实例求和（每个进程 × 每个引擎一条实例），瞬时值非 rate，首拍即可用。
+    ///
+    /// 实例集合随进程启停 / 引擎激活动态变化：每 [`GPU_REFRESH_INTERVAL_MS`]
+    /// 重建一次查询（关闭旧查询 → 展开通配符 → 逐实例 AddCounter）。
+    /// 无 GPU Engine 计数器的机器（精简系统 / 基础显示驱动）恒返回 None。
+    pub struct GpuSampler {
+        query: isize,
+        counters: Vec<isize>,
+        last_refresh_ms: u64,
+    }
+
+    /// GPU 实例列表重建周期：太频繁会放大 PDH 开销，太疏会漏新进程的引擎。
+    const GPU_REFRESH_INTERVAL_MS: u64 = 10_000;
+    /// 实例数上限（几十~几百正常，防异常系统撑爆 Vec）。
+    const GPU_MAX_INSTANCES: usize = 256;
+
+    impl GpuSampler {
+        const fn new() -> Self {
+            Self {
+                query: 0,
+                counters: Vec::new(),
+                last_refresh_ms: 0,
+            }
+        }
+
+        fn close(&mut self) {
+            if self.query != 0 {
+                unsafe { PdhCloseQuery(self.query) };
+            }
+            self.query = 0;
+            self.counters.clear();
+        }
+
+        /// 展开通配符实例并重建查询。任一步失败都落在"空列表 → 返回 None"。
+        fn refresh_instances(&mut self) {
+            self.close();
+            let Some(query) = open_query() else {
+                return;
+            };
+            let wildcard = wide(r"\GPU Engine(*engtype_3D)\Utilization Percentage");
+            // 两次调用模式：先探所需字符数（返回 PDH_MORE_DATA + 长度）
+            let mut len: u32 = 0;
+            let rc = unsafe {
+                PdhExpandWildCardPathW(
+                    std::ptr::null(),
+                    wildcard.as_ptr(),
+                    std::ptr::null_mut(),
+                    &mut len,
+                    0,
+                )
+            };
+            if rc != PDH_MORE_DATA || len == 0 {
+                unsafe { PdhCloseQuery(query) };
+                return;
+            }
+            let mut buf = vec![0u16; len as usize];
+            let rc = unsafe {
+                PdhExpandWildCardPathW(
+                    std::ptr::null(),
+                    wildcard.as_ptr(),
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    0,
+                )
+            };
+            if rc != 0 {
+                unsafe { PdhCloseQuery(query) };
+                return;
+            }
+            // multi-sz 缓冲：按 \0 分段，每段是一条已展开的完整计数器路径
+            let mut counters = Vec::new();
+            for seg in buf.split(|&c| c == 0) {
+                if seg.is_empty() {
+                    continue;
+                }
+                if counters.len() >= GPU_MAX_INSTANCES {
+                    break;
+                }
+                let mut path: Vec<u16> = seg.to_vec();
+                path.push(0);
+                let mut counter: isize = 0;
+                let rc = unsafe { PdhAddCounterW(query, path.as_ptr(), 0, &mut counter) };
+                if rc == 0 {
+                    counters.push(counter);
+                }
+            }
+            // 全部实例都加失败（如计数器被组策略禁用）：不留空查询
+            if counters.is_empty() {
+                unsafe { PdhCloseQuery(query) };
+                return;
+            }
+            self.query = query;
+            self.counters = counters;
+        }
+
+        fn sample(&mut self) -> Option<f32> {
+            let now = unsafe { GetTickCount64() };
+            if self.query == 0
+                || now.saturating_sub(self.last_refresh_ms) >= GPU_REFRESH_INTERVAL_MS
+            {
+                self.refresh_instances();
+                self.last_refresh_ms = now;
+            }
+            if self.counters.is_empty() {
+                return None;
+            }
+            if unsafe { PdhCollectQueryData(self.query) } != 0 {
+                self.close();
+                return None;
+            }
+            let mut total = 0f64;
+            let mut valid = 0usize;
+            for &c in &self.counters {
+                if let Some(v) = formatted_double(c) {
+                    total += v;
+                    valid += 1;
+                }
+            }
+            if valid == 0 {
+                return None;
+            }
+            // 多实例求和可能因多 GPU / 多引擎略超 100，钳位保护固件 UI
+            Some((total as f32).clamp(0.0, 100.0))
+        }
+    }
+
+    impl Drop for GpuSampler {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    pub fn gpu_sampler() -> &'static std::sync::Mutex<GpuSampler> {
+        static SAMPLER: OnceLock<std::sync::Mutex<GpuSampler>> = OnceLock::new();
+        SAMPLER.get_or_init(|| std::sync::Mutex::new(GpuSampler::new()))
+    }
+
+    /// 便捷包装：GPU 使用率（0~100），无计数器/未就绪返回 None。
+    pub fn gpu_usage_percent() -> Option<f32> {
+        gpu_sampler().lock().ok()?.sample()
+    }
 }
 
 #[cfg(not(windows))]
@@ -352,6 +634,12 @@ mod platform {
     pub fn disk_space_percent() -> Option<f32> {
         None
     }
+    pub fn disk_io_percent() -> Option<f32> {
+        None
+    }
+    pub fn gpu_usage_percent() -> Option<f32> {
+        None
+    }
 }
 
 /// 一次性快照：采集当前 PC 状态。
@@ -368,11 +656,10 @@ pub fn snapshot() -> PcStatus {
         cpu_usage_percent: platform::cpu_usage_percent(),
         memory_usage_percent: platform::memory_usage_percent(),
         disk_space_percent: platform::disk_space_percent(),
+        disk_io_percent: platform::disk_io_percent(),
+        gpu_usage_percent: platform::gpu_usage_percent(),
         network_up_kbps: speeds.map(|s| s.0),
         network_down_kbps: speeds.map(|s| s.1),
-        // 其余扩展字段暂不采集，保持 None（序列化自动跳过）。
-        cpu_temp_c: None,
-        disk_io_percent: None,
     }
 }
 
@@ -391,9 +678,6 @@ mod tests {
         assert!(s.network_connected.is_some());
         // 内存% 必须 Some（GlobalMemoryStatusEx 单次即可产出）
         assert!(s.memory_usage_percent.is_some());
-        // cpu_temp_c / disk_io_percent 暂不采集
-        assert!(s.cpu_temp_c.is_none());
-        assert!(s.disk_io_percent.is_none());
         // 内存% 应在 0~100
         let mem = s.memory_usage_percent.unwrap();
         assert!((0.0..=100.0).contains(&mem), "内存% 应在 0~100，实际 {mem}");
@@ -404,11 +688,21 @@ mod tests {
                 "磁盘空间% 应在 0~100，实际 {space}"
             );
         }
+        // 磁盘 IO / GPU：首拍可能 None（建基线 / 实例未就绪），Some 时必须在 0~100
+        if let Some(io) = s.disk_io_percent {
+            assert!(
+                (0.0..=100.0).contains(&io),
+                "磁盘 IO% 应在 0~100，实际 {io}"
+            );
+        }
+        if let Some(gpu) = s.gpu_usage_percent {
+            assert!((0.0..=100.0).contains(&gpu), "GPU% 应在 0~100，实际 {gpu}");
+        }
         // 网速首拍 None（建基线），之后 Some；不做具体值断言
     }
 
     /// 序列化应当只输出采集到的字段；CPU% 首次为 None 时被跳过；
-    /// cpu_temp_c / disk_io_percent 暂不采集，全部跳过。
+    /// 已废弃字段 cpu_temp_c 不再存在于结构体，永远不会输出。
     #[test]
     fn snapshot_serialization_omits_none_fields() {
         let s = snapshot();
@@ -419,20 +713,21 @@ mod tests {
         assert!(v.get("network_connected").is_some());
         // memory 应被序列化
         assert!(v.get("memory_usage_percent").is_some());
-        // 暂未实现的字段不应出现
+        // 已废弃字段不应出现
         assert!(v.get("cpu_temp_c").is_none());
-        assert!(v.get("disk_io_percent").is_none());
         // cpu_usage_percent / disk_space_percent / network_*_kbps 可能出现
         // 也可能不出现，取决于采样器是否已被本次测试链路预热过。
     }
 
-    /// CPU 采样器：连续两次采样，第二次必须返回 Some（首拍基线被填）。
+    /// CPU 采样器：连续两次采样，第二次可能返回 Some（首拍基线被填）。
+    /// 由于存在最小采样窗口保护（CPU_MIN_WINDOW_MS），窗口内第二次调用
+    /// 会返回 None——属预期行为，测试只要求不 panic 且 Some 时在 0~100。
     /// 平台不支持（测试在 Linux / CI 上跑）时直接返回 pass。
     #[test]
     fn cpu_sampler_second_sample_returns_value() {
         // 第一次：返回 None（基线）
         let _ = platform::cpu_usage_percent();
-        // 第二次：可能 Some / 也可能因 total=0 返回 None；测试只要不 panic。
+        // 第二次：窗口内返回 None；窗口外可能 Some；测试只要不 panic。
         let v = platform::cpu_usage_percent();
         if let Some(v) = v {
             assert!((0.0..=100.0).contains(&v), "CPU% 应在 0~100，实际 {v}");
