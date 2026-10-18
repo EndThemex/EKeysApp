@@ -121,10 +121,14 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
         ui.spacing_mut().item_spacing.x = 4.0;
         for t in [
             SettingsTab::Display,
-            SettingsTab::Keyboard,
+            // Keyboard tab（工作模式 / 键映射 Profile / 图标上传）随设备端 HID
+            // 精简停用（2026-10-12）：设备端已无键盘，工作模式切到蓝牙还会
+            // 关闭 WiFi 影响对时。代码与 match 分支保留，恢复时加回此处即可。
+            // SettingsTab::Keyboard,
             SettingsTab::Audio,
             // SettingsTab::Power 暂时隐藏，需要恢复时加回此处即可
-            SettingsTab::PcStatus,
+            // PcStatus tab 随设备端 cmd_pc_status 注销一并停用（2026-10-12）
+            // SettingsTab::PcStatus,
             SettingsTab::Firmware,
         ] {
             let selected = st.tab == t;
@@ -164,22 +168,24 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui, st: &mut SettingsPanelState) 
 
 fn display_tab(ui: &mut egui::Ui, snap: &DeviceSettings, draft: &mut DeviceSettings) {
     ui.group(|ui| {
-        ui.label(i18n::t("settings.display.theme"));
-        let mut theme = draft.tft_theme.max(snap.tft_theme);
-        egui::ComboBox::from_id_salt("tft-theme")
-            .selected_text(if theme == 0 {
-                i18n::t("settings.display.theme.dark")
-            } else {
-                i18n::t("settings.display.theme.light")
-            })
-            .show_ui(ui, |cb| {
-                cb.selectable_value(&mut theme, 0, i18n::t("settings.display.theme.dark"));
-                cb.selectable_value(&mut theme, 1, i18n::t("settings.display.theme.light"));
-            });
-        if theme != snap.tft_theme {
-            draft.tft_theme = theme;
-        }
-        ui.add_space(6.0);
+        // 主题切换随精简停用（2026-10-12）：设备仅剩主页 + 音频设置两屏，
+        // 深浅主题意义不大。保留亮度调节。恢复时撤掉注释即可。
+        // ui.label(i18n::t("settings.display.theme"));
+        // let mut theme = draft.tft_theme.max(snap.tft_theme);
+        // egui::ComboBox::from_id_salt("tft-theme")
+        //     .selected_text(if theme == 0 {
+        //         i18n::t("settings.display.theme.dark")
+        //     } else {
+        //         i18n::t("settings.display.theme.light")
+        //     })
+        //     .show_ui(ui, |cb| {
+        //         cb.selectable_value(&mut theme, 0, i18n::t("settings.display.theme.dark"));
+        //         cb.selectable_value(&mut theme, 1, i18n::t("settings.display.theme.light"));
+        //     });
+        // if theme != snap.tft_theme {
+        //     draft.tft_theme = theme;
+        // }
+        // ui.add_space(6.0);
 
         ui.label(i18n::t("settings.display.backlight"));
         // slider 优先展示 draft：存在待下发的亮度变更时显示草稿值，

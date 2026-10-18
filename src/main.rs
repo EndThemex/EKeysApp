@@ -67,7 +67,9 @@ fn main() -> eframe::Result {
         .store(cfg.music_status_push, std::sync::atomic::Ordering::Relaxed);
 
     // SMTC watcher：后台线程采集"正在播放"快照，UI tick 每帧读取共享槽位。
-    media::spawn_watcher(Arc::clone(&handle.latest_music_status));
+    // 随设备端 cmd_music 注销精简停用（2026-10-12）：0x0E 推送已停，
+    // 采集线程不再有消费者。恢复时撤掉注释并恢复 app.rs 的 tick 调用。
+    // media::spawn_watcher(Arc::clone(&handle.latest_music_status));
 
     let mut options = eframe::NativeOptions::default();
     if let Some([w, h]) = cfg.window_size {

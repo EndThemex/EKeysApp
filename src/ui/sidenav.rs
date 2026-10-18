@@ -24,13 +24,14 @@ const ITEMS: &[NavItem] = &[
         enabled: true,
         hint: Some("nav.device.hint"),
     },
-    NavItem {
-        page: Page::Keymap,
-        label: "nav.keymap",
-        icon: crate::ui::icons::NAV_KEYMAP,
-        enabled: true,
-        hint: Some("nav.keymap.hint"),
-    },
+    // 键映射随设备端 HID 精简停用（2026-10-12），入口注释保留待回滚
+    // NavItem {
+    //     page: Page::Keymap,
+    //     label: "nav.keymap",
+    //     icon: crate::ui::icons::NAV_KEYMAP,
+    //     enabled: true,
+    //     hint: Some("nav.keymap.hint"),
+    // },
     NavItem {
         page: Page::Lighting,
         label: "nav.lighting",
@@ -52,20 +53,22 @@ const ITEMS: &[NavItem] = &[
         enabled: true,
         hint: Some("nav.audio.hint"),
     },
-    NavItem {
-        page: Page::Voice,
-        label: "nav.voice",
-        icon: crate::ui::icons::NAV_VOICE,
-        enabled: true,
-        hint: Some("nav.voice.hint"),
-    },
-    NavItem {
-        page: Page::Log,
-        label: "nav.log",
-        icon: crate::ui::icons::NAV_LOG,
-        enabled: true,
-        hint: Some("nav.log.hint"),
-    },
+    // 语音识别随设备端 ASR 精简停用（2026-10-12），入口注释保留待回滚
+    // NavItem {
+    //     page: Page::Voice,
+    //     label: "nav.voice",
+    //     icon: crate::ui::icons::NAV_VOICE,
+    //     enabled: true,
+    //     hint: Some("nav.voice.hint"),
+    // },
+    // 日志入口随精简停用（2026-10-12），注释保留待回滚
+    // NavItem {
+    //     page: Page::Log,
+    //     label: "nav.log",
+    //     icon: crate::ui::icons::NAV_LOG,
+    //     enabled: true,
+    //     hint: Some("nav.log.hint"),
+    // },
     NavItem {
         page: Page::About,
         label: "nav.about",
@@ -102,25 +105,26 @@ pub fn show(handle: &AppHandle, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(10.0);
 
-    // 主导航：设备相关（设置 / 键映射 / 灯效 / WiFi / 语音 / 音效 → 共 6 项）
+    // 主导航：设备相关（设置 / 灯效 / WiFi / 音效 → 共 4 项；
+    // 键映射 / 语音入口已随设备端精简注释，见 ITEMS）
     nav_group(
         ui,
         handle,
         current,
         i18n::t("nav.group.device"),
-        &ITEMS[..6],
+        &ITEMS[..4],
     );
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
 
-    // 系统组：日志 / 关于
+    // 系统组：关于（日志入口已注释）
     nav_group(
         ui,
         handle,
         current,
         i18n::t("nav.group.system"),
-        &ITEMS[6..],
+        &ITEMS[4..],
     );
 }
 

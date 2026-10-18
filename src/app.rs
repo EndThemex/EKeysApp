@@ -311,26 +311,28 @@ impl WxiApp {
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
             let _ = self.handle.ui_tx.send(UiEvent::Navigate(Page::Settings));
         }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::L)) {
-            let _ = self.handle.ui_tx.send(UiEvent::Navigate(Page::Log));
-        }
+        // 日志页导航随精简停用（2026-10-12），快捷键注释保留待回滚
+        // if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::L)) {
+        //     let _ = self.handle.ui_tx.send(UiEvent::Navigate(Page::Log));
+        // }
         let nav = ctx.input(|i| {
             if !i.modifiers.ctrl {
                 None
             } else if i.key_pressed(egui::Key::Num1) {
                 Some(Page::Settings)
-            } else if i.key_pressed(egui::Key::Num2) {
-                Some(Page::Keymap)
+            // 键映射 / 语音 / 日志页随设备端精简停用（2026-10-12），快捷键注释
+            // } else if i.key_pressed(egui::Key::Num2) {
+            //     Some(Page::Keymap)
             } else if i.key_pressed(egui::Key::Num3) {
                 Some(Page::Lighting)
             } else if i.key_pressed(egui::Key::Num4) {
                 Some(Page::Wifi)
             } else if i.key_pressed(egui::Key::Num5) {
                 Some(Page::Audio)
-            } else if i.key_pressed(egui::Key::Num6) {
-                Some(Page::Voice)
-            } else if i.key_pressed(egui::Key::Num7) {
-                Some(Page::Log)
+            // } else if i.key_pressed(egui::Key::Num6) {
+            //     Some(Page::Voice)
+            // } else if i.key_pressed(egui::Key::Num7) {
+            //     Some(Page::Log)
             } else if i.key_pressed(egui::Key::Num8) {
                 Some(Page::About)
             } else {
@@ -374,12 +376,11 @@ impl eframe::App for WxiApp {
         self.handle.tick_reconnect();
         // 音效上传收尾：finished 置位后 Toast + 清理（任何页面都生效）
         panel_audio::tick_upload(&self.handle);
-        // PC 状态周期推送：Online 时每 1s 通过 0x0D 推给设备一次。
-        // tick 内部自带节流，未到节拍时直接 return，CPU 开销可忽略。
-        self.handle.tick_pc_status_push();
-        // 音乐状态周期推送：Online 时每 1s 通过 0x0E 推给设备一次（播放中），
-        // 暂停/无会话走 diff 稀疏推送；数据来自 SMTC watcher 线程共享槽位。
-        self.handle.tick_music_status_push();
+        // PC 状态周期推送（0x0D）随精简停用（2026-10-12）：设备端 cmd_pc_status
+        // 已注销，轮询只会得到错误回执。恢复时连同注释撤掉。
+        // self.handle.tick_pc_status_push();
+        // 音乐状态周期推送（0x0E / SMTC）随精简停用（2026-10-12），同上。
+        // self.handle.tick_music_status_push();
         self.handle_shortcuts(ctx);
 
         // chrome（顶栏/侧栏/底栏）统一底色，与内容区形成清晰分区
@@ -428,17 +429,15 @@ impl eframe::App for WxiApp {
         // Keymap 页面自带 top/central/bottom 三段（同步下发区固定在状态栏上方），
         // 必须在最外层 ctx 上注册面板，不能套在 CentralPanel + ScrollArea 里。
         let current_page = *self.handle.page.lock().unwrap();
-        // 进入 Keymap 页面时主动拉一次当前激活 Profile 的键映射：
-        // 设置页切换 Profile 后，0x10 推送可能因设备侧时序（不推送 /
-        // 推送被丢）导致 keymap.active_profile 与 settings.active_keymap_profile
-        // 不一致；进入页面时按需补拉，保证首帧展示的就是设备当前方案。
+        // 进入 Keymap 页面时主动拉键映射（0x05）：随设备端键映射精简停用
+        // （2026-10-12，Keymap 页导航入口已注释，此分支不可达），代码保留待回滚。
         // 失败静默（离线 / 旧固件），UI 会继续使用本地缓存。
-        if current_page == Page::Keymap && self.last_page != Some(Page::Keymap) {
-            if let Err(e) = self.handle.refresh_keymap_from_device() {
-                self.handle
-                    .log_kind(LogKind::App, format!("进入按键映射页拉取当前方案失败: {e}"));
-            }
-        }
+        // if current_page == Page::Keymap && self.last_page != Some(Page::Keymap) {
+        //     if let Err(e) = self.handle.refresh_keymap_from_device() {
+        //         self.handle
+        //             .log_kind(LogKind::App, format!("进入按键映射页拉取当前方案失败: {e}"));
+        //     }
+        // }
         // 进入音效页边沿：拉一次文件列表 + 键位绑定（离线 / 旧固件失败静默，
         // 页面内「刷新」按钮可手动重试）。
         if current_page == Page::Audio && self.last_page != Some(Page::Audio) {
